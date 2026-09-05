@@ -200,8 +200,9 @@ const RgbaImage* RenderGraph::nestedImage(const model::Clip& clip, const time::R
     // recursion, and growing this vector inside that call would move every
     // buffer in it -- leaving the level above compositing into freed memory.
     // Two levels of nesting was enough to reach it, and nothing nested twice.
-    if (nestedBuffers_.size() < static_cast<std::size_t>(kMaxNestDepth) * 2) {
-        nestedBuffers_.resize(static_cast<std::size_t>(kMaxNestDepth) * 2);
+    constexpr auto kSlots = static_cast<std::size_t>(kMaxNestDepth * 2);
+    if (nestedBuffers_.size() < kSlots) {
+        nestedBuffers_.resize(kSlots);
     }
     RgbaImage& buffer =
         nestedBuffers_[(static_cast<std::size_t>(depth_) * 2) + static_cast<std::size_t>(side)];

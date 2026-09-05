@@ -96,10 +96,10 @@ Status MediaBrowser::showFolder(const std::string& path) {
         // Folders marked rather than coloured: what somebody is scanning for
         // is "can I go in there", and a symbol survives any theme.
         auto* item = new QListWidgetItem(
-            entry.isFolder
-                ? QString("▸ %1").arg(QString::fromStdString(entry.name))
-                : QString("   %1   %2")
-                      .arg(QString::fromStdString(entry.name), chrome::humanSize(entry.bytes)),
+            entry.isFolder ? QString("▸ %1").arg(QString::fromStdString(entry.name))
+                           : QString("   %1   %2")
+                                 .arg(QString::fromStdString(entry.name),
+                                      chrome::humanSize(static_cast<double>(entry.bytes))),
             list_);
         item->setData(Qt::UserRole, QString::fromStdString(entry.path));
         item->setData(Qt::UserRole + 1, entry.isFolder);
