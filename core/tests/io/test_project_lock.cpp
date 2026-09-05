@@ -28,7 +28,7 @@ struct Folder {
     Folder(const Folder&) = delete;
     Folder& operator=(const Folder&) = delete;
 
-    [[nodiscard]] std::string project() const { return (root / "cut.zaro").string(); }
+    [[nodiscard]] std::string project() const { return (root / "cut.cutreel").string(); }
 };
 
 }  // namespace

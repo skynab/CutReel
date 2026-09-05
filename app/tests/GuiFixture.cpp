@@ -111,7 +111,7 @@ Result<std::string> writeFixtureProject() {
 
     project.setActiveSequence(sequenceId);
     const std::string path =
-        (std::filesystem::path{ZARO_SCRATCH_DIR} / "gui_fixture.zaro").string();
+        (std::filesystem::path{ZARO_SCRATCH_DIR} / "gui_fixture.cutreel").string();
     if (auto saved = io::saveProject(project, path); !saved) {
         return saved.error();
     }

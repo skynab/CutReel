@@ -14,8 +14,8 @@ void usage() {
     std::printf(
         "zaro-premiere — convert between CutReel projects and Adobe Premiere\n"
         "\n"
-        "  zaro-premiere export <project.zaro> <out.xml> [--sequence <id>]\n"
-        "  zaro-premiere import <in.xml> <project.zaro>\n"
+        "  zaro-premiere export <project.cutreel> <out.xml> [--sequence <id>]\n"
+        "  zaro-premiere import <in.xml> <project.cutreel>\n"
         "  zaro-premiere --version\n"
         "\n"
         "The file is FCP7 XML (xmeml), which is what Premiere Pro reads and\n"

@@ -25,7 +25,7 @@
 namespace {
 
 void printUsage() {
-    std::puts("usage: zaro-render <project.zaro> <output.mov|.mp4> [options]");
+    std::puts("usage: zaro-render <project.cutreel> <output.mov|.mp4> [options]");
     std::puts("");
     std::puts("  --start <frame>   first frame to render (default 0)");
     std::puts("  --frames <n>      how many frames (default: the whole sequence)");

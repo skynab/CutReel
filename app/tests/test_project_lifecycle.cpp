@@ -184,7 +184,7 @@ TEST_CASE("Saving, and the recovery file", "[gui]") {
         std::filesystem::temp_directory_path() / "zaro-selftest-save";
     std::error_code code;
     std::filesystem::create_directories(scratch, code);
-    const std::string savePath = (scratch / "project.zaro").string();
+    const std::string savePath = (scratch / "project.cutreel").string();
     std::filesystem::remove(savePath, code);
     std::filesystem::remove(zaro::io::autosavePath(savePath), code);
 
@@ -919,7 +919,7 @@ TEST_CASE("A lock beside the project, and what it stops", "[gui]") {
         std::filesystem::temp_directory_path() / "zaro-selftest-locks";
     zaro::app::testing::discard(lockRoot);
     std::filesystem::create_directories(lockRoot);
-    const std::string shared = (lockRoot / "shared.zaro").string();
+    const std::string shared = (lockRoot / "shared.cutreel").string();
 
     window.setProjectPath(shared);
     if (!window.save()) {
@@ -1008,7 +1008,7 @@ TEST_CASE("Saving a new version and carrying on in it", "[gui]") {
         std::filesystem::temp_directory_path() / "zaro-selftest-versions";
     zaro::app::testing::discard(versionRoot);
     std::filesystem::create_directories(versionRoot);
-    const std::string first = (versionRoot / "cut.zaro").string();
+    const std::string first = (versionRoot / "cut.cutreel").string();
 
     window.setProjectPath(first);
     if (!window.save()) {
@@ -1027,8 +1027,8 @@ TEST_CASE("Saving a new version and carrying on in it", "[gui]") {
                 std::filesystem::path{*second}.filename().string().c_str(),
                 std::filesystem::path{*third}.filename().string().c_str());
 
-    if (std::filesystem::path{*second}.filename() != "cut_v002.zaro" ||
-        std::filesystem::path{*third}.filename() != "cut_v003.zaro") {
+    if (std::filesystem::path{*second}.filename() != "cut_v002.cutreel" ||
+        std::filesystem::path{*third}.filename() != "cut_v003.cutreel") {
         zaro::app::testing::failf("the versions are not numbered in order\n");
     }
     // Every earlier version still there: that is what versioning is.
@@ -1180,7 +1180,7 @@ TEST_CASE("New and Open, through the real window", "[gui]") {
 
     // And a file that is not a project leaves the window as it was.
     const std::size_t mediaBeforeBadOpen = window.project().media().size();
-    if (Status missing = window.openProject("/definitely/not/a/project.zaro"); missing) {
+    if (Status missing = window.openProject("/definitely/not/a/project.cutreel"); missing) {
         zaro::app::testing::failf("opening a missing file reported success\n");
     }
     if (window.project().media().size() != mediaBeforeBadOpen) {

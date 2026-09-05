@@ -3500,7 +3500,7 @@ the rest, which is where the packet arithmetic gets genuinely hard.
 
 ### Phase 7f — project versions §7.5 ✅
 
-`cut.zaro`, `cut_v002.zaro`, `cut_v003.zaro`: a line drawn under what somebody
+`cut.cutreel`, `cut_v002.cutreel`, `cut_v003.cutreel`: a line drawn under what somebody
 had, with the next hour's work after it.
 
 **The number comes from the folder, not from the open file.** Somebody working
@@ -3513,12 +3513,12 @@ for this phase is exactly that mistake.
 has not been versioning has, so the first new version is v002 rather than a
 v001 that duplicates a file already there.
 
-**The width is kept.** `cut_v02.zaro` gives `cut_v03.zaro`, not `cut_v003.zaro`
+**The width is kept.** `cut_v02.cutreel` gives `cut_v03.cutreel`, not `cut_v003.cutreel`
 — the padding is somebody's convention, and silently changing it makes a folder
 that no longer sorts.
 
-**A name that merely contains digits is not a version.** `take2.zaro` becomes
-`take2_v002.zaro`: `take2` is a name somebody chose, and renumbering it would
+**A name that merely contains digits is not a version.** `take2.cutreel` becomes
+`take2_v002.cutreel`: `take2` is a name somebody chose, and renumbering it would
 be this tool having an opinion about their filing. The suffix has to be `_v`
 and digits at the very end.
 

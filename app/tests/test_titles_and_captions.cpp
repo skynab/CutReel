@@ -119,7 +119,8 @@ TEST_CASE("A graphic template, saved and placed again", "[gui]") {
     QApplication::processEvents();
 
     const std::string templatePath =
-        (std::filesystem::temp_directory_path() / "zaro-selftest-lower-third.zarograph").string();
+        (std::filesystem::temp_directory_path() / "zaro-selftest-lower-third.cutreelgraph")
+            .string();
     std::filesystem::remove(templatePath);
     if (Status saved = window.saveGraphicTemplate(templatePath); !saved) {
         zaro::app::testing::failf("%s\n", saved.error().toString().c_str());

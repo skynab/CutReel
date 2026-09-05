@@ -29,7 +29,7 @@
 namespace {
 
 void printUsage() {
-    std::puts("usage: zaro-play <project.zaro> [options]");
+    std::puts("usage: zaro-play <project.cutreel> [options]");
     std::puts("");
     std::puts("  --start <frame>   where to begin (default 0)");
     std::puts("  --seconds <n>     how long to play (default: to the end)");

@@ -14,8 +14,8 @@ void usage() {
     std::printf(
         "zaro-finalcut — convert between CutReel projects and Final Cut Pro\n"
         "\n"
-        "  zaro-finalcut export <project.zaro> <out.fcpxml> [--sequence <id>]\n"
-        "  zaro-finalcut import <in.fcpxml> <project.zaro>\n"
+        "  zaro-finalcut export <project.cutreel> <out.fcpxml> [--sequence <id>]\n"
+        "  zaro-finalcut import <in.fcpxml> <project.cutreel>\n"
         "  zaro-finalcut --version\n"
         "\n"
         "The file is FCPXML, which is what Final Cut Pro reads and writes:\n"

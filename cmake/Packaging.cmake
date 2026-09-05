@@ -99,7 +99,7 @@ if(WIN32)
     set(CPACK_WIX_ROOT_FEATURE_TITLE "CutReel")
     set(CPACK_PACKAGE_EXECUTABLES "zaro-preview" "CutReel")
 
-    # A desktop shortcut and the .zaro file association, neither of which CPack
+    # A desktop shortcut and the .cutreel file association, neither of which CPack
     # can express as a variable. See the file for what it does and why it is
     # written against the two fragment ids CPack documents as stable.
     set(CPACK_WIX_PATCH_FILE "${CMAKE_CURRENT_SOURCE_DIR}/cmake/wix-patch.xml")

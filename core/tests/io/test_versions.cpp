@@ -47,57 +47,57 @@ std::string nameOf(const std::string& path) {
 
 TEST_CASE("the first new version of an unnumbered project is v002", "[versions]") {
     Folder folder;
-    const std::string first = folder.touch("cut.zaro");
+    const std::string first = folder.touch("cut.cutreel");
     // The unnumbered file is version one of itself, so the next one is two.
-    CHECK(nameOf(io::nextVersionPath(first)) == "cut_v002.zaro");
+    CHECK(nameOf(io::nextVersionPath(first)) == "cut_v002.cutreel");
 }
 
 TEST_CASE("a numbered project counts on from the highest beside it", "[versions]") {
     Folder folder;
-    folder.touch("cut.zaro");
-    folder.touch("cut_v002.zaro");
-    const std::string third = folder.touch("cut_v003.zaro");
-    folder.touch("cut_v005.zaro");
+    folder.touch("cut.cutreel");
+    folder.touch("cut_v002.cutreel");
+    const std::string third = folder.touch("cut_v003.cutreel");
+    folder.touch("cut_v005.cutreel");
 
     // Working on v003 while v005 exists: a new version that reused v004 would
     // be fine, but one that reused v005 would destroy work. The highest plus
     // one is the answer that cannot.
-    CHECK(nameOf(io::nextVersionPath(third)) == "cut_v006.zaro");
+    CHECK(nameOf(io::nextVersionPath(third)) == "cut_v006.cutreel");
 }
 
 TEST_CASE("the numbering width somebody chose is kept", "[versions]") {
     Folder folder;
-    const std::string second = folder.touch("cut_v02.zaro");
-    CHECK(nameOf(io::nextVersionPath(second)) == "cut_v03.zaro");
+    const std::string second = folder.touch("cut_v02.cutreel");
+    CHECK(nameOf(io::nextVersionPath(second)) == "cut_v03.cutreel");
 }
 
 TEST_CASE("a name that merely contains digits is not a version", "[versions]") {
     Folder folder;
-    const std::string odd = folder.touch("take2.zaro");
+    const std::string odd = folder.touch("take2.cutreel");
     // "take2" is a name, not version two of "take": renumbering it would be
     // this tool having an opinion about somebody's filing.
-    CHECK(nameOf(io::nextVersionPath(odd)) == "take2_v002.zaro");
+    CHECK(nameOf(io::nextVersionPath(odd)) == "take2_v002.cutreel");
 }
 
 TEST_CASE("versions of other projects in the same folder are ignored", "[versions]") {
     Folder folder;
-    const std::string ours = folder.touch("cut.zaro");
-    folder.touch("trailer_v009.zaro");
-    CHECK(nameOf(io::nextVersionPath(ours)) == "cut_v002.zaro");
+    const std::string ours = folder.touch("cut.cutreel");
+    folder.touch("trailer_v009.cutreel");
+    CHECK(nameOf(io::nextVersionPath(ours)) == "cut_v002.cutreel");
 }
 
 TEST_CASE("the versions of a project are listed oldest first", "[versions]") {
     Folder folder;
-    folder.touch("cut_v003.zaro");
-    folder.touch("cut.zaro");
-    folder.touch("cut_v002.zaro");
-    folder.touch("other.zaro");
+    folder.touch("cut_v003.cutreel");
+    folder.touch("cut.cutreel");
+    folder.touch("cut_v002.cutreel");
+    folder.touch("other.cutreel");
 
-    const std::vector<std::string> found = io::versionsOf(folder.at("cut_v002.zaro"));
+    const std::vector<std::string> found = io::versionsOf(folder.at("cut_v002.cutreel"));
     REQUIRE(found.size() == 3);
-    CHECK(nameOf(found[0]) == "cut.zaro");
-    CHECK(nameOf(found[1]) == "cut_v002.zaro");
-    CHECK(nameOf(found[2]) == "cut_v003.zaro");
+    CHECK(nameOf(found[0]) == "cut.cutreel");
+    CHECK(nameOf(found[1]) == "cut_v002.cutreel");
+    CHECK(nameOf(found[2]) == "cut_v003.cutreel");
 }
 
 TEST_CASE("saving a new version writes a file that opens", "[versions]") {
@@ -108,7 +108,7 @@ TEST_CASE("saving a new version writes a file that opens", "[versions]") {
     const auto sequenceId = sequence.id();
     project.addSequence(std::move(sequence));
 
-    const std::string first = folder.at("cut.zaro");
+    const std::string first = folder.at("cut.cutreel");
     REQUIRE(io::saveProject(project, first));
 
     const std::string second = io::nextVersionPath(first);
@@ -122,5 +122,5 @@ TEST_CASE("saving a new version writes a file that opens", "[versions]") {
     CHECK(reopened->project.findSequence(sequenceId) != nullptr);
 
     // And the one after that steps past both.
-    CHECK(nameOf(io::nextVersionPath(second)) == "cut_v003.zaro");
+    CHECK(nameOf(io::nextVersionPath(second)) == "cut_v003.cutreel");
 }

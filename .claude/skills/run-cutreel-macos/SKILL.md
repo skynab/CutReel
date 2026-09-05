@@ -63,7 +63,7 @@ Notes that cost time to discover:
 ## Launch the real app
 
 ```bash
-./build/debug/bin/zaro-preview.app/Contents/MacOS/zaro-preview <project.zaro> --quiet
+./build/debug/bin/zaro-preview.app/Contents/MacOS/zaro-preview <project.cutreel> --quiet
 ```
 
 - **The binary is inside the `.app` bundle.** `build/debug/bin/zaro-preview` is a
@@ -79,7 +79,7 @@ Notes that cost time to discover:
 Make a project from the test media:
 
 ```bash
-./build/debug/bin/zaro-cut "$SCRATCH/demo.zaro" \
+./build/debug/bin/zaro-cut "$SCRATCH/demo.cutreel" \
   testdata/media/shaky_texture.mov testdata/media/ladder_prores.mov
 ```
 

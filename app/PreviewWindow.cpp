@@ -879,7 +879,7 @@ void PreviewWindow::consolidateDialog() {
 
 void PreviewWindow::saveTemplateDialog() {
     const QString path = QFileDialog::getSaveFileName(this, "Save graphic as template", {},
-                                                      "Graphic template (*.zarograph)");
+                                                      "Graphic template (*.cutreelgraph)");
     if (path.isEmpty()) {
         return;
     }
@@ -923,7 +923,7 @@ void PreviewWindow::animateTitle(commands::TitleMotion motion) {
 
 void PreviewWindow::placeTemplateDialog() {
     const QString path = QFileDialog::getOpenFileName(this, "Place graphic template", {},
-                                                      "Graphic template (*.zarograph)");
+                                                      "Graphic template (*.cutreelgraph)");
     if (path.isEmpty()) {
         return;
     }
@@ -1860,7 +1860,7 @@ void PreviewWindow::openVersionMenu() {
 
 void PreviewWindow::openDialog() {
     const QString chosen =
-        QFileDialog::getOpenFileName(this, "Open project", {}, "CutReel projects (*.zaro)");
+        QFileDialog::getOpenFileName(this, "Open project", {}, "CutReel projects (*.cutreel)");
     if (chosen.isEmpty()) {
         return;
     }
@@ -1902,8 +1902,8 @@ void PreviewWindow::openDialog() {
 bool PreviewWindow::saveAs() {
     const QString chosen = QFileDialog::getSaveFileName(
         this, "Save project",
-        QString::fromStdString(document_.path().empty() ? "project.zaro" : document_.path()),
-        "CutReel projects (*.zaro)");
+        QString::fromStdString(document_.path().empty() ? "project.cutreel" : document_.path()),
+        "CutReel projects (*.cutreel)");
     if (chosen.isEmpty()) {
         return false;
     }

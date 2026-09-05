@@ -64,8 +64,8 @@ struct LoadedProject {
 
 /// The next version of a project file, as a path.
 ///
-/// `cut.zaro` becomes `cut_v002.zaro`, and `cut_v002.zaro` becomes
-/// `cut_v003.zaro` -- the unnumbered original counts as version one, because
+/// `cut.cutreel` becomes `cut_v002.cutreel`, and `cut_v002.cutreel` becomes
+/// `cut_v003.cutreel` -- the unnumbered original counts as version one, because
 /// that is what somebody who has not been versioning has.
 ///
 /// **The number comes from the folder, not from this file.** Somebody working
@@ -73,8 +73,8 @@ struct LoadedProject {
 /// that overwrote v003 would destroy work. The highest version beside it plus
 /// one is the only answer that cannot.
 ///
-/// **The width is kept.** `cut_v02.zaro` gives `cut_v03.zaro`, not
-/// `cut_v003.zaro`: the padding is somebody's convention, and a tool that
+/// **The width is kept.** `cut_v02.cutreel` gives `cut_v03.cutreel`, not
+/// `cut_v003.cutreel`: the padding is somebody's convention, and a tool that
 /// silently changed it makes a folder that no longer sorts.
 [[nodiscard]] std::string nextVersionPath(const std::string& projectPath);
 

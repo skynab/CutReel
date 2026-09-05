@@ -153,11 +153,19 @@ qt_add_resources(zaro-preview "branding"
         "${ZARO_BRANDING_DIR}/CutReel-512.png")
 
 # The executable's own icon, which is a different thing from the window's: it
-# is what Explorer, the taskbar, the desktop shortcut the MSI installs and the
-# .zaro document association all display, and none of them ever runs the
-# program to ask Qt.
+# is what Explorer, the taskbar and the desktop shortcut the MSI installs all
+# display, and none of them ever runs the program to ask Qt.
+#
+# The document icon rides along in the same binary. A .cutreel file is not an
+# executable and cannot carry an icon of its own, so the association the MSI
+# writes points Explorer back at an icon resource here -- see
+# app/zaro-preview.rc.in for the id/index contract that association depends on,
+# and cmake/wix-patch.xml for the association itself. Kept in the executable
+# rather than installed as a loose .ico beside it: a file a user can delete or
+# move is a file that turns every project on their disk blank.
 if(WIN32)
     set(ZARO_ICON_ICO "${ZARO_BRANDING_DIR}/CutReel.ico")
+    set(ZARO_DOCUMENT_ICO "${ZARO_BRANDING_DIR}/CutReel-Document.ico")
     configure_file("${CMAKE_CURRENT_SOURCE_DIR}/zaro-preview.rc.in"
                    "${CMAKE_CURRENT_BINARY_DIR}/zaro-preview.rc" @ONLY)
     target_sources(zaro-preview PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/zaro-preview.rc")

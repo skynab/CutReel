@@ -276,7 +276,7 @@ TEST_CASE("Malformed input is rejected with something readable", "[io]") {
 
 TEST_CASE("Writing and reading a file", "[io]") {
     Fixture f = populated();
-    const std::string path = std::string{ZARO_SCRATCH_DIR} + "/roundtrip.zaro";
+    const std::string path = std::string{ZARO_SCRATCH_DIR} + "/roundtrip.cutreel";
 
     REQUIRE(io::saveProject(f.project, path).ok());
     const auto loaded = io::loadProject(path);

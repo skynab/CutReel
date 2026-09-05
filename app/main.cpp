@@ -120,7 +120,7 @@ int main(int argc, char** argv) {
         arguments.removeAt(at);
     }
     if (arguments.size() < 2) {
-        std::puts("usage: zaro-preview <project.zaro> [--selftest]");
+        std::puts("usage: zaro-preview <project.cutreel> [--selftest]");
         std::puts("");
         std::puts("  space        play / pause        J K L   shuttle");
         std::puts("  left/right   step one frame      home/end  start / end");

@@ -20,7 +20,7 @@
 namespace {
 
 void printUsage() {
-    std::puts("usage: zaro-cut <output.zaro> <media>... [options]");
+    std::puts("usage: zaro-cut <output.cutreel> <media>... [options]");
     std::puts("");
     std::puts("  --rate <r>      sequence frame rate (default: the first clip's)");
     std::puts("  --size <w>x<h>  sequence frame size (default: the first clip's)");

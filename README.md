@@ -180,12 +180,12 @@ it under `xvfb-run`, which is what CI does.
 zaro-probe <file>                        what we believe about a file
 zaro-frame <file> <index> <out.png>      extract one frame, exactly
 zaro-frame <file> --benchmark 150        decode throughput
-zaro-cut out.zaro a.mov b.mov            build a project from media
-zaro-render project.zaro out.mov         render it, headless
-zaro-play project.zaro --seconds 10       play it on the GPU, and report sync
-zaro-otio export project.zaro out.otio   hand the cut to any other NLE
-zaro-premiere import cut.xml out.zaro    take one back from Premiere
-zaro-finalcut export p.zaro out.fcpxml   hand it to Final Cut Pro
+zaro-cut out.cutreel a.mov b.mov            build a project from media
+zaro-render project.cutreel out.mov         render it, headless
+zaro-play project.cutreel --seconds 10       play it on the GPU, and report sync
+zaro-otio export project.cutreel out.otio   hand the cut to any other NLE
+zaro-premiere import cut.xml out.cutreel    take one back from Premiere
+zaro-finalcut export p.cutreel out.fcpxml   hand it to Final Cut Pro
 ```
 
 `zaro-premiere` speaks FCP7 XML (`xmeml`), which is what Premiere Pro's

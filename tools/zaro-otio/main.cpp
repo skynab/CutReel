@@ -14,8 +14,8 @@ void usage() {
     std::printf(
         "zaro-otio — convert between CutReel projects and OpenTimelineIO\n"
         "\n"
-        "  zaro-otio export <project.zaro> <out.otio> [--sequence <id>]\n"
-        "  zaro-otio import <in.otio> <project.zaro>\n"
+        "  zaro-otio export <project.cutreel> <out.otio> [--sequence <id>]\n"
+        "  zaro-otio import <in.otio> <project.cutreel>\n"
         "  zaro-otio --version\n"
         "\n"
         "Importing writes a project of its own rather than merging into one:\n"

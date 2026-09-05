@@ -23,8 +23,8 @@ done
 [[ -f "$fixture" ]] || { echo "missing fixture -- run testdata/generate.sh"; exit 2; }
 
 echo "rendering the sync fixture..."
-"$cut_tool" "$work/sync.zaro" "$fixture" > /dev/null
-"$render_tool" "$work/sync.zaro" "$work/out.mov" --quiet || exit 1
+"$cut_tool" "$work/sync.cutreel" "$fixture" > /dev/null
+"$render_tool" "$work/sync.cutreel" "$work/out.mov" --quiet || exit 1
 
 # Per-frame mean luma: a flash frame is far brighter than the black between.
 ffmpeg -hide_banner -loglevel error -i "$work/out.mov" -map 0:v \

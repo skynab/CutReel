@@ -14,6 +14,10 @@
 #   CutReel-V2-512px.ico      the same mark as a Windows icon, all sizes
 #   Installer Copy-512px.ico  the installer's mark as a Windows icon
 #   Installer Copy-512px.png  the same installer mark, square, transparent
+#   CutReel-Files-512px.ico   the document mark -- what a .cutreel file looks
+#                             like in Explorer -- as a Windows icon. Looked for
+#                             in a CutReel-Files-2 subdirectory as well, which
+#                             is the shape the artwork has been delivered in.
 #
 # macOS only: iconutil builds the .icns and ships with Xcode. ImageMagick is
 # the other requirement -- brew install imagemagick.
@@ -26,7 +30,13 @@ trap 'rm -rf "$WORK"' EXIT
 
 MASTER="$SRC/CutReel-V2-1024px.png"
 INSTALLER_MASTER="$SRC/Installer Copy-512px.png"
-for f in "$MASTER" "$INSTALLER_MASTER" \
+
+# The document icon has arrived nested rather than loose. Accept either, so a
+# later drop does not have to be rearranged by hand to run this.
+DOCUMENT_MASTER="$SRC/CutReel-Files-512px.ico"
+[ -f "$DOCUMENT_MASTER" ] || DOCUMENT_MASTER="$SRC/CutReel-Files-2/CutReel-Files-512px.ico"
+
+for f in "$MASTER" "$INSTALLER_MASTER" "$DOCUMENT_MASTER" \
          "$SRC/CutReel-V2-512px.ico" "$SRC/Installer Copy-512px.ico"; do
     [ -f "$f" ] || { echo "missing: $f" >&2; exit 1; }
 done
@@ -36,6 +46,7 @@ done
 # it did at 16 and 32 pixels.
 cp "$SRC/CutReel-V2-512px.ico"     "$OUT/CutReel.ico"
 cp "$SRC/Installer Copy-512px.ico" "$OUT/CutReel-Installer.ico"
+cp "$DOCUMENT_MASTER"              "$OUT/CutReel-Document.ico"
 
 # The window icon, one file per size. See app/CMakeLists.txt.
 for size in 16 32 48 64 128 256 512; do

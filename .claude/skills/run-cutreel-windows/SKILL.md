@@ -53,7 +53,7 @@ confirm a change compiles and links; only the final exe link is blocked.
 ## Launch the app
 
 ```bash
-cd build/windows-release/bin && cmd //c start "" zaro-preview.exe <project.zaro> --quiet
+cd build/windows-release/bin && cmd //c start "" zaro-preview.exe <project.cutreel> --quiet
 ```
 
 - The binary is `build/windows-release/bin/zaro-preview.exe`. There is no
@@ -66,7 +66,7 @@ cd build/windows-release/bin && cmd //c start "" zaro-preview.exe <project.zaro>
 Make a project from the test media:
 
 ```bash
-./build/windows-release/bin/zaro-cut.exe "$SCRATCH/demo.zaro" \
+./build/windows-release/bin/zaro-cut.exe "$SCRATCH/demo.cutreel" \
   testdata/media/shaky_texture.mov testdata/media/wide_texture.mp4
 ```
 
@@ -75,14 +75,14 @@ Other flags: `--selftest` (render, verify a picture came out, exit),
 
 ### Delete the autosave before an automated run
 
-The app writes `<project>.zaro.autosave` on every close, so the *next* launch
+The app writes `<project>.cutreel.autosave` on every close, so the *next* launch
 opens a modal **Recover** dialog ("There is a more recent recovery file…").
 This is normal, not a crash artefact. It is also a silent trap for scripted
 runs: the dialog takes the focus, so clicks and keystrokes aimed at the main
 window vanish and playback simply never starts.
 
 ```bash
-rm -f "$SCRATCH/demo.zaro.autosave"   # before launching
+rm -f "$SCRATCH/demo.cutreel.autosave"   # before launching
 ```
 
 A window capture that comes back ~516x194 instead of full size *is* that
@@ -110,16 +110,16 @@ Then **read the PNG**. Clicks can be driven the same way with `SetCursorPos` +
 
 ### A black program monitor almost always means the media did not resolve
 
-**Run the app from the repository root.** `.zaro` projects store media paths
+**Run the app from the repository root.** `.cutreel` projects store media paths
 *relative to the working directory*, so launching from `build/windows-release/bin`
 resolves nothing: the monitor is black, the audio is silent, and neither the
 app nor `--selftest` says why.
 
 ```bash
 # right
-./build/windows-release/bin/zaro-preview.exe "$SCRATCH/demo.zaro" --quiet
+./build/windows-release/bin/zaro-preview.exe "$SCRATCH/demo.cutreel" --quiet
 # wrong -- no media resolves, and nothing tells you
-cd build/windows-release/bin && ./zaro-preview.exe "$SCRATCH/demo.zaro" --quiet
+cd build/windows-release/bin && ./zaro-preview.exe "$SCRATCH/demo.cutreel" --quiet
 ```
 
 `--selftest` reports the symptom, not the cause:

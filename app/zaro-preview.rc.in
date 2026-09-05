@@ -1,10 +1,16 @@
-// The Windows executable's icon.
+// The Windows executable's icons: the application's own, and the one Explorer
+// draws on a .cutreel project file.
 //
-// Configured rather than committed as-is so the path can be absolute: rc.exe
+// Configured rather than committed as-is so the paths can be absolute: rc.exe
 // resolves a relative one against its own working directory, which is the
-// build tree, and the icon is not there.
+// build tree, and the icons are not there.
 //
-// Resource id 1, and it has to be the lowest in the file: Explorer shows the
-// first icon in id order for the executable, and that is what a shortcut, the
-// taskbar and the .zaro document icon all end up displaying.
+// Id order is the contract. Explorer shows the first icon in id order for the
+// executable itself, so the application mark has to be the lowest id -- that
+// is what a shortcut, the taskbar and Add/Remove Programs all display. The
+// document icon follows it, and the MSI names it by *index* rather than by id:
+// "zaro-preview.exe,1" is the second icon group in id order, which is id 2
+// below. See cmake/wix-patch.xml. Inserting an icon between these two would
+// silently repoint that association, so append rather than insert.
 1 ICON "@ZARO_ICON_ICO@"
+2 ICON "@ZARO_DOCUMENT_ICO@"

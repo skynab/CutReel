@@ -64,7 +64,7 @@ std::string scratchPath(const char* name) {
 
 TEST_CASE("a graphic survives a round trip through a template", "[templates]") {
     const model::Clip original = lowerThird();
-    const std::string path = scratchPath("zaro-template-round-trip.zarograph");
+    const std::string path = scratchPath("zaro-template-round-trip.cutreelgraph");
     REQUIRE(io::saveGraphicTemplate(original, path));
 
     auto loaded = io::loadGraphicTemplate(path);
@@ -100,13 +100,13 @@ TEST_CASE("only a graphic can be saved as a template", "[templates]") {
     footage.timelineRange = time::TimeRange{at(0), at(24)};
     footage.sourceRange = time::TimeRange{at(0), at(24)};
 
-    const std::string path = scratchPath("zaro-template-refused.zarograph");
+    const std::string path = scratchPath("zaro-template-refused.cutreelgraph");
     CHECK_FALSE(io::saveGraphicTemplate(footage, path));
     CHECK_FALSE(std::filesystem::exists(path));
 }
 
 TEST_CASE("a file that is not a template is refused by name", "[templates]") {
-    const std::string path = scratchPath("zaro-template-nonsense.zarograph");
+    const std::string path = scratchPath("zaro-template-nonsense.cutreelgraph");
     {
         std::ofstream file{path};
         file << "{\"hello\": 1}";
@@ -122,7 +122,7 @@ TEST_CASE("a placed template keeps its animation and takes the new length", "[te
     const auto sequenceId = fixture.project.activeSequence();
     const auto trackId = fixture.project.findSequence(sequenceId)->videoTracks().front().id();
 
-    const std::string path = scratchPath("zaro-template-placed.zarograph");
+    const std::string path = scratchPath("zaro-template-placed.cutreelgraph");
     REQUIRE(io::saveGraphicTemplate(lowerThird(), path));
     auto loaded = io::loadGraphicTemplate(path);
     REQUIRE(loaded);

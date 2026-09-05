@@ -2,7 +2,7 @@
 
 <!--
   Two things the MSI carries that CPack cannot express on its own: a desktop
-  shortcut, and the .zaro file association.
+  shortcut, and the .cutreel file association.
 
   CPACK_CREATE_DESKTOP_LINKS is the obvious variable for the first and does
   nothing here; only the NSIS and Inno Setup generators implement it, so for
@@ -71,13 +71,18 @@
     </DirectoryRef>
 
     <DirectoryRef Id="INSTALL_ROOT">
-      <Component Id="CutReelProjectAssociation" Guid="E348BD09-C967-431B-B26D-15517B281559">
+      <!-- A fresh GUID, not the one this component carried while it registered
+           .zaro. A component's keypath is its identity to the installer, and
+           changing one in place is the component rule that breaks upgrades:
+           the old row would keep the stale extension alive on any machine that
+           had it. New extension, new component. -->
+      <Component Id="CutReelProjectAssociation" Guid="EE630FCB-214A-48FE-9434-D50A9C694893">
         <!-- Written as plain registry values rather than as ProgId/Extension/
              Verb, which would need the WiX file id of the installed
              executable, the generated name this patch exists to avoid
              depending on. -->
         <RegistryValue Root="HKLM"
-                       Key="Software\Classes\.zaro"
+                       Key="Software\Classes\.cutreel"
                        Value="CutReel.Project"
                        Type="string"
                        KeyPath="yes"/>
@@ -85,9 +90,14 @@
                        Key="Software\Classes\CutReel.Project"
                        Value="CutReel project"
                        Type="string"/>
+        <!-- ",1" is an *index* into the executable's icon groups in id order,
+             not a resource id: the second one, which app/zaro-preview.rc.in
+             defines as id 2, the document mark. Index 0 is the application
+             mark, and pointing a document at it is how a project file ends up
+             looking like the program that opens it. -->
         <RegistryValue Root="HKLM"
                        Key="Software\Classes\CutReel.Project\DefaultIcon"
-                       Value="[INSTALL_ROOT]bin\zaro-preview.exe,0"
+                       Value="[INSTALL_ROOT]bin\zaro-preview.exe,1"
                        Type="string"/>
         <!-- %1 reaches the program as argv[1], which is the project path it
              wants. Quoted, because somebody's project lives in a folder with a

@@ -41,7 +41,7 @@ struct TempDir {
 
 TEST_CASE("Saving writes beside the file and renames over it", "[io][save]") {
     TempDir dir;
-    const std::string path = dir.file("project.zaro");
+    const std::string path = dir.file("project.cutreel");
     Fixture f;
     REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.v1), f.clip(0, 50))));
 
@@ -58,14 +58,14 @@ TEST_CASE("Saving writes beside the file and renames over it", "[io][save]") {
 
 TEST_CASE("A save that cannot be written leaves the previous version alone", "[io][save]") {
     TempDir dir;
-    const std::string path = dir.file("project.zaro");
+    const std::string path = dir.file("project.cutreel");
     Fixture f;
     REQUIRE(io::saveProject(f.project, path));
     const auto originalSize = std::filesystem::file_size(path);
 
     // A directory where the file should be: the rename cannot replace it, and
     // the point is that the failure is reported rather than partly applied.
-    const std::string blocked = dir.file("blocked.zaro");
+    const std::string blocked = dir.file("blocked.cutreel");
     std::filesystem::create_directories(blocked);
     CHECK_FALSE(io::saveProject(f.project, blocked));
     CHECK_FALSE(std::filesystem::exists(blocked + ".saving"));
@@ -75,12 +75,12 @@ TEST_CASE("A save that cannot be written leaves the previous version alone", "[i
 }
 
 TEST_CASE("A recovery file sits beside the project", "[io][save]") {
-    CHECK(io::autosavePath("/takes/cut.zaro") == "/takes/cut.zaro.autosave");
+    CHECK(io::autosavePath("/takes/cut.cutreel") == "/takes/cut.cutreel.autosave");
 }
 
 TEST_CASE("A recovery file is only offered when it is newer", "[io][save]") {
     TempDir dir;
-    const std::string path = dir.file("project.zaro");
+    const std::string path = dir.file("project.cutreel");
     Fixture f;
 
     CHECK_FALSE(io::hasNewerAutosave(path));
