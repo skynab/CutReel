@@ -499,6 +499,16 @@ void PreviewWindow::wireEditingSignals() {
     // two as exclusive, as the timeline does.
     connect(timeline_, &app::TimelineWidget::trackSelected, effects_,
             &app::EffectControls::setTrackSelection);
+    // And picking the span across a cut shows the transition, which is the
+    // third of the three and the same rule again.
+    connect(timeline_, &app::TimelineWidget::transitionSelected, effects_,
+            &app::EffectControls::setTransitionSelection);
+    // Removing one goes through the timeline rather than the panel, because
+    // the timeline owns the selection: taking the transition off behind its
+    // back would leave it outlining a span the model no longer holds. This is
+    // the same path Delete takes.
+    connect(effects_, &app::EffectControls::removeTransitionRequested, this,
+            [this] { timeline_->removeSelected(false); });
     // Kept here too: syncing acts on the clip somebody has picked, and the
     // timeline is where picking happens.
     connect(timeline_, &app::TimelineWidget::selectionChanged, this,

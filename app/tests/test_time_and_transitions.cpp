@@ -4,12 +4,18 @@
 // for what is shared and why.
 
 #include <QCheckBox>
+#include <QComboBox>
 #include <QContextMenuEvent>
 #include <QDoubleSpinBox>
+#include <QGroupBox>
 #include <QKeyEvent>
+#include <QLabel>
 #include <QMenu>
+#include <QPushButton>
 #include <QTimer>
+#include <cmath>
 #include <cstdint>
+#include <utility>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -974,5 +980,399 @@ TEST_CASE("A dissolve can be stretched by dragging its edge", "[gui]") {
     while (window.commands().canUndo()) {
         window.commands().undo(window.project());
     }
+    QApplication::processEvents();
+}
+
+// Picking a dissolve, and taking it off again.
+//
+// A transition was drawable and stretchable but not *selectable*: pressing the
+// middle of one fell through to the clip underneath, so there was nothing for a
+// panel of its properties to be about -- and no way at all to remove one, since
+// the operation existed with nothing in the program calling it.
+//
+// Driven through the widget, because the part that had to be got right is the
+// order of the hit tests: the span is drawn over the cut it straddles, so a
+// clip-first test swallows every press, and an edge-last test would select
+// instead of stretching.
+TEST_CASE("A transition can be picked and removed", "[gui]") {
+    auto& window = zaro::app::testing::gui();
+    const zaro::app::testing::Rewind rewind;
+    auto* timeline = window.timeline();
+    const auto& sequence = *window.sequence();
+    const auto sequenceId = sequence.id();
+    const auto& videoTrack = sequence.videoTracks().front();
+    const auto trackId = videoTrack.id();
+    const auto rate = sequence.frameRate();
+    const auto row = timeline->rowFor(trackId);
+    REQUIRE(row.has_value());
+    const int y = row->top + row->height / 2;
+
+    const auto first = videoTrack.clips().front();
+    const auto cutAt = first.start() + zaro::time::RationalTime{
+                                           first.duration().rescaledTo(rate).frames() / 2, rate};
+    auto razored = zaro::edit::makeRazor(window.project(), {sequenceId, trackId}, cutAt);
+    if (!razored) {
+        zaro::app::testing::failf("%s\n", razored.error().toString().c_str());
+    }
+    window.commands().execute(window.project(), std::move(*razored));
+
+    // Wide enough that its middle is nowhere near either grab zone: the two
+    // are five pixels each, and a span only twelve pixels across would make
+    // this a test of arithmetic rather than of the order of the tests.
+    auto dissolve = zaro::edit::makeAddCrossDissolve(window.project(), {sequenceId, trackId}, cutAt,
+                                                     zaro::time::RationalTime{30, rate});
+    if (!dissolve) {
+        zaro::app::testing::failf("%s\n", dissolve.error().toString().c_str());
+    }
+    window.commands().execute(window.project(), std::move(*dissolve));
+    window.commands().breakMerge();
+    QApplication::processEvents();
+
+    const auto* track = window.project().findSequence(sequenceId)->findTrack(trackId);
+    REQUIRE(!track->transitions().empty());
+    const auto span = track->transitions().front().range;
+    const auto transitionId = track->transitions().front().id;
+    const std::size_t clipsBefore = track->clips().size();
+
+    const int startX = static_cast<int>(timeline->layout().xForTime(span.start()));
+    const int endX = static_cast<int>(timeline->layout().xForTime(span.endExclusive()));
+    const int middleX = (startX + endX) / 2;
+    if (endX - startX < 24) {
+        zaro::app::testing::failf("the span is only %d pixels wide; zoom in first\n",
+                                  endX - startX);
+    }
+
+    // A clip picked first, so what follows shows the selection *moving* rather
+    // than arriving from nothing.
+    timeline->selectOnly(trackId, track->clips().front().id);
+    QApplication::processEvents();
+    REQUIRE(!timeline->selection().empty());
+
+    // The edges still grab, and that is checked before anything is picked:
+    // this is the half a body-first test would break, and it breaks silently --
+    // the press would select and the drag would do nothing, which reads as the
+    // timeline having stopped responding.
+    dragOnTimeline(timeline, endX, endX, y);
+    QApplication::processEvents();
+    if (timeline->selectedTransition().isValid()) {
+        zaro::app::testing::failf("pressing the edge picked the span instead of grabbing it\n");
+    }
+
+    dragOnTimeline(timeline, middleX, middleX, y);
+    QApplication::processEvents();
+
+    if (timeline->selectedTransition() != transitionId) {
+        zaro::app::testing::failf("pressing the middle of the span did not pick it\n");
+    }
+    if (timeline->selectedTransitionTrack() != trackId) {
+        zaro::app::testing::failf("the span was picked on the wrong track\n");
+    }
+    // The three selections are exclusive: a panel showing a clip's parameters
+    // and a transition's at once would have two things called the selection.
+    if (!timeline->selection().empty()) {
+        zaro::app::testing::failf("picking the span left %zu clips selected\n",
+                                  timeline->selection().size());
+    }
+
+    // And the highlight reaches the screen. Measured by letting the selection
+    // go rather than by taking a baseline before picking it: the pick also
+    // cleared the clip selection, so a before-and-after would be measuring
+    // that clip's ring coming off as much as this span's outline going on.
+    {
+        const QImage lit = timeline->grab().toImage();
+        timeline->selectTransition({}, {});
+        QApplication::processEvents();
+        const QImage plain = timeline->grab().toImage();
+        // grab() returns device pixels, so on a scaled display the image is
+        // larger than the coordinates the events used.
+        const auto dpr = static_cast<int>(lit.devicePixelRatio());
+        const QRect box(QPoint(startX, row->top), QPoint(endX, row->top + row->height));
+        std::int64_t changed = 0;
+        for (int py = 0; py < lit.height() && py / dpr < timeline->height(); ++py) {
+            for (int px = 0; px < lit.width() && px / dpr < timeline->width(); ++px) {
+                if (lit.pixel(px, py) != plain.pixel(px, py) && box.contains(px / dpr, py / dpr)) {
+                    ++changed;
+                }
+            }
+        }
+        std::printf("  picked outline: %lld pixels over the span\n",
+                    static_cast<long long>(changed));
+        if (changed == 0) {
+            zaro::app::testing::failf("picking the span drew nothing over it\n");
+        }
+        dragOnTimeline(timeline, middleX, middleX, y);
+        QApplication::processEvents();
+        REQUIRE(timeline->selectedTransition() == transitionId);
+    }
+
+    // And a clip takes the selection back.
+    timeline->selectOnly(trackId, track->clips().front().id);
+    QApplication::processEvents();
+    if (timeline->selectedTransition().isValid()) {
+        zaro::app::testing::failf("picking a clip left the span selected\n");
+    }
+
+    // Delete takes it off, and takes nothing else with it. Removing a
+    // transition is not a ripple: the span straddles the cut rather than
+    // overlapping it, so the two clips stay exactly where they were.
+    dragOnTimeline(timeline, middleX, middleX, y);
+    QApplication::processEvents();
+    REQUIRE(timeline->selectedTransition() == transitionId);
+    const std::size_t stepsBefore = window.commands().position();
+    QKeyEvent del(QEvent::KeyPress, Qt::Key_Delete, Qt::NoModifier);
+    QCoreApplication::sendEvent(timeline, &del);
+    QApplication::processEvents();
+
+    const auto* after = window.project().findSequence(sequenceId)->findTrack(trackId);
+    if (!after->transitions().empty()) {
+        zaro::app::testing::failf("Delete left %zu transitions on the track\n",
+                                  after->transitions().size());
+    }
+    if (after->clips().size() != clipsBefore) {
+        zaro::app::testing::failf("removing the span took %zu clips with it\n",
+                                  clipsBefore - after->clips().size());
+    }
+    if (after->clipAt(cutAt) == nullptr || after->clipAt(cutAt)->start() != cutAt) {
+        zaro::app::testing::failf("removing the span moved the cut: it rippled\n");
+    }
+    if (timeline->selectedTransition().isValid()) {
+        zaro::app::testing::failf("the selection still points at a transition that is gone\n");
+    }
+    if (window.commands().position() != stepsBefore + 1) {
+        zaro::app::testing::failf("removing the span made %zu undo steps, not one\n",
+                                  window.commands().position() - stepsBefore);
+    }
+    std::printf("  picked a %d-pixel span, removed it, %zu clips untouched\n", endX - startX,
+                clipsBefore);
+
+    while (window.commands().canUndo()) {
+        window.commands().undo(window.project());
+    }
+    QApplication::processEvents();
+}
+
+// The Transition tab: choosing what a cut does.
+//
+// The discriminating half is the picture. A wipe and a dissolve are both a
+// blend across the same span, and the model has rendered both since Phase 6o --
+// what did not exist was any way to ask for one. So this drives the real combo
+// and then measures the frame: at the midpoint a dissolve blends both halves of
+// the frame the same way, while a wipe puts one shot on each side of the line.
+// Make the picker write nothing and the two halves read the same and it fails.
+TEST_CASE("The Transition tab chooses what a cut does", "[gui]") {
+    auto& window = zaro::app::testing::gui();
+    const zaro::app::testing::Rewind rewind;
+    auto* timeline = window.timeline();
+    auto* effects = window.effects();
+    const auto& sequence = *window.sequence();
+    const auto sequenceId = sequence.id();
+    const auto& videoTrack = sequence.videoTracks().front();
+    const auto trackId = videoTrack.id();
+    const auto rate = sequence.frameRate();
+
+    // A cut with two shots that differ, so a wipe has something to show on
+    // each side of its edge. The tail is pulled well down.
+    const auto first = videoTrack.clips().front();
+    const auto cutAt = first.start() + zaro::time::RationalTime{
+                                           first.duration().rescaledTo(rate).frames() / 2, rate};
+    auto razored = zaro::edit::makeRazor(window.project(), {sequenceId, trackId}, cutAt);
+    if (!razored) {
+        zaro::app::testing::failf("%s\n", razored.error().toString().c_str());
+    }
+    window.commands().execute(window.project(), std::move(*razored));
+
+    const zaro::model::Clip* tail =
+        window.project().findSequence(sequenceId)->findTrack(trackId)->clipAt(cutAt);
+    REQUIRE(tail != nullptr);
+    zaro::model::ColorCorrection dark;
+    dark.exposure = -4.0;
+    auto graded =
+        zaro::edit::makeSetColorCorrection(window.project(), {sequenceId, trackId}, tail->id, dark);
+    if (!graded) {
+        zaro::app::testing::failf("%s\n", graded.error().toString().c_str());
+    }
+    window.commands().execute(window.project(), std::move(*graded));
+
+    auto dissolve = zaro::edit::makeAddCrossDissolve(window.project(), {sequenceId, trackId}, cutAt,
+                                                     zaro::time::RationalTime{20, rate});
+    if (!dissolve) {
+        zaro::app::testing::failf("%s\n", dissolve.error().toString().c_str());
+    }
+    window.commands().execute(window.project(), std::move(*dissolve));
+    window.commands().breakMerge();
+    QApplication::processEvents();
+
+    const auto spanOf = [&] {
+        const auto& list =
+            window.project().findSequence(sequenceId)->findTrack(trackId)->transitions();
+        REQUIRE(!list.empty());
+        return list.front();
+    };
+    const auto transitionId = spanOf().id;
+
+    // Picking it puts the tab up. A clip selection first, so this shows the
+    // page arriving rather than having been there all along.
+    timeline->selectOnly(
+        trackId, window.project().findSequence(sequenceId)->findTrack(trackId)->clips()[0].id);
+    QApplication::processEvents();
+    timeline->selectTransition(trackId, transitionId);
+    QApplication::processEvents();
+
+    if (effects->pane() != zaro::app::EffectControls::Pane::Transition) {
+        zaro::app::testing::failf("picking a transition did not put its page up\n");
+    }
+    auto* tab = effects->findChild<QPushButton*>("inspector-tab-transition");
+    auto* kind = effects->findChild<QComboBox*>("transition-kind");
+    auto* direction = effects->findChild<QComboBox*>("transition-direction");
+    auto* duration = effects->findChild<QDoubleSpinBox*>("transition-duration");
+    auto* alignment = effects->findChild<QComboBox*>("transition-alignment");
+    if (tab == nullptr || kind == nullptr || direction == nullptr || duration == nullptr ||
+        alignment == nullptr) {
+        zaro::app::testing::failf("the transition controls are not in the panel\n");
+    }
+    if (!tab->isEnabled()) {
+        zaro::app::testing::failf("the Transition tab is disabled with one selected\n");
+    }
+    // The other three describe a clip, and there is not one.
+    for (const char* name :
+         {"inspector-tab-inspector", "inspector-tab-audio", "inspector-tab-info"}) {
+        auto* other = effects->findChild<QPushButton*>(name);
+        REQUIRE(other != nullptr);
+        if (other->isEnabled()) {
+            zaro::app::testing::failf("%s is enabled with a transition selected\n", name);
+        }
+    }
+    // And all four still fit. The strip has no scrollbar and nothing shrinks
+    // it, so a fourth tab that does not fit is not a tight fit -- it is a tab
+    // sitting off the end of the panel, which is how the value fields were
+    // losing their suffixes before the panel's width was worked out rather
+    // than guessed.
+    for (const char* name : {"inspector-tab-inspector", "inspector-tab-audio", "inspector-tab-info",
+                             "inspector-tab-transition"}) {
+        auto* pill = effects->findChild<QPushButton*>(name);
+        REQUIRE(pill != nullptr);
+        const int right = pill->mapTo(effects, QPoint{pill->width(), 0}).x();
+        INFO("tab " << name << " ends at " << right << " in a panel " << effects->width()
+                    << " wide");
+        CHECK(right <= effects->width());
+    }
+    // A dissolve has nowhere to travel, so the direction row is not drawn.
+    if (direction->isVisible()) {
+        zaro::app::testing::failf("a dissolve is offering a direction to travel in\n");
+    }
+    if (std::abs(duration->value() - spanOf().range.duration().toSecondsDouble()) > 0.005) {
+        zaro::app::testing::failf("the duration field says %.3f, the span is %.3f\n",
+                                  duration->value(), spanOf().range.duration().toSecondsDouble());
+    }
+
+    const auto span = spanOf().range;
+    const auto middle =
+        span.start() + zaro::time::RationalTime{span.duration().frames() / 2, span.start().rate()};
+    window.setPosition(middle);
+    const QImage dissolved = settledGrab(window.monitor());
+
+    // Now ask for a wipe, through the control somebody would use.
+    kind->setCurrentIndex(kind->findData(static_cast<int>(zaro::model::TransitionKind::Wipe)));
+    QApplication::processEvents();
+    if (spanOf().kind != zaro::model::TransitionKind::Wipe) {
+        zaro::app::testing::failf("choosing a wipe did not reach the model\n");
+    }
+    // And the direction row arrives with it, because a wipe has one.
+    if (!direction->isVisible()) {
+        zaro::app::testing::failf("a wipe is not offering a direction to travel in\n");
+    }
+    // The header names the kind, and it is the panel's own job to re-read it:
+    // `edited` goes to the monitor and the timeline, and only an edit made
+    // somewhere else comes back round as a refresh. It sat over a wipe saying
+    // "Cross dissolve", which is a header describing the last thing rather
+    // than the thing.
+    {
+        auto* name = effects->findChild<QLabel*>("inspector-identity-name");
+        REQUIRE(name != nullptr);
+        if (!name->text().contains("Wipe")) {
+            zaro::app::testing::failf("the header says \"%s\" over a wipe\n",
+                                      name->text().toUtf8().constData());
+        }
+    }
+    direction->setCurrentIndex(
+        direction->findData(static_cast<int>(zaro::model::TransitionDirection::Right)));
+    QApplication::processEvents();
+    const QImage wiped = settledGrab(window.monitor());
+
+    // The measurement: halves of the frame, at the midpoint of the span.
+    const auto halves = [](const QImage& frame) {
+        const QImage left = frame.copy(0, 0, frame.width() / 2, frame.height());
+        const QImage right =
+            frame.copy(frame.width() / 2, 0, frame.width() - frame.width() / 2, frame.height());
+        return std::pair{meanGray(left), meanGray(right)};
+    };
+    const auto [dissolveLeft, dissolveRight] = halves(dissolved);
+    const auto [wipeLeft, wipeRight] = halves(wiped);
+    std::printf("  midpoint: dissolve %.1f / %.1f, wipe %.1f / %.1f\n", dissolveLeft, dissolveRight,
+                wipeLeft, wipeRight);
+    // A dissolve treats both halves alike; a wipe does not. Compared against
+    // each other rather than against absolute numbers, which are a property of
+    // the fixture and of whichever GPU is drawing it.
+    const double dissolveGap = std::abs(dissolveLeft - dissolveRight);
+    const double wipeGap = std::abs(wipeLeft - wipeRight);
+    if (!(wipeGap > dissolveGap * 3.0 + 5.0)) {
+        zaro::app::testing::failf(
+            "the wipe did not split the frame: %.1f between its halves against %.1f for the "
+            "dissolve\n",
+            wipeGap, dissolveGap);
+    }
+
+    // The duration field writes back, and the span keeps straddling its cut.
+    const double wanted = spanOf().range.duration().toSecondsDouble() * 0.5;
+    duration->setValue(wanted);
+    QApplication::processEvents();
+    if (std::abs(spanOf().range.duration().toSecondsDouble() - wanted) > 0.05) {
+        zaro::app::testing::failf("typing %.3f s left the span at %.3f s\n", wanted,
+                                  spanOf().range.duration().toSecondsDouble());
+    }
+    // Centred, so it still covers the cut it belongs to.
+    if (spanOf().range.start() > cutAt || spanOf().range.endExclusive() < cutAt) {
+        zaro::app::testing::failf("shortening the span moved it off its cut\n");
+    }
+
+    // And alignment moves it without changing its length.
+    const auto lengthWas = spanOf().range.duration();
+    alignment->setCurrentIndex(alignment->findData(1));
+    QApplication::processEvents();
+    if (spanOf().range.start().rescaledTo(rate) != cutAt.rescaledTo(rate)) {
+        zaro::app::testing::failf("\"starts at the cut\" left the span starting elsewhere\n");
+    }
+    if (spanOf().range.duration() != lengthWas) {
+        zaro::app::testing::failf("changing the alignment changed the length too\n");
+    }
+
+    // And the page is left behind when the selection is. The Transition page
+    // belongs to no clip and no track, so a clip picked while it is up used to
+    // land on a page with every group hidden and no enabled tab to leave by --
+    // an empty panel that looked like the inspector had stopped working.
+    const auto firstClipId =
+        window.project().findSequence(sequenceId)->findTrack(trackId)->clips().front().id;
+    timeline->selectOnly(trackId, firstClipId);
+    QApplication::processEvents();
+    if (effects->pane() == zaro::app::EffectControls::Pane::Transition) {
+        zaro::app::testing::failf("picking a clip left the Transition page up\n");
+    }
+    if (tab->isEnabled()) {
+        zaro::app::testing::failf("the Transition tab is enabled with a clip selected\n");
+    }
+    {
+        auto* motion = effects->findChild<QGroupBox*>("inspector-group-motion");
+        REQUIRE(motion != nullptr);
+        if (!motion->isVisible()) {
+            zaro::app::testing::failf("the clip's own page did not come back\n");
+        }
+    }
+
+    timeline->selectTransition({}, {});
+    QApplication::processEvents();
+    while (window.commands().canUndo()) {
+        window.commands().undo(window.project());
+    }
+    window.monitor()->update();
     QApplication::processEvents();
 }

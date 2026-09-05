@@ -310,6 +310,7 @@ EffectControls::EffectControls(QWidget* parent) : QWidget{parent} {
     buildAnglesGroup();
     buildNestedGroup();
     buildTrackGroup();
+    buildTransitionGroup();
     buildProcessingGroup();
     buildAudioGroup();
     buildInfoGroup();
@@ -1173,8 +1174,223 @@ void EffectControls::setTrackSelection(model::TrackId track) {
         track_ = {};
         clip_ = {};
         others_.clear();
+        transitionTrack_ = {};
+        transitionSelection_ = {};
     }
     refresh();
+}
+
+void EffectControls::buildTransitionGroup() {
+    auto* box = new QGroupBox("Transition", this);
+    box->setObjectName("inspector-group-transition");
+    auto* form = new QFormLayout(box);
+    transitionForm_ = form;
+
+    // A list, not a grid of pictures. Every other enum in this panel is a
+    // combo -- the blend mode, the key, the shape, the audio role -- and one
+    // control drawn differently because its options happen to be visual would
+    // be the only one of its kind here, sized and styled on its own.
+    transitionKind_ = new QComboBox(this);
+    transitionKind_->setObjectName("transition-kind");
+    transitionKind_->addItem("Cross dissolve",
+                             static_cast<int>(model::TransitionKind::CrossDissolve));
+    transitionKind_->addItem("Wipe", static_cast<int>(model::TransitionKind::Wipe));
+    transitionKind_->addItem("Slide", static_cast<int>(model::TransitionKind::Slide));
+    form->addRow("Type", transitionKind_);
+
+    // One word for both kinds, as the model has it: a wipe to the right
+    // uncovers from the left and a slide to the right enters from the left, so
+    // somebody who has chosen a direction for one already knows what it does
+    // for the other.
+    transitionDirection_ = new QComboBox(this);
+    transitionDirection_->setObjectName("transition-direction");
+    transitionDirection_->addItem("Right", static_cast<int>(model::TransitionDirection::Right));
+    transitionDirection_->addItem("Left", static_cast<int>(model::TransitionDirection::Left));
+    transitionDirection_->addItem("Down", static_cast<int>(model::TransitionDirection::Down));
+    transitionDirection_->addItem("Up", static_cast<int>(model::TransitionDirection::Up));
+    form->addRow("Direction", transitionDirection_);
+
+    // In seconds rather than frames, because it is a length of time somebody
+    // has an opinion about -- "half a second" -- and the sequence's rate is
+    // what turns that into frames. The floor is one frame's worth at any rate
+    // anybody works at; below that there is no span left to blend across.
+    transitionDuration_ = makeSpin(0.02, 60.0, 0.1, 2, " s");
+    transitionDuration_->setObjectName("transition-duration");
+    transitionDuration_->setToolTip("How long the blend lasts");
+    form->addRow("Duration", transitionDuration_);
+
+    // Where the span sits against the cut. The model already allows an
+    // asymmetric one -- a dissolve that starts on the cut and runs into the
+    // incoming clip is an ordinary thing to ask for -- and dragging an edge is
+    // how it was reachable. This is the same three answers, named.
+    transitionAlignment_ = new QComboBox(this);
+    transitionAlignment_->setObjectName("transition-alignment");
+    transitionAlignment_->addItem("Centred on the cut", 0);
+    transitionAlignment_->addItem("Starts at the cut", 1);
+    transitionAlignment_->addItem("Ends at the cut", 2);
+    form->addRow("Alignment", transitionAlignment_);
+
+    transitionRemove_ = new QPushButton("Remove", this);
+    transitionRemove_->setObjectName("transition-remove");
+    transitionRemove_->setToolTip("Take the blend off this cut, leaving both clips where they are");
+    form->addRow(transitionRemove_);
+    transitionGroup_ = box;
+
+    for (QComboBox* combo : {transitionKind_, transitionDirection_}) {
+        connect(combo, &QComboBox::currentIndexChanged, this, [this] { pushTransitionKind(); });
+    }
+    connect(transitionDuration_, &QDoubleSpinBox::valueChanged, this,
+            [this] { pushTransitionRange(); });
+    connect(transitionAlignment_, &QComboBox::currentIndexChanged, this,
+            [this] { pushTransitionRange(); });
+    connect(transitionRemove_, &QPushButton::clicked, this,
+            [this] { emit removeTransitionRequested(); });
+}
+
+const model::Transition* EffectControls::selectedTransition() const {
+    if (project_ == nullptr || !transitionSelection_.isValid()) {
+        return nullptr;
+    }
+    const model::Sequence* sequence = project_->findSequence(sequenceId_);
+    const model::Track* track =
+        sequence == nullptr ? nullptr : sequence->findTrack(transitionTrack_);
+    return track == nullptr ? nullptr : track->findTransition(transitionSelection_);
+}
+
+std::optional<time::RationalTime> EffectControls::transitionCut() const {
+    const model::Transition* transition = selectedTransition();
+    if (transition == nullptr || !transition->isCrossFade()) {
+        return std::nullopt;
+    }
+    const model::Sequence* sequence = project_->findSequence(sequenceId_);
+    const model::Track* track =
+        sequence == nullptr ? nullptr : sequence->findTrack(transitionTrack_);
+    if (track == nullptr) {
+        return std::nullopt;
+    }
+    // The outgoing clip's out point. The two clips a span joins are adjacent
+    // and do not overlap -- that is the invariant the whole design rests on --
+    // so this is also the incoming clip's in point, and asking either gives
+    // the same answer.
+    const model::Clip* outgoing = track->find(transition->from);
+    return outgoing == nullptr ? std::optional<time::RationalTime>{} : outgoing->endExclusive();
+}
+
+void EffectControls::setTransitionSelection(model::TrackId track, model::TransitionId transition) {
+    commitText();
+    transitionTrack_ = track;
+    transitionSelection_ = transition;
+    if (transition.isValid()) {
+        // The third of the three, exclusive with both, as the timeline has it.
+        track_ = {};
+        clip_ = {};
+        others_.clear();
+        trackSelection_ = {};
+    }
+    refresh();
+}
+
+void EffectControls::pushTransitionKind() {
+    if (updating_ || commands_ == nullptr || project_ == nullptr ||
+        !transitionSelection_.isValid()) {
+        return;
+    }
+    const auto kind = static_cast<model::TransitionKind>(transitionKind_->currentData().toInt());
+    const auto direction =
+        static_cast<model::TransitionDirection>(transitionDirection_->currentData().toInt());
+    auto built = edit::makeSetTransitionKind(*project_, {sequenceId_, transitionTrack_},
+                                             transitionSelection_, kind, direction);
+    if (!built) {
+        return;
+    }
+    commands_->execute(*project_, std::move(*built));
+    commands_->breakMerge();
+    // A dissolve has no direction to travel in, so choosing one changes which
+    // rows the page shows and not only what the model says.
+    applyPaneVisibility();
+    // And the header names the kind, so it goes stale otherwise. Nothing else
+    // brings it back: `edited` reaches the monitor and the timeline, and only
+    // an edit made *elsewhere* comes back round to this panel as a refresh.
+    // The header sat saying "Cross dissolve" over a wipe.
+    applyIdentity();
+    emit edited();
+}
+
+std::optional<time::TimeRange> EffectControls::transitionRange() const {
+    const model::Transition* transition = selectedTransition();
+    const model::Sequence* sequence =
+        project_ == nullptr ? nullptr : project_->findSequence(sequenceId_);
+    if (transition == nullptr || sequence == nullptr) {
+        return std::nullopt;
+    }
+    const auto rate = sequence->frameRate();
+    // Rounded to whole frames, because that is what a span is made of. A
+    // duration of "0.33 s" at 24fps is eight frames, and carrying the
+    // remainder would make the same typed number mean different things on
+    // different sequences.
+    const auto frames =
+        static_cast<std::int64_t>(std::llround(transitionDuration_->value() * rate.toDouble()));
+    if (frames <= 0) {
+        return std::nullopt;
+    }
+    const time::RationalTime span{frames, rate};
+
+    // A fade lies inside its clip and is pinned to the end it fades at, so its
+    // length has only one way to grow: away from that end. There is no
+    // alignment to choose, and the control that offers one is hidden.
+    if (!transition->isCrossFade()) {
+        const time::TimeRange was = transition->range.rescaledTo(rate);
+        return transition->isFadeOut() ? time::TimeRange{was.endExclusive() - span, span}
+                                       : time::TimeRange{was.start(), span};
+    }
+
+    const auto cut = transitionCut();
+    if (!cut) {
+        return std::nullopt;
+    }
+    const time::RationalTime at = cut->rescaledTo(rate);
+    switch (transitionAlignment_->currentData().toInt()) {
+        case 1:
+            return time::TimeRange{at, span};
+        case 2:
+            return time::TimeRange{at - span, span};
+        default:
+            // Centred, and centred the way `makeAddCrossDissolve` centres one:
+            // half the length before the cut, rounded down, so an odd frame
+            // falls on the incoming side. Rounding the other way here would be
+            // a second answer to where a centred span sits, and the two would
+            // disagree by a frame every time somebody typed an odd duration.
+            return time::TimeRange{at - time::RationalTime{frames / 2, rate}, span};
+    }
+}
+
+void EffectControls::pushTransitionRange() {
+    if (updating_ || commands_ == nullptr || project_ == nullptr ||
+        !transitionSelection_.isValid()) {
+        return;
+    }
+    const auto wanted = transitionRange();
+    const model::Transition* transition = selectedTransition();
+    if (!wanted || transition == nullptr || *wanted == transition->range) {
+        return;
+    }
+    auto built = edit::makeSetTransitionRange(*project_, {sequenceId_, transitionTrack_},
+                                              transitionSelection_, *wanted);
+    if (!built) {
+        // Refused: there is not enough material either side of the cut to
+        // reach into for a span that long. Put the controls back to what the
+        // transition actually is, rather than leaving a number on screen that
+        // nothing acted on -- a spin box that keeps a value the model rejected
+        // is the silent partial edit this panel exists to avoid.
+        refresh();
+        return;
+    }
+    commands_->execute(*project_, std::move(*built));
+    commands_->breakMerge();
+    // The header carries the length, so it goes stale otherwise -- the same
+    // reason `pushTransitionKind` re-reads it.
+    applyIdentity();
+    emit edited();
 }
 
 void EffectControls::pushTrackState() {
@@ -1359,6 +1575,9 @@ void EffectControls::assemblePanel() {
     layout->addWidget(enabled_);
     layout->addWidget(trackGroup_);
     layout->addWidget(trackLevelGroup_);
+    // Above everything a clip has, beside the track page, because it is the
+    // same sort of thing: a page about something that is not a clip.
+    layout->addWidget(transitionGroup_);
     layout->addWidget(videoGroup_);
     // Under Motion, because what a clip is made of comes before what has been
     // done to it, and above everything a grade touches.
@@ -1472,6 +1691,8 @@ void EffectControls::setSelection(model::TrackId track, model::ClipId clip) {
     clip_ = clip;
     others_.clear();
     trackSelection_ = {};
+    transitionTrack_ = {};
+    transitionSelection_ = {};
     refresh();
 }
 
@@ -1487,9 +1708,15 @@ void EffectControls::setSelection(const std::vector<edit::ClipRef>& clips) {
     track_ = clips.front().track;
     clip_ = clips.front().clip;
     others_.assign(clips.begin() + 1, clips.end());
-    // Picking clips turns a track selection off, the same way the timeline
-    // treats the two as exclusive.
+    // Picking clips turns a track or a transition selection off, the same way
+    // the timeline treats the three as exclusive.
+    //
+    // In this branch only, as with the track: the timeline announces an empty
+    // clip selection on its way to picking one of the other two, and clearing
+    // them on that would undo the selection being made a moment later.
     trackSelection_ = {};
+    transitionTrack_ = {};
+    transitionSelection_ = {};
     refresh();
 }
 
@@ -1641,6 +1868,7 @@ void EffectControls::setEditingEnabled(bool enabled) {
     effectGroup_->setEnabled(enabled);
     audioGroup_->setEnabled(enabled);
     processingGroup_->setEnabled(enabled);
+    transitionGroup_->setEnabled(enabled);
 }
 
 void EffectControls::refresh() {
@@ -1648,8 +1876,24 @@ void EffectControls::refresh() {
 }
 
 void EffectControls::applyToWidgets() {
+    // The Transition page belongs to a transition and to nothing else. Every
+    // group on it is hidden without one, and the clip and track pages are
+    // hidden unless their own page is up -- so any other selection arriving
+    // while this one is showing would find an empty column and no tab enabled
+    // to leave by.
+    //
+    // Here rather than at each of the three ways in, because there are three:
+    // a clip, a track, and nothing at all can each replace a transition, and
+    // the rule is the same for all of them.
+    if (pane_ == Pane::Transition && !transitionSelection_.isValid()) {
+        setPane(Pane::Inspector);
+    }
     if (trackSelection_.isValid()) {
         applyTrack();
+        return;
+    }
+    if (transitionSelection_.isValid()) {
+        applyTransition();
         return;
     }
     const model::Clip* clip = selectedClip();
@@ -2032,6 +2276,62 @@ void EffectControls::applyTrack() {
     }
 }
 
+void EffectControls::applyTransition() {
+    const model::Transition* transition = selectedTransition();
+    if (transition == nullptr) {
+        // It went away -- removed, undone, or the panel was rebound to another
+        // sequence. Fall back to having nothing selected rather than showing a
+        // page about it, exactly as a vanished track does.
+        transitionTrack_ = {};
+        transitionSelection_ = {};
+        setEditingEnabled(false);
+        applyIdentity();
+        setPane(Pane::Inspector);
+        return;
+    }
+    setEditingEnabled(true);
+    transitionGroup_->setEnabled(true);
+
+    const model::Sequence* sequence = project_->findSequence(sequenceId_);
+    const auto rate = sequence->frameRate();
+
+    updating_ = true;
+    transitionKind_->setCurrentIndex(transitionKind_->findData(static_cast<int>(transition->kind)));
+    transitionDirection_->setCurrentIndex(
+        transitionDirection_->findData(static_cast<int>(transition->direction)));
+    transitionDuration_->setValue(transition->range.duration().toSecondsDouble());
+
+    // Which of the three the span already is. Worked out rather than
+    // remembered: the edges can be dragged, so the panel is not the only thing
+    // that decides where a span sits, and a control showing the last thing
+    // *it* was set to would contradict the timeline.
+    int alignment = 0;
+    if (const auto cut = transitionCut()) {
+        const time::RationalTime at = cut->rescaledTo(rate);
+        const time::TimeRange span = transition->range.rescaledTo(rate);
+        if (span.start() == at) {
+            alignment = 1;
+        } else if (span.endExclusive() == at) {
+            alignment = 2;
+        } else if (span.start() != at - time::RationalTime{span.duration().frames() / 2, rate}) {
+            // Dragged to somewhere none of the three names, which the edges
+            // allow and this panel should not misreport. Left blank rather
+            // than shown as centred: an empty box reads as "none of these",
+            // and picking one still sets it.
+            alignment = -1;
+        }
+    }
+    transitionAlignment_->setCurrentIndex(
+        alignment < 0 ? -1 : transitionAlignment_->findData(alignment));
+    updating_ = false;
+
+    applyIdentity();
+    // A transition has one page, and this is it. A selection that arrives
+    // while another is up moves there rather than showing three disabled tabs
+    // over an empty column.
+    setPane(Pane::Transition);
+}
+
 void EffectControls::addRow(QFormLayout* form, const QString& label, model::Param param,
                             QDoubleSpinBox* spin, std::optional<SliderSpan> span) {
     // A diamond for the stopwatch and a diamond for the keyframe: the same
@@ -2289,6 +2589,12 @@ void EffectControls::buildHeader() {
          &inspectorTab_},
         {"Audio", "inspector-tab-audio", "How this clip sounds", Pane::Audio, &audioTab_},
         {"Info", "inspector-tab-info", "What this clip is", Pane::Info, &infoTab_},
+        // Last, so adding it left the other three where they were. The strip
+        // is deliberately fixed for that reason -- a tab that shifts is a tab
+        // somebody misses -- and that argument applies to adding one as much
+        // as to hiding one.
+        {"Transition", "inspector-tab-transition", "How this cut blends", Pane::Transition,
+         &transitionTab_},
     };
     for (const TabSpec& spec : specs) {
         auto* tab = new QPushButton(QString::fromUtf8(spec.label), tabBar_);
@@ -2382,9 +2688,10 @@ void EffectControls::buildInfoGroup() {
 
 void EffectControls::setPane(Pane pane) {
     pane_ = pane;
-    QPushButton* wanted = pane == Pane::Inspector ? inspectorTab_
-                          : pane == Pane::Audio   ? audioTab_
-                                                  : infoTab_;
+    QPushButton* wanted = pane == Pane::Inspector    ? inspectorTab_
+                          : pane == Pane::Audio      ? audioTab_
+                          : pane == Pane::Transition ? transitionTab_
+                                                     : infoTab_;
     if (wanted != nullptr && !wanted->isChecked()) {
         const QSignalBlocker block{wanted};
         wanted->setChecked(true);
@@ -2400,6 +2707,47 @@ void EffectControls::setPane(Pane pane) {
 
 void EffectControls::applyPaneVisibility() {
     const bool inspector = pane_ == Pane::Inspector;
+
+    // A transition is its own page and the only selection with a tab of its
+    // own. Handled first and returned from, for the reason the track branch
+    // below is: none of the clip rules should run against a selection with no
+    // clip in it.
+    const model::Transition* transition = selectedTransition();
+    transitionGroup_->setVisible(transition != nullptr && pane_ == Pane::Transition);
+    transitionTab_->setEnabled(transition != nullptr);
+    if (transition != nullptr) {
+        for (QWidget* widget :
+             {enabled_ ? static_cast<QWidget*>(enabled_) : nullptr, videoGroup_, anglesGroup_,
+              nestedGroup_, colourGroup_, secondaryGroup_, keyGroup_, effectGroup_, maskGroup_,
+              graphicGroup_, textGroup_, audioGroup_, processingGroup_, trackGroup_,
+              trackLevelGroup_, infoGroup_}) {
+            if (widget != nullptr) {
+                widget->setVisible(false);
+            }
+        }
+        if (transitionForm_ != nullptr) {
+            // A dissolve has nowhere to travel, so it has no direction to
+            // choose. A fade lies inside its clip and straddles no cut, so it
+            // has no alignment to choose either -- both rows go rather than
+            // grey out, because a control for a question this kind does not
+            // ask says less than no control at all.
+            transitionForm_->setRowVisible(
+                transitionDirection_, transition->kind != model::TransitionKind::CrossDissolve);
+            transitionForm_->setRowVisible(transitionAlignment_, transition->isCrossFade());
+        }
+        // The other three describe a clip, and there is not one. Disabled
+        // rather than hidden, which is the rule the strip already follows.
+        inspectorTab_->setEnabled(false);
+        audioTab_->setEnabled(false);
+        infoTab_->setEnabled(false);
+        // The reset arrow puts the kind back and leaves the length alone. It
+        // is narrower than the tab it sits over on every other page too: the
+        // length is what somebody dragged, and an arrow that threw that away
+        // as well would be the most expensive click here.
+        resetButton_->setEnabled(transition->kind != model::TransitionKind::CrossDissolve);
+        resetButton_->setToolTip("Back to a cross dissolve");
+        return;
+    }
 
     // A track selection is its own page. Everything below describes a clip,
     // and a track has none of it: no transform, no grade, no mask. Handled
@@ -2552,6 +2900,27 @@ void EffectControls::applyPaneVisibility() {
 }
 
 void EffectControls::applyIdentity() {
+    if (const model::Transition* span = selectedTransition(); span != nullptr) {
+        identityTile_->setPixmap(icons::pixmap(icons::Glyph::CrossFade, 14, theme::accent(300)));
+        // The name the picker uses, read back from the picker. A second table
+        // of display names here would be a second thing to keep in step, and
+        // the first symptom of it drifting is a header naming a kind the list
+        // below it does not offer.
+        identityNameFull_ =
+            transitionKind_->itemText(transitionKind_->findData(static_cast<int>(span->kind)));
+        identityName_->setToolTip(identityNameFull_);
+
+        // What it joins is the fact worth putting here: a fade and a cross
+        // fade look the same on the timeline and behave differently, and only
+        // one of them has a cut under it.
+        identityMetaFull_ = QString("%1 s · %2")
+                                .arg(span->range.duration().toSecondsDouble(), 0, 'f', 2)
+                                .arg(span->isCrossFade() ? "across the cut"
+                                     : span->isFadeIn()  ? "fade in"
+                                                         : "fade out");
+        elideIdentity();
+        return;
+    }
     if (const model::Track* picked = selectedTrack(); picked != nullptr) {
         const bool sound = picked->kind() == model::TrackKind::Audio;
         identityTile_->setPixmap(icons::pixmap(
@@ -2809,6 +3178,26 @@ void EffectControls::resetPane() {
     // and one arrow that threw all of them away would be the most expensive
     // click in the panel. The tooltip says which it is, and the command stack
     // takes it back either way.
+    // A transition's reset is its kind, and deliberately not its length. The
+    // length is what somebody dragged an edge to get, and it is the one thing
+    // on this page that is a piece of work rather than a choice from a list.
+    if (pane_ == Pane::Transition) {
+        if (commands_ == nullptr || project_ == nullptr || selectedTransition() == nullptr) {
+            return;
+        }
+        commands_->breakMerge();
+        updating_ = true;
+        transitionKind_->setCurrentIndex(
+            transitionKind_->findData(static_cast<int>(model::TransitionKind::CrossDissolve)));
+        transitionDirection_->setCurrentIndex(
+            transitionDirection_->findData(static_cast<int>(model::TransitionDirection::Right)));
+        updating_ = false;
+        pushTransitionKind();
+        commands_->breakMerge();
+        refresh();
+        emit edited();
+        return;
+    }
     if (commands_ == nullptr || project_ == nullptr || !clip_.isValid()) {
         return;
     }
