@@ -5240,3 +5240,89 @@ is precisely the failure being guarded.
 **Not done.** Image sequences, audio-only stems, and EDL: the remaining holes in
 §7.7 that need no new dependency. AAF needs one and is a decision rather than a
 task.
+
+---
+
+### Phase 8k — the transition panel §7.4 ✅
+
+Five more transition kinds, two properties, and the page they are chosen on. The
+starting point was a feature half built: `transitionShapeFor` had rendered wipes
+and slides since Phase 6o, both saved and loaded, and **neither could be asked
+for**. `setTransitionKindAtPlayhead` was the only way to reach them and its only
+callers were two tests. A dissolve could be added and stretched but not removed
+— `makeRemoveTransition` existed with no caller at all — and a transition could
+not be selected, so there was nothing for a panel of its properties to be about.
+
+**A transition is the third thing a selection can be.** Clips, a track, and now
+a span: exclusive with both, on the rule the track already followed. The body of
+a span is hit-tested after its edges and before the clips — pressing the middle
+picks it and pressing near an end still stretches it, and both have to beat the
+clips because the span is drawn over the cut it straddles. It gets the tab
+rather than borrowing the Inspector page the way a track does: a track's page is
+at least about the clips on it, while a transition is about the join between two
+of them, and the picture it makes exists only while both are on screen.
+
+**Easing lives in `progressAt`, which is what put it on the sound.** Pacing is a
+property of the blend rather than of the shape it makes, and `progressAt` is the
+one question both render paths *and* the audio crossfade ask. `AudioGraph`
+learned nothing about curves and is eased anyway. Easing in `transitionShapeFor`
+instead would have given an eased dissolve sitting over a crossfade still
+running at a constant rate — two answers to one question, which is the drift
+that file exists to prevent. The test measures the mixer, not the maths: slow to
+start holds the level up and slow to finish has already taken it down, at the
+same sample.
+
+**Softness is one formula, not two paths.** A soft edge needs the boundary to
+start and finish half a ramp beyond the frame, or the wipe begins already
+showing a sliver of the incoming shot; and it needs the other three sides of the
+rectangle a whole ramp outside, or the wipe *finishes* with the incoming clip
+softened along all four edges, which is a vignette. Both fall out of `pad =
+feather`, so at a softness of zero every number is exactly what a hard wipe
+always produced — which is why the four golden assertions from Phase 6o pass
+untouched rather than needing new expectations. That is the evidence the rewrite
+is behaviour-preserving, and it is worth more than a new test would have been.
+
+**The shape describes both clips now.** It described the incoming one, and a
+push and a dip are not incoming-side effects with a trick: in a push the
+outgoing shot is shoved off the frame, in a dip it fades away before the other
+arrives. The alternative — each render path special-casing two kinds — is
+exactly what this file exists to prevent. Composition moved into
+`shapedTransform` at the same time: there are four draw sites across two paths
+and the field count went from three to five while adding a zoom, which is how a
+side applied in three of them starts.
+
+**A dip is the absence of both clips, not a colour drawn between them.** That is
+what makes it need no fill primitive, and why it is dip to *black* rather than
+dip to a colour anybody picks. It is also the measurement no one-sided shape
+could have made: at the midpoint the frame reads 0.0 through the GPU, because
+the outgoing clip can finally be turned off.
+
+**One place decides what a kind offers.** `transitionTravels` and
+`transitionHasEdge` are on the model and the panel asks rather than keeping its
+own list. A kind that travels in the shape but not in the panel is a transition
+nobody can aim. A slide travels and has no edge; an iris has an edge and does
+not travel; a zoom and a dip have neither.
+
+**Two bugs the work found, both only visible in a running window.** The
+Transition page belongs to no clip and no track, so anything picked after a
+transition landed on a page with every group hidden and no enabled tab to leave
+by — found by five unrelated GUI tests failing at once. And the header sat over
+a wipe reading "Cross dissolve": `edited` reaches the monitor and the timeline,
+and only an edit made *elsewhere* comes back to this panel as a refresh, so a
+page has to re-read its own header after writing.
+
+**Adding a dissolve selects it.** "Somebody drops a dissolve on a cut and then
+decides it wants to be a wipe" is what `makeAddCrossDissolve`'s own comment says
+it is for, and until this there was nothing to select it into — so the next step
+was hunting for a span that can be two pixels wide. The new span is found by id
+rather than by count, because adding a fade replaces one at the same end rather
+than stacking, so a count can stay where it was.
+
+**Not done: dip to a colour anybody picks.** It needs a solid drawn over the
+outgoing clip and under the incoming one — a new operation in both render paths,
+which neither can currently do. The seven kinds here all reduce to an opacity, a
+transform or a mask, which is why they cost a table entry each.
+
+**Not done: transitions on the way out.** OTIO, FCPXML and Premiere carry
+transitions and this model still exports none of them, so a softness and a
+pacing are Zaro-only. Not a regression, but a wider gap than before.

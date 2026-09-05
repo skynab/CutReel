@@ -649,6 +649,111 @@ TEST_CASE("A nested clip with no project resolves to nothing", "[render][graph][
     CHECK(graph.lastClipCount() == 0);
 }
 
+TEST_CASE("A nested sequence draws inside a transition", "[render][graph][nest][transition]") {
+    // The gap Phase 6o recorded and left: a transition resolved a clip's
+    // picture through one function that knew about media and generated clips
+    // and not about nests, so a dissolve onto a nested sequence drew nothing.
+    // Silently, because a clip whose picture cannot be resolved is treated as a
+    // gap rather than an error -- which is the failure mode that rule buys
+    // tolerance for and here bought silence instead, exactly as it did for
+    // generated clips before them.
+    Fixture f;
+    f.sequence().setSize(32, 32);
+    SolidFrameSource source{32, 32};
+    source.define(f.longMedia, opaque(1.0F, 0.0F, 0.0F));
+    render::RenderGraph graph{source};
+    graph.setProject(&f.project);
+
+    // An inner sequence holding a blue clip, so what it contributes can be told
+    // from the red the outer sequence reads directly.
+    const model::MediaRefId blueMedia = f.addMedia("blue.mov", 10000);
+    source.define(blueMedia, opaque(0.0F, 0.0F, 1.0F));
+    model::Sequence inner{f.project.ids().next<model::SequenceTag>(), "inner", time::rates::fps25};
+    inner.setSize(32, 32);
+    const model::SequenceId innerId = inner.id();
+    const auto innerTrack = f.project.ids().next<model::TrackTag>();
+    inner.addTrack(innerTrack, model::TrackKind::Video, "V1");
+    f.project.addSequence(std::move(inner));
+    REQUIRE(f.run(
+        edit::makeOverwrite(f.project, {innerId, innerTrack}, f.clip(0, 100, 500, blueMedia))));
+
+    // Red first, then the nest, with a dissolve across the cut between them.
+    REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.v1), f.clip(0, 50))));
+    model::Clip nest = f.clip(50, 50, 0);
+    nest.nested = innerId;
+    nest.sourceRange = f.range(20, 50);
+    REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.v1), nest)));
+    REQUIRE(f.run(edit::makeAddCrossDissolve(f.project, f.on(f.v1), f.at(50), f.at(20))));
+
+    const auto range = f.track(f.v1).transitions().front().range;
+    const time::RationalTime middle =
+        range.start() + time::RationalTime{range.duration().frames() / 2, range.start().rate()};
+
+    const auto frame = graph.composite(f.sequence(), middle);
+    REQUIRE(frame);
+    const render::Rgba pixel = frame->at(16, 16);
+    INFO("midpoint r=" << pixel.r << " b=" << pixel.b);
+    // Half way through, both shots are on screen. The nest drawing nothing
+    // would leave the red at full strength and no blue at all, which is what
+    // this measured before.
+    CHECK(pixel.b > 0.2F);
+    CHECK(pixel.r > 0.2F);
+    CHECK(pixel.r < 0.9F);
+    CHECK(graph.lastClipCount() == 2);
+}
+
+TEST_CASE("A nest inside a nest keeps the buffer it is drawing into", "[render][graph][nest]") {
+    // Two levels, which nothing nested before. The buffers a level composites
+    // into live in one vector indexed by depth, and that vector used to grow a
+    // level at a time -- inside the very recursion that was holding a reference
+    // into it. The second level's growth moved the first level's buffer and
+    // left it compositing into freed memory.
+    //
+    // A use-after-free does not reliably show as a wrong pixel, so what this
+    // pins is that two levels resolve to the right picture at all; the fix is
+    // to size the vector once, and this is the case that reaches it.
+    Fixture f;
+    f.sequence().setSize(32, 32);
+    SolidFrameSource source{32, 32};
+    source.define(f.longMedia, opaque(0.0F, 1.0F, 0.0F));
+    render::RenderGraph graph{source};
+    graph.setProject(&f.project);
+
+    // innermost: a green clip. middle: the innermost. outer: the middle.
+    model::Sequence innermost{f.project.ids().next<model::SequenceTag>(), "innermost",
+                              time::rates::fps25};
+    innermost.setSize(32, 32);
+    const model::SequenceId innermostId = innermost.id();
+    const auto innermostTrack = f.project.ids().next<model::TrackTag>();
+    innermost.addTrack(innermostTrack, model::TrackKind::Video, "V1");
+    f.project.addSequence(std::move(innermost));
+    REQUIRE(
+        f.run(edit::makeOverwrite(f.project, {innermostId, innermostTrack}, f.clip(0, 100, 500))));
+
+    model::Sequence middle{f.project.ids().next<model::SequenceTag>(), "middle",
+                           time::rates::fps25};
+    middle.setSize(32, 32);
+    const model::SequenceId middleId = middle.id();
+    const auto middleTrack = f.project.ids().next<model::TrackTag>();
+    middle.addTrack(middleTrack, model::TrackKind::Video, "V1");
+    f.project.addSequence(std::move(middle));
+    model::Clip innerNest = f.clip(0, 100, 0);
+    innerNest.nested = innermostId;
+    innerNest.sourceRange = f.range(0, 100);
+    REQUIRE(f.run(edit::makeOverwrite(f.project, {middleId, middleTrack}, innerNest)));
+
+    model::Clip outerNest = f.clip(0, 50, 0);
+    outerNest.nested = middleId;
+    outerNest.sourceRange = f.range(0, 50);
+    REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.v1), outerNest)));
+
+    const auto frame = graph.composite(f.sequence(), f.at(10));
+    REQUIRE(frame);
+    CHECK(frame->at(16, 16).g == Approx(1.0F));
+    CHECK(frame->at(16, 16).a == Approx(1.0F));
+    CHECK(graph.lastClipCount() == 1);
+}
+
 TEST_CASE("An adjustment layer grades what is beneath it", "[render][graph][adjustment]") {
     Fixture f;
     f.sequence().setSize(16, 16);
