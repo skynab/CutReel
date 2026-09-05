@@ -54,6 +54,7 @@
 #include "ThumbnailCache.h"
 #include "TitlePresets.h"
 #include "chrome/FlowLayout.h"
+#include "chrome/Widgets.h"
 
 namespace zaro::app {
 namespace {
@@ -168,18 +169,6 @@ QString describe(const model::Subclip& subclip, const model::MediaRef& source) {
 
 /// Bytes as the footer says them. One decimal, because the number is a sense of
 /// scale and not an accounting.
-QString humanSize(std::uintmax_t bytes) {
-    constexpr double kUnit = 1024.0;
-    const double value = static_cast<double>(bytes);
-    if (value >= kUnit * kUnit * kUnit) {
-        return QString("%1 GB").arg(value / (kUnit * kUnit * kUnit), 0, 'f', 1);
-    }
-    if (value >= kUnit * kUnit) {
-        return QString("%1 MB").arg(value / (kUnit * kUnit), 0, 'f', 1);
-    }
-    return QString("%1 kB").arg(value / kUnit, 0, 'f', 0);
-}
-
 /// Every media id any sequence puts on a track.
 ///
 /// The design marks used footage with a dot, and the honest answer to "is this
@@ -627,7 +616,6 @@ ProjectBin::ProjectBin(QWidget* parent) : QWidget{parent} {
     // Media is the only tab with a list behind it; the rest are a sentence
     // pointing at the panel that does own them.
     pages_ = new QStackedWidget(this);
-    pages_->addWidget(list_);
     const auto note = [this](const QString& text) {
         auto* label = new QLabel(text, this);
         label->setWordWrap(true);
@@ -636,6 +624,15 @@ ProjectBin::ProjectBin(QWidget* parent) : QWidget{parent} {
         label->setProperty("muted", true);
         return label;
     };
+    // The Media tab is a list *or* a sentence, so it is a stack of its own
+    // inside the tab stack. An empty bin used to be a blank rectangle -- on the
+    // tab a new project opens in, and on a pane that quietly accepts dropped
+    // files without anything on screen saying so. `applyFilter` picks which.
+    binEmpty_ = note(QString{});
+    mediaPage_ = new QStackedWidget(this);
+    mediaPage_->addWidget(list_);
+    mediaPage_->addWidget(binEmpty_);
+    pages_->addWidget(mediaPage_);
     pages_->addWidget(
         note(QStringLiteral("Effects live in the Effects panel, beside the monitor.")));
 
@@ -662,9 +659,14 @@ ProjectBin::ProjectBin(QWidget* parent) : QWidget{parent} {
         item->setSizeHint(QSize{0, 34});
     }
     // Double-click is the same as the button: some people drag, some people
-    // put the playhead where they want it and ask.
-    connect(titleList_, &QListWidget::itemDoubleClicked, this,
-            [this] { emit addTitleRequested(); });
+    // put the playhead where they want it and ask. Whichever way, it is the row
+    // under the pointer that gets made -- a double-click on Caption that added
+    // a centred card was the pane offering three things and doing one.
+    connect(titleList_, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem* item) {
+        if (item != nullptr) {
+            emit addTitleRequested(item->data(Qt::UserRole).toString());
+        }
+    });
     titlesColumn->addWidget(titleList_, 1);
 
     titlesColumn->addWidget(
@@ -672,7 +674,14 @@ ProjectBin::ProjectBin(QWidget* parent) : QWidget{parent} {
     auto* addTitle = new QPushButton(QStringLiteral("Add Title"), titles);
     addTitle->setObjectName("add-title");
     addTitle->setCursor(Qt::PointingHandCursor);
-    connect(addTitle, &QPushButton::clicked, this, [this] { emit addTitleRequested(); });
+    // The button adds whatever is picked in the list, so selecting a row and
+    // pressing it agrees with double-clicking that row. Nothing picked means
+    // the plain title, which is what the button said before it had a list.
+    connect(addTitle, &QPushButton::clicked, this, [this] {
+        const QListWidgetItem* picked = titleList_->currentItem();
+        emit addTitleRequested(picked != nullptr ? picked->data(Qt::UserRole).toString()
+                                                 : QStringLiteral("title"));
+    });
     auto* buttonRow = new QHBoxLayout;
     buttonRow->setContentsMargins(12, 0, 12, 12);
     buttonRow->addStretch(1);
@@ -865,6 +874,23 @@ void ProjectBin::applyFilter() {
     footer_->setText(filter_.isEmpty() && bin_.isEmpty() && !usedOnly_
                          ? summary()
                          : QString("%1 of %2 shown").arg(shown).arg(rows));
+
+    // A list with nothing in it says why, and the two reasons are different
+    // things: a project with no footage yet wants to know how to get some, and
+    // a search that matched nothing wants to know that is what happened rather
+    // than that the bin emptied itself.
+    if (shown == 0) {
+        binEmpty_->setText(rows == 0
+                               ? QStringLiteral("No media yet.\n\nPress Import, or drop files here "
+                                                "from the file manager.")
+                               : QStringLiteral("Nothing here matches what you are looking for."));
+    }
+    mediaPage_->setCurrentWidget(shown == 0 ? static_cast<QWidget*>(binEmpty_)
+                                            : static_cast<QWidget*>(list_));
+
+    // Chips count things; with nothing to count they are a row of zeroes above
+    // a sentence explaining there is nothing yet.
+    chipHolder_->setVisible(rows > 0);
 }
 
 /// How many files, what they weigh, and where the proxies stand.
@@ -901,7 +927,7 @@ QString ProjectBin::summary() const {
     }
     return QString("%1 %2 · %3 · %4")
         .arg(total)
-        .arg(total == 1 ? "item" : "items", humanSize(bytes), proxies);
+        .arg(total == 1 ? "item" : "items", chrome::humanSize(static_cast<double>(bytes)), proxies);
 }
 
 /// The actions that used to be four buttons under the list.

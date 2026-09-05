@@ -87,6 +87,34 @@ bool GpuRenderGraph::drawTransitionSide(const model::Clip& clip, const model::Se
         }
         return drawClipImage(clip, scratch, transform, at, wipe);
     }
+    if (clip.nested.isValid()) {
+        // The same sub-render the ordinary path does, and the last kind of clip
+        // a transition could not draw: before this, a dissolve onto a nested
+        // sequence drew nothing, silently, because a clip whose picture cannot
+        // be resolved is treated as a gap rather than an error.
+        //
+        // `composite` hands back a frame by value, so the two halves of a
+        // transition do not need separate buffers here the way they do on the
+        // CPU side -- each call owns what it returns.
+        if (nestedSource_ == nullptr || project_ == nullptr) {
+            return false;
+        }
+        const model::Sequence* inner = project_->findSequence(clip.nested);
+        if (inner == nullptr) {
+            return false;
+        }
+        if (nested_ == nullptr) {
+            nested_ = std::make_unique<render::RenderGraph>(*nestedSource_);
+            nested_->setProject(project_);
+            nested_->setTextRasterizer(text_);
+            nested_->setRenderCache(cache_);
+        }
+        auto composed = nested_->composite(*inner, clip.sourceTimeAt(at));
+        if (!composed) {
+            return false;
+        }
+        return drawClipImage(clip, *composed, transform, at, wipe);
+    }
     auto frame = provider_->sourceFrameFor(clip.activeSource(), clip.activeSourceTimeAt(at));
     if (!frame) {
         return false;
@@ -208,26 +236,30 @@ Status GpuRenderGraph::drawClips(const model::Sequence& sequence, const time::Ra
 
             if (outgoing != nullptr && incoming != nullptr) {
                 const double progress = transition->progressAt(at);
+                // The same function the CPU path calls, so the two cannot come
+                // to different answers about where a wipe's edge is -- and the
+                // same composition helper, so they cannot differ about how a
+                // side lands on a clip's own transform either.
+                const render::TransitionShape shape = render::transitionShapeFor(
+                    *transition, progress, sequence.width(), sequence.height());
 
                 if (outgoing->enabled &&
-                    drawTransitionSide(*outgoing, sequence,
-                                       pinnedTransformAt(sequence, *outgoing, at), at, generated_,
-                                       nullptr)) {
+                    drawTransitionSide(
+                        *outgoing, sequence,
+                        render::shapedTransform(pinnedTransformAt(sequence, *outgoing, at),
+                                                shape.outgoing),
+                        at, generated_,
+                        shape.outgoing.mask.isSet() ? &shape.outgoing.mask : nullptr)) {
                     ++lastClipCount_;
                 }
-                if (incoming->enabled) {
-                    // The same function the CPU path calls, so the two cannot
-                    // come to different answers about where a wipe's edge is.
-                    const render::TransitionShape shape = render::transitionShapeFor(
-                        *transition, progress, sequence.width(), sequence.height());
-                    model::Transform moving = pinnedTransformAt(sequence, *incoming, at);
-                    moving.opacity *= shape.opacity;
-                    moving.positionX += shape.offsetX;
-                    moving.positionY += shape.offsetY;
-                    if (drawTransitionSide(*incoming, sequence, moving, at, generatedB_,
-                                           shape.wipe.isSet() ? &shape.wipe : nullptr)) {
-                        ++lastClipCount_;
-                    }
+                if (incoming->enabled &&
+                    drawTransitionSide(
+                        *incoming, sequence,
+                        render::shapedTransform(pinnedTransformAt(sequence, *incoming, at),
+                                                shape.incoming),
+                        at, generatedB_,
+                        shape.incoming.mask.isSet() ? &shape.incoming.mask : nullptr)) {
+                    ++lastClipCount_;
                 }
                 continue;
             }

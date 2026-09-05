@@ -1,6 +1,7 @@
 #include <cstdint>
 #include <set>
 
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include "zaro/core/edit/Operations.h"
@@ -524,7 +525,14 @@ TEST_CASE("Every serializable field survives, set to a non-default value", "[io]
     dissolve.to = second.id;
     dissolve.range = time::TimeRange{time::RationalTime{40, time::rates::fps23_976},
                                      time::RationalTime{16, time::rates::fps23_976}};
-    dissolve.kind = model::TransitionKind::CrossDissolve;
+    // A wipe rather than a dissolve, so the fields a dissolve has no use for
+    // are actually written: the encoder leaves out a direction and a softness
+    // where they would mean nothing, so a dissolve here would test that they
+    // round-trip by never carrying them at all.
+    dissolve.kind = model::TransitionKind::Wipe;
+    dissolve.direction = model::TransitionDirection::Up;
+    dissolve.softness = 0.35;
+    dissolve.easing = model::TransitionEasing::InOut;
     video.setTransitions({dissolve});
 
     project.addSequence(std::move(sequence));
@@ -628,7 +636,10 @@ TEST_CASE("Every serializable field survives, set to a non-default value", "[io]
     CHECK(loadedTransition.from == first.id);
     CHECK(loadedTransition.to == second.id);
     CHECK(loadedTransition.range == dissolve.range);
-    CHECK(loadedTransition.kind == model::TransitionKind::CrossDissolve);
+    CHECK(loadedTransition.kind == model::TransitionKind::Wipe);
+    CHECK(loadedTransition.direction == model::TransitionDirection::Up);
+    CHECK(loadedTransition.softness == Catch::Approx(0.35));
+    CHECK(loadedTransition.easing == model::TransitionEasing::InOut);
 
     // And the whole thing compares equal, which the field checks above make
     // meaningful rather than merely reassuring.

@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include "zaro/core/model/Sequence.h"
@@ -30,7 +31,13 @@ public:
         std::int32_t trackGap{1};
         std::int32_t rulerHeight{26};
         /// Width of the track headers, to the left of the time area.
-        std::int32_t headerWidth{150};
+        ///
+        /// Wide enough for the names this application gives tracks itself. The
+        /// header spends a badge column on the left and three control buttons
+        /// on the right, which left about fifty pixels in the middle for the
+        /// name -- so a new project elided its own default "Dialogue" to
+        /// "Dialog…" while the header still had free space in it.
+        std::int32_t headerWidth{170};
         /// How close to a clip edge counts as grabbing the edge rather than the
         /// body. Generous, because a trim handle that needs pixel accuracy is
         /// one nobody uses.
@@ -186,6 +193,19 @@ public:
     /// A sensible tick interval for the ruler at the current zoom: the finest
     /// division that still leaves labels readable.
     [[nodiscard]] time::RationalTime rulerStep(const time::Rational& frameRate) const;
+
+    /// What the ruler writes under the tick at `at`.
+    ///
+    /// The format follows the tick spacing rather than only the length of the
+    /// cut. `rulerStep` hands back halves, fifths and tenths of a second, and
+    /// single frames when the zoom allows -- so a label that stopped at whole
+    /// seconds printed the same text under two, five or twenty-five ticks in a
+    /// row, which is a ruler that has spent its width repeating itself.
+    ///
+    /// `withHours` adds the hours field, for a cut long enough that minutes
+    /// alone would label 05:00 twice. Drop-frame numbering is taken from the
+    /// rate, so the separator says which it is.
+    [[nodiscard]] std::string rulerLabel(const time::RationalTime& at, bool withHours) const;
 
 private:
     Metrics metrics_{};

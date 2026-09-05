@@ -2,6 +2,7 @@
 
 #include <string>
 
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include "zaro/core/edit/Operations.h"
@@ -360,4 +361,140 @@ TEST_CASE("Saving and loading a file agrees with the strings", "[io][premiere]")
     REQUIRE(parsed);
     CHECK(loaded->sequences().front().videoTracks().front().clips().size() ==
           parsed->sequences().front().videoTracks().front().clips().size());
+}
+
+TEST_CASE("A transition round trips through xmeml", "[io][premiere][transition]") {
+    // Transitions were written nowhere, so a cut built here and opened in
+    // Premiere arrived as a hard cut. This format has a place for one --
+    // `transitionitem` carries the span's timeline range and names where the
+    // join sits inside it -- which is the same shape the model already has.
+    Fixture f;
+    REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.v1), f.clip(0, 50, 500))));
+    REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.v1), f.clip(50, 50, 500))));
+    REQUIRE(f.run(edit::makeAddCrossDissolve(f.project, f.on(f.v1), f.at(50), f.at(20))));
+
+    const model::TransitionId id = f.track(f.v1).transitions().front().id;
+    edit::TransitionSettings settings;
+    settings.kind = model::TransitionKind::Wipe;
+    settings.direction = model::TransitionDirection::Left;
+    settings.softness = 0.25;
+    settings.easing = model::TransitionEasing::Out;
+    REQUIRE(f.run(edit::makeSetTransitionSettings(f.project, f.on(f.v1), id, settings)));
+    const auto wanted = f.track(f.v1).transitions().front().range;
+
+    const auto text = io::writePremiereXml(f.project, f.sequenceId);
+    REQUIRE(text);
+    // The format's own vocabulary, so an importer that never heard of this
+    // program still finds a wipe where one belongs.
+    CHECK(text->find("<transitionitem>") != std::string::npos);
+    CHECK(text->find("<effectid>Wipe</effectid>") != std::string::npos);
+    CHECK(text->find("<alignment>center</alignment>") != std::string::npos);
+
+    const auto back = io::readPremiereXml(*text);
+    REQUIRE(back);
+    const model::Track& video = back->sequences().front().videoTracks().front();
+    REQUIRE(video.transitions().size() == 1);
+    const model::Transition& span = video.transitions().front();
+
+    CHECK(span.range.start().frames() == wanted.start().frames());
+    CHECK(span.range.duration().frames() == wanted.duration().frames());
+    REQUIRE(video.clips().size() == 2);
+    CHECK(span.from == video.clips()[0].id);
+    CHECK(span.to == video.clips()[1].id);
+
+    // And what only this program has a word for, which rides in namespaced
+    // fields an importer steps over.
+    CHECK(span.kind == model::TransitionKind::Wipe);
+    CHECK(span.direction == model::TransitionDirection::Left);
+    CHECK(span.softness == Catch::Approx(0.25));
+    CHECK(span.easing == model::TransitionEasing::Out);
+}
+
+TEST_CASE("A transition from Premiere itself becomes one here", "[io][premiere][transition]") {
+    // No namespaced fields, so nothing to read but the range, the alignment
+    // and the effect id -- which is all a file from Premiere will carry. It
+    // lands as a dissolve of the right length across the right cut rather than
+    // being dropped.
+    const std::string text = R"(<?xml version="1.0" encoding="UTF-8"?>
+<xmeml version="4"><sequence>
+  <name>from premiere</name>
+  <rate><timebase>25</timebase><ntsc>FALSE</ntsc></rate>
+  <media><video><track>
+    <clipitem id="c1"><name>a</name>
+      <rate><timebase>25</timebase><ntsc>FALSE</ntsc></rate>
+      <start>0</start><end>50</end><in>0</in><out>50</out></clipitem>
+    <transitionitem>
+      <start>44</start><end>56</end><alignment>center</alignment>
+      <rate><timebase>25</timebase><ntsc>FALSE</ntsc></rate>
+      <effect><name>Cross Dissolve</name><effectid>Cross Dissolve</effectid>
+        <effecttype>transition</effecttype><mediatype>video</mediatype></effect>
+    </transitionitem>
+    <clipitem id="c2"><name>b</name>
+      <rate><timebase>25</timebase><ntsc>FALSE</ntsc></rate>
+      <start>50</start><end>100</end><in>0</in><out>50</out></clipitem>
+  </track></video></media>
+</sequence></xmeml>)";
+
+    const auto back = io::readPremiereXml(text);
+    REQUIRE(back);
+    const model::Track& video = back->sequences().front().videoTracks().front();
+    REQUIRE(video.clips().size() == 2);
+    REQUIRE(video.transitions().size() == 1);
+
+    const model::Transition& span = video.transitions().front();
+    CHECK(span.kind == model::TransitionKind::CrossDissolve);
+    CHECK(span.range.start().frames() == 44);
+    CHECK(span.range.endExclusive().frames() == 56);
+    // The cut it found is the one the clips actually meet at, not the middle
+    // of the span: this file's centre is 50 and the span's own midpoint is
+    // also 50, but a reader that used the midpoint would break the moment an
+    // exporter wrote an asymmetric one.
+    CHECK(span.from == video.clips()[0].id);
+    CHECK(span.to == video.clips()[1].id);
+}
+
+TEST_CASE("An asymmetric Premiere transition still finds its cut", "[io][premiere][transition]") {
+    // The span is 44..56 but the clips meet at 52, so the midpoint and the
+    // join are four frames apart. Taking the midpoint would leave this span
+    // pointing at no clips at all and drop it.
+    const std::string text = R"(<?xml version="1.0" encoding="UTF-8"?>
+<xmeml version="4"><sequence>
+  <name>lopsided</name>
+  <rate><timebase>25</timebase><ntsc>FALSE</ntsc></rate>
+  <media><video><track>
+    <clipitem id="c1"><name>a</name>
+      <rate><timebase>25</timebase><ntsc>FALSE</ntsc></rate>
+      <start>0</start><end>52</end><in>0</in><out>52</out></clipitem>
+    <transitionitem>
+      <start>44</start><end>56</end><alignment>center</alignment>
+      <rate><timebase>25</timebase><ntsc>FALSE</ntsc></rate>
+      <effect><effectid>Cross Dissolve</effectid></effect>
+    </transitionitem>
+    <clipitem id="c2"><name>b</name>
+      <rate><timebase>25</timebase><ntsc>FALSE</ntsc></rate>
+      <start>52</start><end>100</end><in>0</in><out>48</out></clipitem>
+  </track></video></media>
+</sequence></xmeml>)";
+
+    const auto back = io::readPremiereXml(text);
+    REQUIRE(back);
+    const model::Track& video = back->sequences().front().videoTracks().front();
+    REQUIRE(video.clips().size() == 2);
+    REQUIRE(video.transitions().size() == 1);
+    CHECK(video.transitions().front().from == video.clips()[0].id);
+    CHECK(video.transitions().front().to == video.clips()[1].id);
+}
+
+TEST_CASE("A fade is not written as a Premiere transition", "[io][premiere][transition]") {
+    // `alignment` has three answers and none of them describes a span that
+    // straddles no cut, so a fade is left out rather than written as a join
+    // nobody made.
+    Fixture f;
+    REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.v1), f.clip(0, 50, 500))));
+    REQUIRE(f.run(edit::makeAddCrossDissolve(f.project, f.on(f.v1), f.at(50), f.at(10))));
+    REQUIRE(f.track(f.v1).transitions().front().isFadeOut());
+
+    const auto text = io::writePremiereXml(f.project, f.sequenceId);
+    REQUIRE(text);
+    CHECK(text->find("<transitionitem>") == std::string::npos);
 }

@@ -97,6 +97,28 @@ private:
     /// resolved, which the caller treats as a clip that drew nothing.
     [[nodiscard]] bool compositeNested(const model::Sequence& sequence, const model::Clip& clip,
                                        RgbaImage& out, const time::RationalTime& at);
+    /// The picture a nested clip resolves to, in a buffer of its own.
+    ///
+    /// Separate from `clipImage`, which cannot answer for a nest: compositing
+    /// one recurses through `compositeInto`, and that writes into `generated_`
+    /// for any graphic or caption the inner sequence holds -- the very buffer
+    /// `clipImage` would have been handed to put the nest in. So a nest gets a
+    /// buffer that the recursion beneath it can never touch, which is the same
+    /// reason those buffers are per level at all.
+    ///
+    /// `side` is 0 or 1, and exists for the same reason `generatedB_` does:
+    /// both halves of a transition resolve before either is drawn, so two
+    /// nests at one level need two buffers.
+    [[nodiscard]] const RgbaImage* nestedImage(const model::Clip& clip,
+                                               const time::RationalTime& at, int side);
+    /// How deep nesting is allowed to go. A backstop against a project that
+    /// arrived with a cycle in it; the edit refuses to make one.
+    static constexpr std::int32_t kMaxNestDepth = 8;
+    /// The picture one side of a transition resolves to, whatever kind of clip
+    /// it is. The transition path's `clipImage`, with the nest case added.
+    [[nodiscard]] const RgbaImage* transitionSideImage(const model::Clip& clip,
+                                                       const time::RationalTime& at, int side,
+                                                       std::int32_t width, std::int32_t height);
     /// Grade what has already been composited, in place.
     void applyAdjustment(const model::Clip& clip, RgbaImage& out, const time::RationalTime& at);
 
@@ -121,8 +143,15 @@ private:
     RgbaImage effectScratch_;
     RgbaImage effectScratchB_;
     const model::Project* project_{nullptr};
-    /// Scratch per nesting level, so a nested composite does not overwrite the
-    /// buffer the level above it is still drawing from.
+    /// Scratch per nesting level and per transition side, so a nested
+    /// composite does not overwrite the buffer the level above it is still
+    /// drawing from, and the two halves of a transition do not overwrite each
+    /// other. Indexed `depth * 2 + side`.
+    ///
+    /// Sized once rather than grown per level: the reference a level composites
+    /// into has to survive the recursion beneath it, and growing this vector
+    /// would move every buffer in it and leave that reference pointing at
+    /// freed memory.
     std::vector<RgbaImage> nestedBuffers_;
     std::int32_t depth_{0};
     TextRasterizer* text_{nullptr};

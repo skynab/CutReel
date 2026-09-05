@@ -490,6 +490,46 @@ Result<CommandPtr> makeSetTransitionRange(Project& project, const EditTarget& ta
                        });
 }
 
+TransitionSettings settingsOf(const model::Transition& transition) {
+    return TransitionSettings{transition.kind, transition.direction, transition.softness,
+                              transition.easing};
+}
+
+Result<CommandPtr> makeSetTransitionSettings(Project& project, const EditTarget& target,
+                                             model::TransitionId transitionId,
+                                             const TransitionSettings& settings) {
+    auto located = locate(project, target);
+    if (!located) {
+        return located.error();
+    }
+    if (located->track->findTransition(transitionId) == nullptr) {
+        return Error{ErrorCode::NotFound, "no such transition on that track"};
+    }
+    // Clamped here rather than trusted: softness is a fraction, and a control
+    // that hands over 1.4 should get the widest ramp there is rather than a
+    // rectangle reaching further outside the frame than the maths expects.
+    TransitionSettings wanted = settings;
+    wanted.softness = std::clamp(wanted.softness, 0.0, 1.0);
+
+    const TrackId trackId = target.track;
+    return makeCommand(target.sequence, "Change transition",
+                       "transition:" + std::to_string(transitionId.value()),
+                       [transitionId, wanted, trackId](Sequence& sequence) {
+                           Track* track = sequence.findTrack(trackId);
+                           ZARO_CHECK(track != nullptr, "track vanished between build and apply");
+                           auto transitions = track->transitions();
+                           for (model::Transition& transition : transitions) {
+                               if (transition.id == transitionId) {
+                                   transition.kind = wanted.kind;
+                                   transition.direction = wanted.direction;
+                                   transition.softness = wanted.softness;
+                                   transition.easing = wanted.easing;
+                               }
+                           }
+                           track->setTransitions(std::move(transitions));
+                       });
+}
+
 Result<CommandPtr> makeSetTransitionKind(Project& project, const EditTarget& target,
                                          model::TransitionId transitionId,
                                          model::TransitionKind kind,
@@ -498,29 +538,16 @@ Result<CommandPtr> makeSetTransitionKind(Project& project, const EditTarget& tar
     if (!located) {
         return located.error();
     }
-    bool found = false;
-    for (const model::Transition& transition : located->track->transitions()) {
-        found = found || transition.id == transitionId;
-    }
-    if (!found) {
+    const model::Transition* transition = located->track->findTransition(transitionId);
+    if (transition == nullptr) {
         return Error{ErrorCode::NotFound, "no such transition on that track"};
     }
-
-    const TrackId trackId = target.track;
-    return makeCommand(target.sequence, "Change transition",
-                       "transition:" + std::to_string(transitionId.value()),
-                       [transitionId, kind, direction, trackId](Sequence& sequence) {
-                           Track* track = sequence.findTrack(trackId);
-                           ZARO_CHECK(track != nullptr, "track vanished between build and apply");
-                           auto transitions = track->transitions();
-                           for (model::Transition& transition : transitions) {
-                               if (transition.id == transitionId) {
-                                   transition.kind = kind;
-                                   transition.direction = direction;
-                               }
-                           }
-                           track->setTransitions(std::move(transitions));
-                       });
+    // The rest read back off the transition, so choosing a wipe keeps the
+    // softness and the easing somebody already set on it.
+    TransitionSettings wanted = settingsOf(*transition);
+    wanted.kind = kind;
+    wanted.direction = direction;
+    return makeSetTransitionSettings(project, target, transitionId, wanted);
 }
 
 Result<CommandPtr> makeRemoveTransition(Project& project, const EditTarget& target,

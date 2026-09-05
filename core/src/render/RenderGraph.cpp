@@ -178,28 +178,34 @@ const RgbaImage* RenderGraph::clipImage(const model::Clip& clip, const time::Rat
     return *image;
 }
 
-bool RenderGraph::compositeNested(const model::Sequence& sequence, const model::Clip& clip,
-                                  RgbaImage& out, const time::RationalTime& at) {
+const RgbaImage* RenderGraph::nestedImage(const model::Clip& clip, const time::RationalTime& at,
+                                          int side) {
     if (project_ == nullptr) {
-        return false;
+        return nullptr;
     }
     const model::Sequence* inner = project_->findSequence(clip.nested);
     if (inner == nullptr) {
-        return false;
+        return nullptr;
     }
     // A backstop, not the defence. Cycles are refused when the edit is made
     // (Project::nestingWouldCycle); this is here so that a project which
     // arrived from somewhere else -- an OTIO file, a hand-edited save -- cannot
     // take the renderer down with it.
-    constexpr std::int32_t kMaxDepth = 8;
-    if (depth_ >= kMaxDepth) {
-        return false;
+    if (depth_ >= kMaxNestDepth) {
+        return nullptr;
     }
 
-    if (static_cast<std::size_t>(depth_) >= nestedBuffers_.size()) {
-        nestedBuffers_.resize(static_cast<std::size_t>(depth_) + 1);
+    // Sized to the whole limit on the first nest rather than grown a level at a
+    // time. The reference handed to `compositeInto` below has to survive the
+    // recursion, and growing this vector inside that call would move every
+    // buffer in it -- leaving the level above compositing into freed memory.
+    // Two levels of nesting was enough to reach it, and nothing nested twice.
+    constexpr auto kSlots = static_cast<std::size_t>(kMaxNestDepth * 2);
+    if (nestedBuffers_.size() < kSlots) {
+        nestedBuffers_.resize(kSlots);
     }
-    RgbaImage& buffer = nestedBuffers_[static_cast<std::size_t>(depth_)];
+    RgbaImage& buffer =
+        nestedBuffers_[(static_cast<std::size_t>(depth_) * 2) + static_cast<std::size_t>(side)];
 
     // compositeInto resets the counters, and the recursive call would therefore
     // wipe the tally the level above is still building. Saved across it: the
@@ -215,11 +221,30 @@ bool RenderGraph::compositeNested(const model::Sequence& sequence, const model::
     const std::int32_t nestedSkipped = skippedText_;
     lastClipCount_ = outerClips;
     skippedText_ = outerSkipped + nestedSkipped;
-    if (!composed) {
+    return composed ? &buffer : nullptr;
+}
+
+const RgbaImage* RenderGraph::transitionSideImage(const model::Clip& clip,
+                                                  const time::RationalTime& at, int side,
+                                                  std::int32_t width, std::int32_t height) {
+    // A nest is the one kind `clipImage` cannot answer for -- see `nestedImage`
+    // -- and it was the last kind a transition could not draw. Phase 6o put
+    // generated clips behind one function for exactly this reason, and left a
+    // nest in a dissolve drawing nothing at all: silently, because a clip whose
+    // picture cannot be resolved is a gap rather than an error.
+    if (clip.nested.isValid()) {
+        return nestedImage(clip, at, side);
+    }
+    return clipImage(clip, at, side == 0 ? generated_ : generatedB_, width, height);
+}
+
+bool RenderGraph::compositeNested(const model::Sequence& sequence, const model::Clip& clip,
+                                  RgbaImage& out, const time::RationalTime& at) {
+    const RgbaImage* buffer = nestedImage(clip, at, 0);
+    if (buffer == nullptr) {
         return false;
     }
-
-    drawClip(clip, buffer, out, pinnedTransformAt(sequence, clip, at), at);
+    drawClip(clip, *buffer, out, pinnedTransformAt(sequence, clip, at), at);
     return true;
 }
 
@@ -302,6 +327,10 @@ Status RenderGraph::compositeInto(const model::Sequence& sequence, const time::R
 
             if (outgoing != nullptr && incoming != nullptr) {
                 const auto progress = transition->progressAt(at);
+                // One function decides what a transition looks like part way
+                // through, and both render paths call it -- for both clips.
+                const TransitionShape shape =
+                    transitionShapeFor(*transition, progress, out.width(), out.height());
 
                 // The outgoing clip is read past its out point and the incoming
                 // one before its in point, both reaching into the handles
@@ -309,28 +338,24 @@ Status RenderGraph::compositeInto(const model::Sequence& sequence, const time::R
                 // which is exactly the mapping wanted here.
                 if (outgoing->enabled) {
                     if (const RgbaImage* image =
-                            clipImage(*outgoing, at, generated_, out.width(), out.height())) {
-                        drawClip(*outgoing, *image, out, pinnedTransformAt(sequence, *outgoing, at),
-                                 at);
+                            transitionSideImage(*outgoing, at, 0, out.width(), out.height())) {
+                        drawClip(*outgoing, *image, out,
+                                 shapedTransform(pinnedTransformAt(sequence, *outgoing, at),
+                                                 shape.outgoing),
+                                 at, shape.outgoing.mask.isSet() ? &shape.outgoing.mask : nullptr);
                         ++lastClipCount_;
                     }
                 }
                 if (incoming->enabled) {
                     if (const RgbaImage* image =
-                            clipImage(*incoming, at, generatedB_, out.width(), out.height())) {
+                            transitionSideImage(*incoming, at, 1, out.width(), out.height())) {
                         // Drawn over the outgoing clip at the dissolve's
                         // progress: with premultiplied `over` and an opaque
                         // source that gives out*(1-p) + in*p.
-                        // One function decides what a transition looks like
-                        // part way through, and both render paths call it.
-                        const TransitionShape shape =
-                            transitionShapeFor(*transition, progress, out.width(), out.height());
-                        model::Transform moving = pinnedTransformAt(sequence, *incoming, at);
-                        moving.opacity *= shape.opacity;
-                        moving.positionX += shape.offsetX;
-                        moving.positionY += shape.offsetY;
-                        drawClip(*incoming, *image, out, moving, at,
-                                 shape.wipe.isSet() ? &shape.wipe : nullptr);
+                        drawClip(*incoming, *image, out,
+                                 shapedTransform(pinnedTransformAt(sequence, *incoming, at),
+                                                 shape.incoming),
+                                 at, shape.incoming.mask.isSet() ? &shape.incoming.mask : nullptr);
                         ++lastClipCount_;
                     }
                 }

@@ -111,7 +111,11 @@ signals:
     /// The pane does not make one: a title is a clip on a sequence, and what
     /// the pane knows about is the project's media. The window owns the
     /// decision and the command.
-    void addTitleRequested();
+    ///
+    /// `presetId` is the row they asked for -- one of `titlePresets()`. It is
+    /// carried because the pane lists three different graphics and used to ask
+    /// for the same one whichever was double-clicked.
+    void addTitleRequested(const QString& presetId);
 
     /// Point the selected timeline clip at this media instead.
     ///
@@ -159,6 +163,13 @@ private:
     QButtonGroup* chipGroup_{nullptr};
     QPushButton* compactButton_{nullptr};
     QStackedWidget* pages_{nullptr};
+    /// The Media tab: the list, or a sentence when there is nothing in it.
+    ///
+    /// Every other tab says what it is for when it is empty; the one somebody
+    /// lands in first showed a blank rectangle, on a pane that takes dropped
+    /// files without ever saying so.
+    QStackedWidget* mediaPage_{nullptr};
+    QLabel* binEmpty_{nullptr};
 
     QString filter_;
     /// Which folder chip is picked; empty means all of them.

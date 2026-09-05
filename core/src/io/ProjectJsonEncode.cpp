@@ -510,6 +510,15 @@ json encode(const model::Transition& transition) {
         // A dissolve has no direction to travel in, so writing one would be a
         // value that means nothing and reads as though it might.
         out["direction"] = model::toString(transition.direction);
+        // And no edge to soften. Written only where it does something, for the
+        // same reason -- and only when it is not the default, which keeps a
+        // project of ordinary wipes reading as one.
+        if (transition.softness > 0.0) {
+            out["softness"] = transition.softness;
+        }
+    }
+    if (transition.easing != model::TransitionEasing::Linear) {
+        out["easing"] = model::toString(transition.easing);
     }
     return out;
 }

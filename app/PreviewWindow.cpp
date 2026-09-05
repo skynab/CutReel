@@ -181,11 +181,16 @@ void PreviewWindow::createPanels() {
             [this] { clearStabilisation(); });
     scopes_ = new app::ScopesPanel(this);
     mixer_ = adopting(new app::MixerPanel(this));
-    // 250 was under what the parameter rows actually measure, so the
-    // splitter was free to squeeze the column until the value fields ran
-    // off the edge of it. Now it is the width the content needs.
-    effects_->setMinimumWidth(300);
-    effects_->setMaximumWidth(330);
+    // Asked, not guessed.
+    //
+    // This was 250, then 300, each time to stop the splitter squeezing the
+    // column until the value fields ran off the edge of it -- and each time a
+    // number chosen by eye rather than measured. The rows want 383, so the cap
+    // of 330 cut every field short at every window size: "0.0 p" for "0.0 px",
+    // a rotation with its degree sign gone. `EffectControls` measures its own
+    // widest row now, so the only thing left to decide here is how much room
+    // above that the splitter may give it.
+    effects_->setMaximumWidth(effects_->minimumWidth() + 30);
 
     // Monitor and parameters side by side, transport under them, timeline
     // across the bottom.
@@ -199,9 +204,6 @@ void PreviewWindow::createPanels() {
     // use the extra space if it were given any.
     bin_->setFixedWidth(296);
 
-    // Its own row of buttons -- In, Out, Subclip, Insert, Over -- is what
-    // sets this, not the picture: below this width the labels start losing
-    // letters, and a button reading "nsert" is worse than a narrow picture.
     thumb_ = new app::FrameThumb(this);
     loudness_ = new app::LoudnessPanel(this);
     stems_ = adopting(new app::StemsPanel(this));
@@ -217,7 +219,14 @@ void PreviewWindow::createPanels() {
     palette_->setFixedHeight(212);
 
     source_ = new app::SourceMonitor(this);
-    source_->setMinimumWidth(280);
+    // Its own row of buttons -- In, Out, Subclip, Insert, Over -- is what sets
+    // this, not the picture: below this width the labels start losing letters,
+    // and a button reading "nsert" is worse than a narrow picture.
+    //
+    // So ask the row rather than guess at it. 280 was 93 pixels under what
+    // those buttons measure, which left the splitter free to do the exact
+    // thing the paragraph above says must not happen.
+    source_->setMinimumWidth(source_->minimumSizeHint().width());
 }
 
 void PreviewWindow::buildViewerLayout() {
@@ -415,8 +424,16 @@ void PreviewWindow::wireWorkspacePanels() {
             [this] { placeFromSource(edit::PlaceMode::Overwrite); });
     connect(bin_, &app::ProjectBin::edited, this, [this] {
         bars_.scrubber->setRange(0, static_cast<int>(liveSequence()->duration().frames()));
-        timeline_->update();
-        monitor_->update();
+        // Through `afterEdit`, like every other thing that changes the project.
+        //
+        // This redrew the panels and stopped there, so the one fact it did not
+        // carry was that there was now something to save: double-clicking a
+        // file in the bin appended it to the cut and left the window saying
+        // "Saved", with no dot beside the name and no star in the title bar.
+        // Nothing was lost -- closing writes the recovery file either way --
+        // but the readout somebody uses to decide whether to press Save was
+        // telling them they had already pressed it.
+        afterEdit();
         refresh();
     });
     // A file imported into a session already running has no decoder until the
@@ -428,7 +445,8 @@ void PreviewWindow::wireWorkspacePanels() {
     // The same call the media browser's own import makes, for the same reason;
     // it is only the Import button and a drop onto the pane that arrived here
     // without it.
-    connect(bin_, &app::ProjectBin::addTitleRequested, this, [this] { addTitle(); });
+    connect(bin_, &app::ProjectBin::addTitleRequested, this,
+            [this](const QString& presetId) { addTitle(presetId.toStdString()); });
     connect(bin_, &app::ProjectBin::mediaImported, this, [this] {
         if (Status reopened = openMedia(); !reopened) {
             app::warn(this, "Import", QString::fromStdString(reopened.error().toString()));
@@ -481,6 +499,16 @@ void PreviewWindow::wireEditingSignals() {
     // two as exclusive, as the timeline does.
     connect(timeline_, &app::TimelineWidget::trackSelected, effects_,
             &app::EffectControls::setTrackSelection);
+    // And picking the span across a cut shows the transition, which is the
+    // third of the three and the same rule again.
+    connect(timeline_, &app::TimelineWidget::transitionSelected, effects_,
+            &app::EffectControls::setTransitionSelection);
+    // Removing one goes through the timeline rather than the panel, because
+    // the timeline owns the selection: taking the transition off behind its
+    // back would leave it outlining a span the model no longer holds. This is
+    // the same path Delete takes.
+    connect(effects_, &app::EffectControls::removeTransitionRequested, this,
+            [this] { timeline_->removeSelected(false); });
     // Kept here too: syncing acts on the clip somebody has picked, and the
     // timeline is where picking happens.
     connect(timeline_, &app::TimelineWidget::selectionChanged, this,
@@ -847,7 +875,7 @@ void PreviewWindow::relinkDialog() {
     if (byName > 0) {
         // Said plainly: a file matched only by its name is one somebody
         // should look at before trusting the cut.
-        said += QString("\n%1 matched by name only -- check they are the right takes.").arg(byName);
+        said += QString("\n%1 matched by name only — check they are the right takes.").arg(byName);
     }
     app::say(this, "Relink", said);
 }
@@ -871,8 +899,7 @@ void PreviewWindow::consolidateDialog() {
     if (!report->missing.empty()) {
         // Named, because a consolidate that quietly left files behind is
         // an archive somebody will discover is incomplete much later.
-        said +=
-            QString("\n%1 could not be found -- relink them first.").arg(report->missing.size());
+        said += QString("\n%1 could not be found — relink them first.").arg(report->missing.size());
     }
     app::say(this, "Consolidate", said);
 }
@@ -888,7 +915,7 @@ void PreviewWindow::saveTemplateDialog() {
     }
 }
 
-void PreviewWindow::addTitle() {
+void PreviewWindow::addTitle(std::string_view presetId) {
     // Five seconds, which is a title somebody can read and a length they can
     // trim. The alternative -- as long as whatever is under the playhead -- is
     // right for a lower third and wrong for a card on black, and this is the
@@ -897,7 +924,13 @@ void PreviewWindow::addTitle() {
     const time::RationalTime length = time::RationalTime::fromSeconds(
         time::Rational::approximate(kTitleSeconds), liveSequence()->frameRate());
 
-    auto made = commands::addTitle(editContext(), "Title", length);
+    // An id from a build that knew about a preset this one does not still gets
+    // a title rather than nothing: the point of the action is a text clip at
+    // the playhead, and where it sits is the part that can be wrong quietly.
+    const TitlePreset* preset = findTitlePreset(presetId);
+    const TitlePreset& chosen = preset != nullptr ? *preset : titlePresets().front();
+
+    auto made = commands::addTitle(editContext(), chosen, length);
     if (!made) {
         app::warn(this, "Title", QString::fromStdString(made.error().toString()));
         return;
@@ -1531,18 +1564,13 @@ void PreviewWindow::pasteAtPlayhead() {
     afterEdit();
 }
 
-void PreviewWindow::frameSizeMenu() {
+void PreviewWindow::largestSourceSize(std::int32_t& width, std::int32_t& height) const {
+    width = 0;
+    height = 0;
     const model::Sequence* sequence = liveSequence();
     if (sequence == nullptr) {
         return;
     }
-
-    // The biggest picture on the timeline, offered as "match the footage".
-    // Biggest rather than the first: a cut of a 4K master and a phone clip
-    // should conform to the master, and a sequence smaller than its footage
-    // throws away detail that is already there.
-    std::int32_t sourceWidth = 0;
-    std::int32_t sourceHeight = 0;
     for (const model::Track& track : sequence->videoTracks()) {
         for (const model::Clip& clip : track.clips()) {
             if (clip.nested.isValid() || clip.graphic.isSet()) {
@@ -1557,22 +1585,24 @@ void PreviewWindow::frameSizeMenu() {
                 continue;
             }
             if (static_cast<std::int64_t>(video->width) * video->height >
-                static_cast<std::int64_t>(sourceWidth) * sourceHeight) {
-                sourceWidth = video->width;
-                sourceHeight = video->height;
+                static_cast<std::int64_t>(width) * height) {
+                width = video->width;
+                height = video->height;
             }
         }
     }
+}
 
-    const chrome::FrameSizeChoice chosen =
-        chrome::frameSizeMenu(sequence->width(), sequence->height(), sourceWidth, sourceHeight);
-    if (!chosen.chosen) {
+void PreviewWindow::applyFrameSize(std::int32_t width, std::int32_t height) {
+    const model::Sequence* sequence = liveSequence();
+    if (sequence == nullptr) {
         return;
     }
 
-    std::int32_t width = chosen.width;
-    std::int32_t height = chosen.height;
-    if (chosen.custom) {
+    // Both zero is the "Custom…" entry, which is a request to be asked rather
+    // than a size. Asked here and not in the chrome: the chrome knows what the
+    // list contains, not how to prompt for something that is not on it.
+    if (width <= 0 || height <= 0) {
         bool ok = false;
         const QString typed = QInputDialog::getText(
             this, "Frame size",
@@ -1592,9 +1622,17 @@ void PreviewWindow::frameSizeMenu() {
         height = parts[1].toInt();
     }
 
+    if (width == sequence->width() && height == sequence->height()) {
+        // Picking the size it already is is not a mistake worth a dialog: the
+        // dropdown shows the current size selected, so choosing it again is the
+        // most ordinary thing somebody can do with an open list.
+        return;
+    }
+
     auto built = edit::makeResizeSequence(document_.project(), sequence->id(), width, height);
     if (!built) {
         app::warn(this, "Frame size", QString::fromStdString(built.error().toString()));
+        updateChrome();
         return;
     }
     document_.commands().execute(document_.project(), std::move(*built));
@@ -1602,6 +1640,27 @@ void PreviewWindow::frameSizeMenu() {
     // Every cached frame was composited at the old size.
     renderCache_.clear();
     afterEdit();
+}
+
+void PreviewWindow::frameSizeMenu() {
+    const model::Sequence* sequence = liveSequence();
+    if (sequence == nullptr) {
+        return;
+    }
+
+    std::int32_t sourceWidth = 0;
+    std::int32_t sourceHeight = 0;
+    largestSourceSize(sourceWidth, sourceHeight);
+
+    const chrome::FrameSizeChoice chosen =
+        chrome::frameSizeMenu(sequence->width(), sequence->height(), sourceWidth, sourceHeight);
+    if (!chosen.chosen) {
+        return;
+    }
+    // Custom is spelled as a zero size, which is what applyFrameSize prompts
+    // for -- so the menu and the dropdown reach the same code by the same
+    // route.
+    applyFrameSize(chosen.custom ? 0 : chosen.width, chosen.custom ? 0 : chosen.height);
 }
 
 void PreviewWindow::frameRateMenu() {
@@ -2325,6 +2384,9 @@ chrome::Hooks PreviewWindow::chromeHooks() {
         timeline_->setTrackHeightFraction(fraction);
     };
     hooks.queueRender = [this] { deliver_->queueCurrent(); };
+    hooks.chooseFrameSize = [this](std::int32_t width, std::int32_t height) {
+        applyFrameSize(width, height);
+    };
     hooks.toggleRendering = [this] {
         deliver_->toggleRendering();
         updateChrome();
@@ -2381,7 +2443,7 @@ void PreviewWindow::setWorkspace(const QString& name) {
     // The arrangement of the workspace being left is remembered, so coming
     // back to it finds the splitters where they were.
     if (topSplitter_ != nullptr && !workspace_.isEmpty()) {
-        QSettings settings("CutReel", "CutReel");
+        QSettings settings = makeSettings();
         settings.setValue(layoutKey(workspace_, "top"), topSplitter_->saveState());
         settings.setValue(layoutKey(workspace_, "main"), mainSplitter_->saveState());
     }
@@ -2434,7 +2496,7 @@ void PreviewWindow::setWorkspace(const QString& name) {
          entry != bars_.workspaceActions.constEnd(); ++entry) {
         entry.value()->setChecked(entry.key() == name);
     }
-    QSettings settings("CutReel", "CutReel");
+    QSettings settings = makeSettings();
     if (const auto state = settings.value(layoutKey(name, "top")).toByteArray(); !state.isEmpty()) {
         topSplitter_->restoreState(state);
     }
@@ -2455,10 +2517,12 @@ void PreviewWindow::updateChrome() {
             : QFileInfo(QString::fromStdString(document_.path())).completeBaseName();
     status.haveSequence = sequence != nullptr;
     status.modified = document_.commands().isModified();
+    status.onDisk = !document_.path().empty();
     if (sequence != nullptr) {
         status.sequenceName = QString::fromStdString(sequence->name());
         status.width = sequence->width();
         status.height = sequence->height();
+        largestSourceSize(status.sourceWidth, status.sourceHeight);
         status.frameRate = sequence->frameRate().toDouble();
         const bool dropFrame = time::supportsDropFrame(sequence->frameRate());
         status.durationTimecode =
@@ -2495,8 +2559,18 @@ void PreviewWindow::goToEnd() {
     setPosition(liveSequence()->duration());
 }
 
+QSettings PreviewWindow::makeSettings() {
+    // Two returns rather than a ternary: QSettings is a QObject and so is
+    // neither copyable nor movable, and only a returned prvalue elides into
+    // the caller's object.
+    if (settingsPath_.isEmpty()) {
+        return QSettings("CutReel", "CutReel");
+    }
+    return QSettings(settingsPath_, QSettings::IniFormat);
+}
+
 void PreviewWindow::saveWorkspace() {
-    QSettings settings("CutReel", "CutReel");
+    QSettings settings = makeSettings();
     settings.setValue("window/geometry", saveGeometry());
     // Per workspace, because the panels differ between them: one saved
     // arrangement restored into a different set of visible panels is a
@@ -2507,7 +2581,7 @@ void PreviewWindow::saveWorkspace() {
 }
 
 void PreviewWindow::restoreWorkspace() {
-    QSettings settings("CutReel", "CutReel");
+    QSettings settings = makeSettings();
     // Each restored only if it was stored, so a first run gets the
     // stretch factors set above rather than a collapsed layout.
     if (const auto geometry = settings.value("window/geometry").toByteArray();

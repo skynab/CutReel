@@ -66,6 +66,10 @@ const QColor kKeyframeHeld = theme::accent(300);
 const QColor kKeyframeOutline = theme::bg();
 const QColor kDimText = theme::textAt(0.45);
 const QColor kTransition = theme::accent(300);
+// The outline on a picked one. Brighter than the span's own colour rather than
+// a different hue: a selection should read as the same object lit up, and the
+// timeline is deliberately drawn from two families.
+const QColor kTransitionPicked = theme::accent(100);
 const QColor kTrackFlag = theme::accent(400);
 // The V1/A2 badge in a track header, in its own family's colour.
 const QColor kVideoTrackId = theme::accent(400);
@@ -198,6 +202,13 @@ void TimelineWidget::bind(const ui::SequenceBinding& binding) {
     sequenceId_ = binding.sequence;
     commands_ = binding.commands;
     selected_ = {};
+    // And any picked transition, for the same reason: it belonged to the
+    // sequence being left, and a panel still describing it would be describing
+    // something that is no longer on screen.
+    if (transitionSelected_.isValid()) {
+        transitionSelected_ = {};
+        emit transitionSelected(transitionSelected_.track, transitionSelected_.transition);
+    }
     // Defer the fit: at this point the widget has not been laid out, so its
     // width is not yet the width it will be shown at, and fitting to it would
     // put the whole sequence in the wrong scale.
@@ -393,6 +404,14 @@ void TimelineWidget::zoomToFit() {
     if (seq == nullptr) {
         return;
     }
+    // The deferred fit has now happened, so stop it happening again.
+    //
+    // `bind` arms it because a freshly bound timeline has not been laid out
+    // yet and cannot fit to a width it does not have. Left armed after an
+    // explicit fit, the next resizeEvent -- which under a window manager can
+    // arrive at any moment, including long after the window settled -- fits a
+    // second time and throws away whatever zoom has been set since.
+    pendingFit_ = false;
     layout_.setViewportSize(width(), height());
     const time::RationalTime duration = seq->duration();
     if (duration.frames() > 0) {
@@ -611,6 +630,11 @@ void TimelineWidget::announceSelection() {
         headSelected_ = {};
         emit trackSelected(headSelected_);
     }
+    // And a transition selection, by the same rule and for the same reason.
+    if (!selection_.empty() && transitionSelected_.isValid()) {
+        transitionSelected_ = {};
+        emit transitionSelected(transitionSelected_.track, transitionSelected_.transition);
+    }
     emit selectionChanged(selectedTrack_, selected_);
     emit selectionSetChanged(selection_);
     update();
@@ -631,7 +655,6 @@ void TimelineWidget::paintRuler(QPainter& painter) {
 
     // Start on a multiple of the step, so labels do not crawl as you scroll.
     const std::int64_t first = (visible.start().frames() / step.frames()) * step.frames();
-    const bool dropFrame = time::supportsDropFrame(rate);
     const bool withHours = seq.duration().toSecondsDouble() >= 3600.0;
 
     QFont font = painter.font();
@@ -648,19 +671,14 @@ void TimelineWidget::paintRuler(QPainter& painter) {
         painter.setPen(kGridLine);
         painter.drawLine(QPointF(x, metrics.rulerHeight - 6), QPointF(x, metrics.rulerHeight));
 
-        // Minutes and seconds, not the full timecode. The ruler is for reading
-        // position at a glance; the frame-accurate answer is in the status
-        // line, and four fields at this size is a smear rather than a number.
-        // Hours come back only once the cut is long enough to need them --
-        // without that, a two-hour sequence labels 05:00 twice.
-        const time::Timecode code = time::timecodeFromFrames(frame, rate, dropFrame);
-        const QString label = withHours ? QStringLiteral("%1:%2:%3")
-                                              .arg(code.hours)
-                                              .arg(code.minutes, 2, 10, QLatin1Char('0'))
-                                              .arg(code.seconds, 2, 10, QLatin1Char('0'))
-                                        : QStringLiteral("%1:%2")
-                                              .arg(code.minutes, 2, 10, QLatin1Char('0'))
-                                              .arg(code.seconds, 2, 10, QLatin1Char('0'));
+        // As much of the timecode as this zoom needs, and no more: the ruler is
+        // for reading position at a glance, and four fields at this size is a
+        // smear rather than a number. The decision is `TimelineLayout`'s
+        // because it is the one that chose the tick spacing -- which is what
+        // says whether seconds are enough -- and because a rule about text is
+        // arithmetic that can be tested without a window.
+        const QString label =
+            QString::fromStdString(layout_.rulerLabel(time::RationalTime{frame, rate}, withHours));
         painter.setPen(kDimText);
         painter.drawText(QPointF(x + 4, fontMetrics.ascent() + 3), label);
     }
@@ -1182,6 +1200,12 @@ void TimelineWidget::removeTrack(model::TrackId trackId) {
         selected_ = {};
         selectedLink_ = {};
     }
+    // A transition on it goes the same way, and for the same reason: the
+    // track's transitions leave with the track.
+    if (transitionSelected_.track == trackId && transitionSelected_.isValid()) {
+        transitionSelected_ = {};
+        emit transitionSelected(transitionSelected_.track, transitionSelected_.transition);
+    }
     commands_->execute(*project_, std::move(*built));
     commands_->breakMerge();
     announceSelection();
@@ -1630,9 +1654,21 @@ void TimelineWidget::paintTransitions(QPainter& painter, const ui::TimelineLayou
 
         const bool stretching = (drag_ == Drag::TransitionStart || drag_ == Drag::TransitionEnd) &&
                                 transitionDrag_.transition == transition.id;
+        const bool picked = transitionSelected_ == TransitionRef{row.track, transition.id};
 
         painter.fillRect(box, QColor(kTransition.red(), kTransition.green(), kTransition.blue(),
-                                     stretching ? 140 : 90));
+                                     picked       ? 170
+                                     : stretching ? 140
+                                                  : 90));
+        // The ring a selected clip gets, for the same reason it gets it: a dark
+        // line outside the bright one, so the outline reads against the clips
+        // butted up either side of the cut it is drawn over.
+        if (picked) {
+            painter.setPen(QPen(theme::bg(), 1.0));
+            painter.drawRect(box.adjusted(-0.5, -0.5, 0.5, 0.5));
+            painter.setPen(QPen(kTransitionPicked, 2.0));
+            painter.drawRect(box.adjusted(1.0, 1.0, -1.0, -1.0));
+        }
         painter.setPen(kTransition);
         painter.drawRect(box.adjusted(0.5, 0.5, -0.5, -0.5));
         // A diagonal, the shape every editor draws for a dissolve -- and for a
@@ -1946,11 +1982,23 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
         if (const auto edge = transitionEdgeAt(x, y)) {
             const model::Track* track = seq->findTrack(edge->track);
             if (track != nullptr && !track->isLocked()) {
-                transitionDrag_ = TransitionDrag{edge->track, edge->transition};
+                transitionDrag_ = TransitionRef{edge->track, edge->transition};
                 drag_ = edge->atStart ? Drag::TransitionStart : Drag::TransitionEnd;
                 update();
                 return;
             }
+        }
+        // Then the body of the span: pressing the middle of a dissolve is
+        // picking it. After the edges, so a press near an end still stretches;
+        // before the clips, for the reason the edges are.
+        //
+        // A locked track is picked all the same, unlike a drag. Selecting is
+        // reading -- looking at what a dissolve is set to is exactly what
+        // somebody does on a track they have locked to stop themselves moving
+        // it -- and it is the panel's business to refuse the writing.
+        if (const auto body = transitionBodyAt(x, y)) {
+            selectTransition(body->track, body->transition);
+            return;
         }
     }
 
@@ -2062,6 +2110,34 @@ std::optional<TimelineWidget::TransitionHit> TimelineWidget::transitionEdgeAt(in
                 }
                 if (startGrabs && std::fabs(static_cast<double>(x) - startX) <= kGrab) {
                     return TransitionHit{track.id(), transition.id, true};
+                }
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<TimelineWidget::TransitionRef> TimelineWidget::transitionBodyAt(int x, int y) const {
+    const model::Sequence* seq = sequence();
+    if (seq == nullptr || layout_.isInHeaders(x)) {
+        return std::nullopt;
+    }
+    for (const auto* tracks : {&seq->videoTracks(), &seq->audioTracks()}) {
+        for (const model::Track& track : *tracks) {
+            const auto row = rowFor(track.id());
+            if (!row || y < row->top || y >= row->top + row->height) {
+                continue;
+            }
+            for (const model::Transition& transition : track.transitions()) {
+                const double startX = layout_.xForTime(transition.range.start());
+                const double endX = layout_.xForTime(transition.range.endExclusive());
+                // The box `paintTransitions` draws, so what is pressed is what
+                // is seen -- including the two-pixel floor a span squeezed to
+                // nothing is given, which is the only thing left to aim at
+                // once it is that narrow.
+                if (static_cast<double>(x) >= startX &&
+                    static_cast<double>(x) < std::max(startX + 2.0, endX)) {
+                    return TransitionRef{track.id(), transition.id};
                 }
             }
         }
@@ -2280,6 +2356,83 @@ void TimelineWidget::clipMenu(const ui::TimelineLayout::Hit& hit, const QPoint& 
     }
 }
 
+void TimelineWidget::transitionMenu(const TransitionRef& ref, const QPoint& at) {
+    const model::Sequence* seq = sequence();
+    const model::Track* track = seq != nullptr ? seq->findTrack(ref.track) : nullptr;
+    const model::Transition* transition =
+        track != nullptr ? track->findTransition(ref.transition) : nullptr;
+    if (transition == nullptr) {
+        return;
+    }
+    // What is pointed at becomes what is selected, the way the clip menu does
+    // it -- and here it matters more, because the panel this opens beside is
+    // the only other place these choices live.
+    selectTransition(ref.track, ref.transition);
+
+    QMenu menu;
+    // The same names and the same order the panel offers, read from one table
+    // so the two cannot drift into calling a kind different things.
+    struct Choice {
+        const char* label;
+        model::TransitionKind kind;
+    };
+    static constexpr Choice kChoices[] = {
+        {"Cross Dissolve", model::TransitionKind::CrossDissolve},
+        {"Wipe", model::TransitionKind::Wipe},
+        {"Slide", model::TransitionKind::Slide},
+        {"Push", model::TransitionKind::Push},
+        {"Iris", model::TransitionKind::Iris},
+        {"Zoom", model::TransitionKind::Zoom},
+        {"Dip to Black", model::TransitionKind::DipToBlack},
+    };
+    QMenu* kinds = menu.addMenu(QStringLiteral("Type"));
+    std::vector<QAction*> kindActions;
+    kindActions.reserve(std::size(kChoices));
+    for (const Choice& choice : kChoices) {
+        QAction* action = kinds->addAction(QString::fromUtf8(choice.label));
+        // Ticked rather than merely listed: a menu of seven that does not say
+        // which one this already is makes somebody open the panel to find out.
+        action->setCheckable(true);
+        action->setChecked(transition->kind == choice.kind);
+        kindActions.push_back(action);
+    }
+    // A locked track refuses the edit, so the choices are offered greyed
+    // rather than silently doing nothing when picked.
+    kinds->setEnabled(!track->isLocked());
+
+    menu.addSeparator();
+    QAction* remove = menu.addAction(QStringLiteral("Remove Transition"));
+    remove->setEnabled(!track->isLocked());
+
+    const QAction* picked = menu.exec(at);
+    if (picked == nullptr) {
+        return;
+    }
+    if (picked == remove) {
+        removeSelectedTransition();
+        return;
+    }
+    for (std::size_t i = 0; i < kindActions.size(); ++i) {
+        if (picked != kindActions[i]) {
+            continue;
+        }
+        if (project_ == nullptr || commands_ == nullptr) {
+            return;
+        }
+        auto built =
+            edit::makeSetTransitionKind(*project_, {sequenceId_, ref.track}, ref.transition,
+                                        kChoices[i].kind, transition->direction);
+        if (!built) {
+            return;
+        }
+        commands_->execute(*project_, std::move(*built));
+        commands_->breakMerge();
+        emit edited();
+        update();
+        return;
+    }
+}
+
 void TimelineWidget::contextMenuEvent(QContextMenuEvent* event) {
     const HeaderHit hit = headerHitTest(event->pos().x(), event->pos().y());
     if (hit.track.isValid()) {
@@ -2293,6 +2446,14 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* event) {
     const model::Sequence* seq = sequence();
     if (seq == nullptr) {
         QWidget::contextMenuEvent(event);
+        return;
+    }
+    // Transitions before clips, for the reason the left button tests them
+    // first: a span is drawn over the cut it straddles, so a clip-first test
+    // would open the wrong menu every time.
+    if (const auto span = transitionBodyAt(event->pos().x(), event->pos().y())) {
+        event->accept();
+        transitionMenu(*span, event->globalPos());
         return;
     }
     const auto clip = layout_.hitTest(*seq, event->pos().x(), event->pos().y());
@@ -2882,41 +3043,41 @@ void TimelineWidget::addDissolveAtPlayhead() {
     // A second, which is what most editors default to and what a dissolve
     // usually wants to be before anyone adjusts it.
     const auto duration = time::RationalTime::fromSeconds(time::Rational{1, 1}, seq->frameRate());
-    auto built =
-        edit::makeAddCrossDissolve(*project_, {sequenceId_, selectedTrack_}, playhead_, duration);
+    const model::TrackId onTrack = selectedTrack_;
+    auto built = edit::makeAddCrossDissolve(*project_, {sequenceId_, onTrack}, playhead_, duration);
     if (!built) {
         return;
     }
-    commands_->execute(*project_, std::move(*built));
-    commands_->breakMerge();
-    emit edited();
-    update();
-}
+    // Which spans were already there, so the new one can be told from them.
+    // By id rather than by count: the add replaces an existing fade at the
+    // same end rather than stacking one, so a count can stay where it was.
+    std::vector<model::TransitionId> before;
+    if (const model::Track* track = seq->findTrack(onTrack); track != nullptr) {
+        for (const model::Transition& existing : track->transitions()) {
+            before.push_back(existing.id);
+        }
+    }
 
-bool TimelineWidget::setTransitionKindAtPlayhead(model::TransitionKind kind,
-                                                 model::TransitionDirection direction) {
-    if (project_ == nullptr || commands_ == nullptr || !selectedTrack_.isValid()) {
-        return false;
-    }
-    const model::Sequence* seq = sequence();
-    const model::Track* track = seq != nullptr ? seq->findTrack(selectedTrack_) : nullptr;
-    if (track == nullptr) {
-        return false;
-    }
-    const model::Transition* under = track->transitionAt(playhead_);
-    if (under == nullptr) {
-        return false;
-    }
-    auto built = edit::makeSetTransitionKind(*project_, {sequenceId_, selectedTrack_}, under->id,
-                                             kind, direction);
-    if (!built) {
-        return false;
-    }
     commands_->execute(*project_, std::move(*built));
     commands_->breakMerge();
+
+    // And it is what is selected afterwards. "Somebody drops a dissolve on a
+    // cut and then decides it wants to be a wipe" is what the operation's own
+    // comment says this is for, and until the panel existed there was nothing
+    // to select it *into*. Leaving the clip selected meant hunting for a span
+    // that can be two pixels wide before any of that could be reached.
+    const model::Sequence* after = sequence();
+    const model::Track* track = after != nullptr ? after->findTrack(onTrack) : nullptr;
+    if (track != nullptr) {
+        for (const model::Transition& candidate : track->transitions()) {
+            if (std::find(before.begin(), before.end(), candidate.id) == before.end()) {
+                selectTransition(onTrack, candidate.id);
+                break;
+            }
+        }
+    }
     emit edited();
     update();
-    return true;
 }
 
 void TimelineWidget::selectOnly(model::TrackId track, model::ClipId clip) {
@@ -2937,6 +3098,57 @@ void TimelineWidget::selectAlso(model::TrackId track, model::ClipId clip) {
     }
     selection_.push_back(edit::ClipRef{track, clip});
     announceSelection();
+    update();
+}
+
+void TimelineWidget::selectTransition(model::TrackId track, model::TransitionId transition) {
+    // The clips first, and announced before the new selection is set, so a
+    // panel is told the old one has gone before it is told what replaced it --
+    // the order picking a track header already uses, and the reason it uses it.
+    //
+    // A track selection is cleared here rather than in `announceSelection`,
+    // which only lets one go when *clips* replace it: this is the third of the
+    // three, and it has to turn the other two off itself.
+    const bool hadClips = !selection_.empty();
+    selection_.clear();
+    if (hadClips) {
+        announceSelection();
+    }
+    if (headSelected_.isValid()) {
+        headSelected_ = {};
+        emit trackSelected(headSelected_);
+    }
+
+    const TransitionRef wanted{track, transition};
+    if (transitionSelected_ == wanted) {
+        return;
+    }
+    transitionSelected_ = wanted;
+    emit transitionSelected(transitionSelected_.track, transitionSelected_.transition);
+    update();
+}
+
+void TimelineWidget::removeSelectedTransition() {
+    if (project_ == nullptr || commands_ == nullptr || !transitionSelected_.isValid()) {
+        return;
+    }
+    auto built = edit::makeRemoveTransition(*project_, {sequenceId_, transitionSelected_.track},
+                                            transitionSelected_.transition);
+    if (!built) {
+        // Refused because it is no longer there -- undone, or the track went.
+        // Let the selection go rather than leaving it pointing at something
+        // the model does not hold, which is a Delete that silently does
+        // nothing every time it is pressed.
+        selectTransition({}, {});
+        return;
+    }
+    commands_->execute(*project_, std::move(*built));
+    commands_->breakMerge();
+    // Announced as gone, rather than merely forgotten: a panel left describing
+    // a transition the model no longer holds is the dangling reference the
+    // next edit would follow.
+    selectTransition({}, {});
+    emit edited();
     update();
 }
 
@@ -2962,6 +3174,15 @@ void TimelineWidget::switchAngle(int angle) {
 }
 
 void TimelineWidget::removeSelected(bool ripple) {
+    // A picked transition first, and it is not a ripple: taking a dissolve off
+    // a cut leaves the two clips exactly where they were, which is the whole
+    // point of a span that straddles the join rather than overlapping it.
+    // Until this there was no way to remove one at all -- the operation existed
+    // and nothing in the program called it.
+    if (transitionSelected_.isValid()) {
+        removeSelectedTransition();
+        return;
+    }
     if (project_ == nullptr || commands_ == nullptr || selection_.empty()) {
         return;
     }

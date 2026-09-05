@@ -373,6 +373,13 @@ Result<model::Transition> decodeTransition(const json& node) {
             transition.direction = direction;
         }
     }
+    // Clamped on the way in as well as at the edit: a file can say anything,
+    // and a softness of 40 would build a rectangle far outside the frame.
+    transition.softness = std::clamp(node.value("softness", 0.0), 0.0, 1.0);
+    if (node.contains("easing")) {
+        transition.easing =
+            model::transitionEasingFromString(node.at("easing").get<std::string>().c_str());
+    }
     auto range = decodeRange(node.at("range"), "transition range");
     if (!range) {
         return range.error();

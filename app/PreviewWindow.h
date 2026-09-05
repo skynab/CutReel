@@ -47,6 +47,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -342,6 +343,23 @@ public:
     /// directory: ZARO_KEYMAP names the file.
     static void setKeymapPath(const QString& path) { ActionRouter::setKeymapPath(path); }
 
+    /// Where the remembered window geometry, workspace and splitter positions
+    /// are kept.
+    ///
+    /// Overridable for the same reason the keymap is, and it bit harder. These
+    /// are read in the constructor, so a suite that drives a real window came
+    /// up at whatever size and in whatever workspace the developer last left
+    /// the application in. That is not cosmetic: the timeline's
+    /// pixels-per-second follows the window's width, so a ten-pixel snap
+    /// radius is a different number of frames on a maximised window than on a
+    /// small one -- and the Color workspace has no timeline at all.
+    ///
+    /// Empty, the default, means the application's own settings. A path names
+    /// an INI file instead. `QSettings::setDefaultFormat` is not a substitute:
+    /// it only binds before the first QSettings exists anywhere, and Qt has
+    /// made several by the time a QApplication is up.
+    static void setSettingsPath(const QString& path) { settingsPath_ = path; }
+
     /// Whether to interrupt. See `app::setQuiet`.
     static void setQuietMode(bool quiet) { app::setQuiet(quiet); }
 
@@ -405,6 +423,15 @@ public:
     /// Ask for a frame size and apply it. This is the export's resolution:
     /// the render path does not scale, so the sequence's size is the file's.
     void frameSizeMenu();
+    /// The largest picture on the timeline, for "match the footage". Biggest
+    /// rather than first: a cut of a 4K master and a phone clip should conform
+    /// to the master, and a sequence smaller than its footage throws away
+    /// detail that is already there.
+    void largestSourceSize(std::int32_t& width, std::int32_t& height) const;
+    /// Apply a frame size, or prompt for one when both are zero. Shared by the
+    /// Sequence menu and the toolbar's dropdown, so the two cannot come to
+    /// behave differently.
+    void applyFrameSize(std::int32_t width, std::int32_t height);
     /// Ask for a frame rate, on an empty sequence, or explain why not on one
     /// that already has clips on it. See chrome::frameRateMenu.
     void frameRateMenu();
@@ -435,6 +462,11 @@ public:
     /// the self-test turns it on for the block that checks it.
     static bool lockingEnabled() { return Document::lockingEnabled(); }
     static void setLockingEnabled(bool enabled) { Document::setLockingEnabled(enabled); }
+
+    /// The settings store, honouring `setSettingsPath`.
+    [[nodiscard]] static QSettings makeSettings();
+
+    static inline QString settingsPath_;
 
     using Sharing = Document::Sharing;
 
@@ -513,7 +545,12 @@ public:
     /// Public because it is the action itself, without a menu in the way: the
     /// Text menu, the Titles tab, the timeline's own menu and the self-test all
     /// ask for the same thing.
-    void addTitle();
+    ///
+    /// `presetId` says which of `titlePresets()` to make -- a caption sits
+    /// along the bottom, a lower third at the left of it, a plain title across
+    /// the top. An id nothing answers to falls back to the first preset, so a
+    /// menu that has not been taught about a new one still adds a title.
+    void addTitle(std::string_view presetId = "title");
 
     /// Give the selected title one of the ready-made moves.
     void animateTitle(commands::TitleMotion motion);

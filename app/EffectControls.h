@@ -81,14 +81,31 @@ public:
     /// and a worse way to use them.
     void setTrackSelection(model::TrackId track);
 
-    /// Which of the panel's three pages is up.
+    /// Show a transition's own properties instead of a clip's or a track's.
     ///
-    /// A page rather than a filter: the design's header is three tabs, and a
-    /// tab that only greys things out is a filter wearing a tab's clothes.
-    /// What each one holds is the answer to a different question -- what does
-    /// this clip look like, what does it sound like, and what *is* it -- and
-    /// those were previously one column somebody scrolled through.
-    enum class Pane { Inspector, Audio, Info };
+    /// The third thing a selection can be, and the third page. A transition is
+    /// no more a cut-down clip than a track is: what it holds is a kind, a
+    /// direction and a length, and none of the transform, grade, mask or level
+    /// a clip has. An invalid id turns the page off.
+    ///
+    /// It has a tab of its own rather than borrowing the Inspector page the
+    /// way a track does. A track's page is at least *about* the thing the
+    /// Inspector page describes -- the clips on it -- while a transition is
+    /// about the join between two of them, and the picture it makes exists
+    /// only while both are on screen. It is also the one page that was
+    /// unreachable: until it existed, a wipe and a slide could be rendered and
+    /// saved but never asked for.
+    void setTransitionSelection(model::TrackId track, model::TransitionId transition);
+
+    /// Which of the panel's four pages is up.
+    ///
+    /// A page rather than a filter: the design's header is tabs, and a tab
+    /// that only greys things out is a filter wearing a tab's clothes. What
+    /// each one holds is the answer to a different question -- what does this
+    /// clip look like, what does it sound like, what *is* it, and how does
+    /// this cut blend -- and the first three were previously one column
+    /// somebody scrolled through.
+    enum class Pane { Inspector, Audio, Info, Transition };
     void setPane(Pane pane);
     [[nodiscard]] Pane pane() const noexcept { return pane_; }
 
@@ -150,6 +167,15 @@ signals:
     /// the frames nor the decoder, so it asks.
     void stabiliseRequested();
     void clearStabilisationRequested();
+
+    /// Take the transition being shown off its cut.
+    ///
+    /// A request rather than the edit, unlike everything else on this page.
+    /// The panel can write to a transition but it does not own the *selection*
+    /// -- the timeline does -- and removing one behind the timeline's back
+    /// would leave it outlining a span the model no longer holds. Pressing
+    /// Delete already goes through that one path; this asks for the same one.
+    void removeTransitionRequested();
 
 private:
     /// One animatable parameter: its slider and spin box, its stopwatch, and
@@ -366,6 +392,9 @@ private:
     QPushButton* inspectorTab_{nullptr};
     QPushButton* audioTab_{nullptr};
     QPushButton* infoTab_{nullptr};
+    /// Last in the strip, so adding it left the other three where they were.
+    /// A tab that moves is a tab somebody misses.
+    QPushButton* transitionTab_{nullptr};
     QPushButton* resetButton_{nullptr};
     /// The 52x32 tile the design puts beside the clip's name. A glyph for what
     /// kind of thing this is, not a thumbnail: a frame of the clip would want a
@@ -597,6 +626,45 @@ private:
     [[nodiscard]] const model::Track* selectedTrack() const;
     /// Fill the track page, and the identity row above it, from the model.
     void applyTrack();
+
+    /// The transition page: what a cut blends like.
+    QWidget* transitionGroup_{nullptr};
+    QFormLayout* transitionForm_{nullptr};
+    QComboBox* transitionKind_{nullptr};
+    QComboBox* transitionDirection_{nullptr};
+    QDoubleSpinBox* transitionSoftness_{nullptr};
+    QComboBox* transitionEasing_{nullptr};
+    QDoubleSpinBox* transitionDuration_{nullptr};
+    QComboBox* transitionAlignment_{nullptr};
+    QPushButton* transitionRemove_{nullptr};
+    void buildTransitionGroup();
+    /// Kind, direction, softness and easing are one write: they are one
+    /// question -- what does this cut do -- and `edit::TransitionSettings`
+    /// carries all four, so choosing a wipe and then softening its edge is one
+    /// thing to undo rather than two.
+    void pushTransitionSettings();
+    /// Duration and alignment are the other. Both are the span's range, and
+    /// which one moved decides which end stays put -- see `transitionRange`.
+    void pushTransitionRange();
+    /// The range the duration and alignment controls currently describe, or
+    /// nothing when they describe what the transition already is.
+    ///
+    /// Separate from pushing it so the two controls can share one answer: a
+    /// duration change on a fade keeps the pinned end, a duration change on a
+    /// cross fade keeps the alignment, and an alignment change keeps the
+    /// length. One function, three questions, rather than three functions that
+    /// each have to know where the cut is.
+    [[nodiscard]] std::optional<time::TimeRange> transitionRange() const;
+    /// Which transition this panel is showing, and the track it is on. Never
+    /// valid at the same time as `clip_` or `trackSelection_`.
+    model::TrackId transitionTrack_;
+    model::TransitionId transitionSelection_;
+    [[nodiscard]] const model::Transition* selectedTransition() const;
+    /// Where the cut a two-sided span straddles falls. Nothing for a fade,
+    /// which lies inside its clip and straddles no cut at all.
+    [[nodiscard]] std::optional<time::RationalTime> transitionCut() const;
+    /// Fill the transition page, and the identity row above it, from the model.
+    void applyTransition();
 
     QComboBox* role_{nullptr};
     QPushButton* duck_{nullptr};

@@ -135,7 +135,18 @@ QString styleSheet() {
 
     // Written as one sheet rather than per-widget calls: a control's look
     // should not depend on which panel happened to construct it.
-    return QString(R"(
+    //
+    // Two literals rather than one: MSVC caps a *single* string literal at
+    // 16380 bytes and this sheet is longer than that, so the halves are joined
+    // below. The split is at a section boundary, so adding a rule means
+    // growing the half it belongs to.
+    //
+    // Named, and checked, rather than left inline. This overflowed once and the
+    // only thing that noticed was CI -- the compiler here accepts a longer
+    // literal than the one the build uses, so the error arrived as a red build
+    // on someone else's machine. The assertions below fail on the machine that
+    // typed the rule instead.
+    static constexpr char kSheetTop[] = R"(
 QMenuBar { background: transparent; border: none; padding: 1px 4px; }
 QMenuBar::item { background: transparent; padding: 3px 8px; border-radius: 5px; }
 QMenuBar::item:selected, QMenuBar::item:pressed { background: %HOVER%; }
@@ -277,6 +288,27 @@ QScrollBar::handle:hover { background: %NEUTRAL700%; }
 QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
 QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
 
+/* Tables. There is one -- the keyboard shortcuts -- and it was the only thing
+   in the application still drawn by the platform's own style, because this
+   sheet named every other kind of view and not this one. What that looked like
+   was a header row in grey-on-grey over rows in white-on-dark: the headings
+   read as disabled, which is a poor way to introduce three columns. */
+QTableView {
+    background: %BG%; alternate-background-color: %SURFACE%;
+    border: 1px solid %DIVIDER%; border-radius: 8px;
+    gridline-color: %DIVIDER%; selection-background-color: %SELECT%;
+    selection-color: %ACCENT200%;
+}
+QTableView::item { padding: 4px 8px; }
+QHeaderView { background: transparent; }
+QHeaderView::section {
+    background: %SURFACE%; color: %MUTED%; padding: 5px 8px;
+    border: none; border-bottom: 1px solid %DIVIDER%;
+    font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase;
+}
+QHeaderView::section:hover { color: %TEXT%; }
+QTableCornerButton::section { background: %SURFACE%; border: none; }
+
 QGroupBox {
     border: 1px solid %DIVIDER%; border-radius: 8px;
     /* The title sits in this margin; anything less and the border is drawn
@@ -312,7 +344,9 @@ QToolTip {
 }
 QLabel { background: transparent; }
 
-/* --- the window's own chrome ------------------------------------------- */
+)";
+    static constexpr char kSheetRest[] =
+        R"(/* --- the window's own chrome ------------------------------------------- */
 
 #chrome-titlebar { background: %SURFACE%; border-bottom: 1px solid %DIVIDER%; }
 #chrome-toolbar, #chrome-timeline-bar, #chrome-viewer-bar {
@@ -335,6 +369,17 @@ QLabel { background: transparent; }
 #chrome-readout:hover { background: %HOVER%; color: %TEXT%; border-color: %DIVIDER%; }
 #chrome-readout:pressed { background: %PRESS%; }
 #chrome-readout:disabled { color: %MUTED%; background: transparent; border-color: transparent; }
+/* The frame-size dropdown, sized and coloured to sit beside the rate readout
+   rather than to look like a field in a form: same muted text, same hairline
+   border, same 6px radius. Its popup keeps the ordinary combo styling. */
+#chrome-format {
+    color: %MUTED%; font-size: 11px;
+    background: transparent; border: 1px solid %DIVIDER%; border-radius: 6px;
+    padding: 2px 4px 2px 7px; min-height: 16px;
+}
+#chrome-format:hover { background: %HOVER%; color: %TEXT%; }
+#chrome-format:disabled { color: %MUTED%; background: transparent; border-color: transparent; }
+#chrome-format::drop-down { border: none; width: 14px; }
 #chrome-brand { font-weight: 600; padding: 0 6px; }
 #viewer-well { background: %WELL%; }
 #deliver-side { background: %SURFACE%; }
@@ -466,7 +511,13 @@ QPushButton[class="inspector-tab"]:disabled { color: %FAINT%; background: transp
 /* The console sits in a well, like the viewer: it is a row of instruments. */
 #mixer-console { background: %WELL%; }
 #loudness-measure { font-size: 10px; padding: 2px 8px; border-radius: 6px; }
-)")
+)";
+    // -1 for the terminator: the cap is on the literal's own bytes.
+    static_assert(sizeof(kSheetTop) - 1 < 16380, "the first half of the sheet is over MSVC's cap");
+    static_assert(sizeof(kSheetRest) - 1 < 16380,
+                  "the second half of the sheet is over MSVC's cap");
+
+    return (QString::fromUtf8(kSheetTop) + QString::fromUtf8(kSheetRest))
         .replace("%CARET%", caretFile("caret", textAt(0.62)))
         .replace("%CARETOFF%", caretFile("caret-off", textAt(0.30)))
         .replace("%CARETUP%", caretFile("caret-up", textAt(0.62), true))

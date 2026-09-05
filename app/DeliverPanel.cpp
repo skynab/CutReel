@@ -3,6 +3,7 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDesktopServices>
+#include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFrame>
@@ -29,6 +30,7 @@
 #include "zaro/platform/qtext/QtTextRasterizer.h"
 
 #include "Theme.h"
+#include "chrome/Widgets.h"
 
 namespace zaro::app {
 
@@ -158,18 +160,6 @@ QLabel* factField(const QString& text, QWidget* parent) {
     return label;
 }
 
-QString humanSize(double bytes) {
-    if (bytes >= 1024.0 * 1024.0 * 1024.0) {
-        return QString::number(bytes / (1024.0 * 1024.0 * 1024.0), 'f', 2) + " GB";
-    }
-    if (bytes >= 1024.0 * 1024.0) {
-        return QString::number(bytes / (1024.0 * 1024.0), 'f', 0) + " MB";
-    }
-    // A ten-second draft of a small sequence really is a few hundred kilobytes,
-    // and "0 MB" reads as an arithmetic bug rather than as a small file.
-    return QString::number(bytes / 1024.0, 'f', 0) + " KB";
-}
-
 }  // namespace
 
 DeliverPanel::DeliverPanel(QWidget* parent) : QWidget{parent} {
@@ -183,7 +173,7 @@ DeliverPanel::DeliverPanel(QWidget* parent) : QWidget{parent} {
                "encode. Needs an FFmpeg built with libx265.",
                "mp4", "libx265", "aac", 0.45, true, "10-bit"},
         Preset{"Web", "Draft · MP4", "libx264 · AAC · low rate",
-               "Something to look at, quickly. Small and soft on purpose -- not "
+               "Something to look at, quickly. Small and soft on purpose — not "
                "a file to send anybody.",
                "mp4", "libx264", "aac", 0.12, true, "8-bit"},
         Preset{"Master", "ProRes · MOV", "prores_ks · PCM 24-bit",
@@ -407,7 +397,11 @@ void DeliverPanel::buildSettings(QVBoxLayout* into) {
     destination->addWidget(fileName_, 1, 0);
 
     auto* locationRow = new QHBoxLayout;
-    folder_ = new QLineEdit(QDir::homePath(), content);
+    // Native separators throughout, because the line under this field is
+    // built with std::filesystem and comes out native whatever this said.
+    // The two sat one above the other reading C:/Users/... and
+    // C:\Users\...\delivery.mp4, which looks like two different places.
+    folder_ = new QLineEdit(QDir::toNativeSeparators(QDir::homePath()), content);
     folder_->setReadOnly(true);
     auto* browse = new QPushButton("Browse", content);
     browse->setProperty("flat", true);
@@ -780,7 +774,7 @@ std::string DeliverPanel::outputPath() const {
 }
 
 void DeliverPanel::setDestination(const QString& folder, const QString& name) {
-    folder_->setText(folder);
+    folder_->setText(QDir::toNativeSeparators(folder));
     fileName_->setText(name);
     updateDerived();
 }
@@ -803,7 +797,7 @@ QString DeliverPanel::lastMessage() const {
 void DeliverPanel::chooseFolder() {
     const QString chosen = QFileDialog::getExistingDirectory(this, "Deliver to", folder_->text());
     if (!chosen.isEmpty()) {
-        folder_->setText(chosen);
+        folder_->setText(QDir::toNativeSeparators(chosen));
         updateDerived();
     }
 }
@@ -852,7 +846,7 @@ void DeliverPanel::updateDerived() {
 
     if (seq != nullptr && variable && rate > 0) {
         const double seconds = static_cast<double>(count) / seq->frameRate().toDouble();
-        estimateSize_->setText(humanSize(static_cast<double>(rate) * seconds / 8.0));
+        estimateSize_->setText(chrome::humanSize(static_cast<double>(rate) * seconds / 8.0));
     } else {
         // ProRes is bounded by its profile rather than by a number we set, so
         // a size guessed here would be a number with nothing behind it.
@@ -872,9 +866,10 @@ void DeliverPanel::updateDerived() {
     // can be read honestly on every platform.
     std::error_code code;
     const auto space = std::filesystem::space(folder_->text().toStdString(), code);
-    machineSpace_->setText(code ? QString("Destination unavailable")
-                                : QString("%1 free on the destination")
-                                      .arg(humanSize(static_cast<double>(space.available))));
+    machineSpace_->setText(code
+                               ? QString("Destination unavailable")
+                               : QString("%1 free on the destination")
+                                     .arg(chrome::humanSize(static_cast<double>(space.available))));
 
     emit queueChanged();
 }
@@ -1153,8 +1148,11 @@ void DeliverPanel::rebuildQueueView() {
         column->setSpacing(6);
 
         auto* top = new QHBoxLayout;
-        auto* name = new QLabel(job.name, card);
+        auto* name = new QLabel(card);
         name->setStyleSheet("font-size:11.5px;border:none");
+        // The middle of a file name is the part two renders of the same cut
+        // share; the head and the extension are what tell them apart.
+        chrome::setElidedText(name, job.name, Qt::ElideMiddle);
         auto* state = new QLabel(status, card);
         state->setStyleSheet(
             QString("font-size:10px;border:none;color:%1").arg(colour.name(QColor::HexRgb)));
@@ -1175,9 +1173,10 @@ void DeliverPanel::rebuildQueueView() {
         column->addWidget(bar);
 
         auto* foot = new QHBoxLayout;
-        auto* spec = new QLabel(job.spec, card);
+        auto* spec = new QLabel(card);
         spec->setStyleSheet(QString("font-size:10px;border:none;color:%1")
                                 .arg(theme::textAt(0.40).name(QColor::HexRgb)));
+        chrome::setElidedText(spec, job.spec);
         QString right = job.message;
         if (job.state == Job::State::Rendering && job.elapsed > 0.5 && job.progress > 0.01) {
             // From what this render has actually done, not from a guess made
@@ -1185,12 +1184,19 @@ void DeliverPanel::rebuildQueueView() {
             const double remaining = job.elapsed * (1.0 - job.progress) / job.progress;
             right = QString("%1 min left").arg(std::max(1.0, remaining / 60.0), 0, 'f', 0);
         }
-        auto* note = new QLabel(right, card);
+        auto* note = new QLabel(card);
         note->setStyleSheet(QString("font-size:10px;border:none;color:%1")
                                 .arg(theme::textAt(0.40).name(QColor::HexRgb)));
-        note->setToolTip(job.message);
+        // Elided, with the whole of it on the tooltip.
+        //
+        // A finished render explains itself -- "Re-encoded, more than one clip
+        // is on screen over that range" -- and a plain label asks for the width
+        // of all of that. The card could not be squeezed under it, so it grew
+        // past the queue column and Qt cut the end off: the note, and the word
+        // saying whether the render had worked at all.
+        chrome::setElidedText(note, right);
         foot->addWidget(spec, 1);
-        foot->addWidget(note);
+        foot->addWidget(note, 1);
         column->addLayout(foot);
 
         queueLayout_->insertWidget(static_cast<int>(i), card);

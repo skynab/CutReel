@@ -2,10 +2,12 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <fstream>
 #include <map>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #include "zaro/core/time/Timecode.h"
 
@@ -175,6 +177,66 @@ void writeClipItem(Node& track, const model::Project& project, const model::Clip
     sourceTrack.add("trackindex", std::int64_t{1});
 }
 
+/// The name this format knows a blend by.
+///
+/// `effectid` is what an importer matches on, and it knows a short list. A
+/// dissolve and a wipe are both on it; the rest are not, and are written as a
+/// dissolve of the right length rather than under a name nothing will match --
+/// which would import as no transition at all. What was really meant rides
+/// alongside in `<zaro:kind>`, so a round trip through this reader is lossless.
+const char* premiereEffectFor(model::TransitionKind kind) noexcept {
+    switch (kind) {
+        case model::TransitionKind::Wipe:
+        case model::TransitionKind::Iris:
+            return "Wipe";
+        case model::TransitionKind::CrossDissolve:
+        case model::TransitionKind::Slide:
+        case model::TransitionKind::Push:
+        case model::TransitionKind::Zoom:
+        case model::TransitionKind::DipToBlack:
+        default:
+            return "Cross Dissolve";
+    }
+}
+
+void writeTransitionItem(Node& track, const model::Transition& span, const time::RationalTime& cut,
+                         const time::Rational& rate) {
+    Node& item = track.add("transitionitem");
+    item.add("start", span.range.start().frames());
+    item.add("end", span.range.endExclusive().frames());
+    // Where the span sits against the cut, which this format names rather than
+    // implying. The same three answers the inspector offers, and worked out
+    // the same way -- from where the cut falls inside the span, not from what
+    // anybody last chose.
+    const std::int64_t before = (cut - span.range.start()).frames();
+    const std::int64_t after = (span.range.endExclusive() - cut).frames();
+    item.add("alignment", std::string{before == 0 ? "start" : after == 0 ? "end" : "center"});
+    writeRate(item, rate);
+
+    Node& effect = item.add("effect");
+    effect.add("name", std::string{premiereEffectFor(span.kind)});
+    effect.add("effectid", std::string{premiereEffectFor(span.kind)});
+    effect.add("effecttype", std::string{"transition"});
+    effect.add("mediatype", std::string{"video"});
+    effect.add("wipecode", std::int64_t{0});
+    effect.add("wipeaccuracy", std::int64_t{100});
+    effect.add("startratio", std::int64_t{0});
+    effect.add("endratio", std::int64_t{1});
+    effect.addBool("reverse", false);
+
+    // Everything this format has no word for. Namespaced so an importer that
+    // does not know it steps over it, and a reader that does gets back exactly
+    // what was written.
+    item.add("zaro:kind", std::string{model::toString(span.kind)});
+    item.add("zaro:easing", std::string{model::toString(span.easing)});
+    if (model::transitionTravels(span.kind)) {
+        item.add("zaro:direction", std::string{model::toString(span.direction)});
+    }
+    if (model::transitionHasEdge(span.kind) && span.softness > 0.0) {
+        item.add("zaro:softness", std::to_string(span.softness));
+    }
+}
+
 void writeTracks(Node& parent, const model::Project& project, const model::Sequence& sequence,
                  model::TrackKind kind, std::int64_t& nextItem,
                  std::map<std::uint64_t, std::string>& emitted) {
@@ -184,6 +246,16 @@ void writeTracks(Node& parent, const model::Project& project, const model::Seque
         Node& node = parent.add("track");
         for (const model::Clip& clip : track.clips()) {
             writeClipItem(node, project, clip, kind, nextItem++, emitted);
+            // After the clip it leaves, which is where this format puts one and
+            // the order a reader walks. Cross fades only: a fade lies inside
+            // its clip and joins it to nothing, and `alignment` has no answer
+            // for a span that straddles no cut.
+            for (const model::Transition& span : track.transitions()) {
+                if (span.from == clip.id && span.isCrossFade()) {
+                    writeTransitionItem(node, span, clip.endExclusive(), sequence.frameRate());
+                    break;
+                }
+            }
         }
         // After the items, which is where FCP wrote them and where every reader
         // of this format expects to find them.
@@ -373,6 +445,95 @@ void readTracks(const Node& parent, model::TrackKind kind, model::Project& proje
                 continue;
             }
             track->insert(std::move(clip));
+        }
+
+        // After the clips, because a span names the two it joins and they have
+        // to exist first. Unlike a clipitem this carries no source, so its
+        // whole content is where it sits and what it does.
+        std::vector<model::Transition> spans;
+        for (const Node* item : trackNode->childrenNamed("transitionitem")) {
+            const std::int64_t start = item->intOf("start", -1);
+            const std::int64_t end = item->intOf("end", -1);
+            if (start < 0 || end <= start) {
+                continue;
+            }
+            const time::TimeRange range{time::RationalTime{start, rate},
+                                        time::RationalTime{end - start, rate}};
+
+            // Which cut it belongs to comes from `alignment`, which says where
+            // the join sits inside the span. A centred one is worked out from
+            // the clips rather than from the middle: this format's centre is
+            // wherever the two clips actually meet, and a span dragged
+            // asymmetrically still calls itself centred.
+            const std::string alignment = item->textOf("alignment");
+            time::RationalTime cut = range.start();
+            if (alignment == "end") {
+                cut = range.endExclusive();
+            } else if (alignment != "start") {
+                cut = time::RationalTime{start + ((end - start) / 2), rate};
+            }
+
+            const model::Clip* incoming = track->clipAt(cut);
+            const model::Clip* outgoing = nullptr;
+            for (const model::Clip& candidate : track->clips()) {
+                if (candidate.endExclusive() == cut) {
+                    outgoing = &candidate;
+                }
+            }
+            // A centred span rarely lands exactly on the join, so the nearest
+            // cut inside it is taken instead. A span with no cut under it at
+            // all is dropped: the file claimed a join and there is not one.
+            if (outgoing == nullptr || incoming == nullptr) {
+                const model::Clip* best = nullptr;
+                for (const model::Clip& candidate : track->clips()) {
+                    const time::RationalTime edge = candidate.endExclusive();
+                    if (edge <= range.start() || edge >= range.endExclusive()) {
+                        continue;
+                    }
+                    if (track->clipAt(edge) != nullptr) {
+                        best = &candidate;
+                    }
+                }
+                if (best == nullptr) {
+                    continue;
+                }
+                outgoing = best;
+                incoming = track->clipAt(best->endExclusive());
+            }
+
+            model::Transition span;
+            span.id = project.ids().next<model::TransitionTag>();
+            span.from = outgoing->id;
+            span.to = incoming->id;
+            span.range = range;
+            // What the format names, then what only this program does. An
+            // importer that never saw the namespaced fields still gets a
+            // dissolve or a wipe of the right length across the right cut.
+            const Node* effect = item->child("effect");
+            const std::string effectId = effect != nullptr ? effect->textOf("effectid") : "";
+            if (effectId.find("Wipe") != std::string::npos) {
+                span.kind = model::TransitionKind::Wipe;
+            }
+            if (const std::string kindText = item->textOf("zaro:kind"); !kindText.empty()) {
+                span.kind = model::transitionKindFromString(kindText.c_str());
+            }
+            if (const std::string easingText = item->textOf("zaro:easing"); !easingText.empty()) {
+                span.easing = model::transitionEasingFromString(easingText.c_str());
+            }
+            if (const std::string directionText = item->textOf("zaro:direction");
+                !directionText.empty()) {
+                model::TransitionDirection direction{};
+                if (model::transitionDirectionFromString(directionText.c_str(), direction)) {
+                    span.direction = direction;
+                }
+            }
+            if (const std::string softText = item->textOf("zaro:softness"); !softText.empty()) {
+                span.softness = std::clamp(std::strtod(softText.c_str(), nullptr), 0.0, 1.0);
+            }
+            spans.push_back(span);
+        }
+        if (!spans.empty()) {
+            track->setTransitions(std::move(spans));
         }
     }
 }

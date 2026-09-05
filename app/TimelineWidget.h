@@ -206,6 +206,15 @@ signals:
     /// is off. The two are exclusive: a panel showing a track's properties and
     /// a clip's at once would have two things called "the selection".
     void trackSelected(zaro::model::TrackId track);
+    /// A transition was picked, by pressing the span drawn across the cut.
+    /// An invalid id means something else was picked and this selection is off.
+    ///
+    /// The third of the three, and exclusive with both for the reason the
+    /// track is: what a panel is *about* has to be one thing. A transition is
+    /// no more a cut-down clip than a track is -- it has a kind, a direction
+    /// and a length, and none of the transform, grade or mask the clips it
+    /// joins have.
+    void transitionSelected(zaro::model::TrackId track, zaro::model::TransitionId transition);
     /// The tool or the snap setting changed, including from the keyboard --
     /// so the toolbar showing them can follow rather than only lead.
     void toolChanged();
@@ -494,12 +503,20 @@ public:
     /// does not reorder, and the primary is what the panel's header names.
     void selectAlso(model::TrackId track, model::ClipId clip);
 
-    /// Change the transition under the playhead to another kind.
+    /// Pick a transition, without a mouse.
     ///
-    /// Separate from adding one, because that is how it is used: somebody drops
-    /// a dissolve on a cut and then decides it wants to be a wipe.
-    bool setTransitionKindAtPlayhead(model::TransitionKind kind,
-                                     model::TransitionDirection direction);
+    /// The mouse-free twin of pressing the span, wanted for the reason
+    /// `selectOnly` is: a self-test has to make the selection before it can
+    /// check what the panel does with it. An invalid id clears the selection.
+    void selectTransition(model::TrackId track, model::TransitionId transition);
+    /// Which transition is picked, and the track it is on. Invalid ids when
+    /// the selection is clips or a track instead.
+    [[nodiscard]] model::TransitionId selectedTransition() const noexcept {
+        return transitionSelected_.transition;
+    }
+    [[nodiscard]] model::TrackId selectedTransitionTrack() const noexcept {
+        return transitionSelected_.track;
+    }
 
 private:
     model::Project* project_{nullptr};
@@ -545,16 +562,24 @@ private:
         TransitionEnd
     };
 
-    /// Which transition an edge drag is stretching.
+    /// One transition, by the track it is on.
     ///
     /// Held by id rather than by pointer, for the reason KeyframeDrag is: an
     /// edit rebuilds the track's transitions and a pointer into them would be
     /// dangling by the second mouse-move of the gesture.
-    struct TransitionDrag {
+    struct TransitionRef {
         model::TrackId track;
         model::TransitionId transition;
+
+        [[nodiscard]] bool isValid() const noexcept { return transition.isValid(); }
+        friend bool operator==(const TransitionRef&, const TransitionRef&) = default;
     };
-    TransitionDrag transitionDrag_;
+    /// Which transition an edge drag is stretching.
+    TransitionRef transitionDrag_;
+    /// Which transition is picked, if the selection is a transition rather
+    /// than clips or a track. See the `transitionSelected` signal for why the
+    /// three are exclusive.
+    TransitionRef transitionSelected_;
 
     /// The transition edge under the pointer, if there is one.
     ///
@@ -567,6 +592,22 @@ private:
         bool atStart{false};
     };
     [[nodiscard]] std::optional<TransitionHit> transitionEdgeAt(int x, int y) const;
+    /// The transition whose *body* is under the pointer, if there is one.
+    ///
+    /// Tested after the edges and before the clips. Pressing the middle of a
+    /// span is picking it and pressing near an end is grabbing that end, so
+    /// the edges have to win; both have to beat the clips, for the reason
+    /// `transitionEdgeAt` already gives.
+    [[nodiscard]] std::optional<TransitionRef> transitionBodyAt(int x, int y) const;
+    /// Take the picked transition off its track. Nothing when none is picked.
+    void removeSelectedTransition();
+    /// What a transition can do, on its own right-click.
+    ///
+    /// Tested before the clips, exactly as the left button's hit tests are.
+    /// Left-clicking a span picked the transition while right-clicking it
+    /// opened the menu for the clip underneath -- two buttons disagreeing
+    /// about what the pointer was on.
+    void transitionMenu(const TransitionRef& ref, const QPoint& at);
     void updateTransitionDrag(int x);
 
     /// The keyframe being dragged, or an invalid clip id when none is.

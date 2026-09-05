@@ -6,24 +6,59 @@
 
 #include "Widgets.h"
 
+#include <QAbstractItemModel>
+#include <QAbstractItemView>
+#include <QComboBox>
 #include <QDesktopServices>
+#include <QEvent>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QKeySequence>
 #include <QLabel>
+#include <QPainter>
+#include <QRect>
 #include <QSize>
 #include <QSizePolicy>
 #include <QSlider>
 #include <QStackedWidget>
 #include <QUrl>
 #include <QVBoxLayout>
+#include <functional>
 #include <string>
 
 #include "../Icons.h"
 #include "../SupportButton.h"
 #include "../Theme.h"
+#include "Choices.h"
 
 namespace zaro::app::chrome {
+namespace {
+
+/// Runs something whenever the widget it watches is resized.
+///
+/// A filter rather than a resizeEvent override, because the point of the
+/// helpers that use it -- `setEmptyText`, `setElidedText` -- is that they work
+/// on the widgets the panels already build. A subclass would mean changing
+/// every one of them to use it.
+class ResizeWatcher : public QObject {
+public:
+    ResizeWatcher(QWidget* subject, std::function<void()> sync, QObject* parent)
+        : QObject{parent}, subject_{subject}, sync_{std::move(sync)} {}
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override {
+        if (event->type() == QEvent::Resize && subject_ != nullptr) {
+            sync_();
+        }
+        return QObject::eventFilter(watched, event);
+    }
+
+private:
+    QWidget* subject_{nullptr};
+    std::function<void()> sync_;
+};
+
+}  // namespace
 
 QPushButton* button(QWidget* parent, const QString& text, const QString& tip, bool checkable) {
     auto* made = new QPushButton(text, parent);
@@ -60,6 +95,68 @@ QLabel* mutedLabel(QWidget* parent, const QString& text) {
     return label;
 }
 
+void setElidedText(QLabel* label, const QString& text, Qt::TextElideMode mode) {
+    if (label == nullptr) {
+        return;
+    }
+    label->setToolTip(text);
+    // Ignored horizontally: the point is that the label stops asking for the
+    // width of its whole string, which is what was widening the row.
+    label->setSizePolicy(QSizePolicy::Ignored, label->sizePolicy().verticalPolicy());
+    const auto paint = [label, text, mode] {
+        label->setText(label->fontMetrics().elidedText(text, mode, std::max(0, label->width())));
+    };
+    label->installEventFilter(new ResizeWatcher{label, paint, label});
+    paint();
+}
+
+QString humanSize(double bytes) {
+    constexpr double kUnit = 1024.0;
+    if (bytes >= kUnit * kUnit * kUnit) {
+        return QString("%1 GB").arg(bytes / (kUnit * kUnit * kUnit), 0, 'f', 1);
+    }
+    if (bytes >= kUnit * kUnit) {
+        return QString("%1 MB").arg(bytes / (kUnit * kUnit), 0, 'f', 1);
+    }
+    // Down to kilobytes, and no further: a file smaller than a kilobyte is not
+    // one anybody is deciding anything about, and "0 kB" says enough.
+    return QString("%1 kB").arg(bytes / kUnit, 0, 'f', 0);
+}
+
+void setEmptyText(QAbstractItemView* view, const QString& text) {
+    if (view == nullptr || view->viewport() == nullptr) {
+        return;
+    }
+    auto* label = new QLabel(text, view->viewport());
+    label->setWordWrap(true);
+    label->setAlignment(Qt::AlignCenter);
+    label->setContentsMargins(16, 0, 16, 0);
+    label->setProperty("muted", true);
+    // The list is still the thing being clicked and scrolled; this is only
+    // something to read while there is nothing to click.
+    label->setAttribute(Qt::WA_TransparentForMouseEvents);
+
+    const auto sync = [view, label] {
+        const QAbstractItemModel* model = view->model();
+        const bool empty = model == nullptr || model->rowCount(view->rootIndex()) == 0;
+        label->setGeometry(view->viewport()->rect());
+        label->setVisible(empty);
+        if (empty) {
+            label->raise();
+        }
+    };
+
+    // Follow the viewport's size, and the model's contents. Both matter: a
+    // label left at its first geometry sits in the corner of a resized panel,
+    // and one that never hears about a row stays up over the list it is
+    // covering.
+    QObject::connect(view->model(), &QAbstractItemModel::rowsInserted, label, sync);
+    QObject::connect(view->model(), &QAbstractItemModel::rowsRemoved, label, sync);
+    QObject::connect(view->model(), &QAbstractItemModel::modelReset, label, sync);
+    view->viewport()->installEventFilter(new ResizeWatcher{label, sync, view->viewport()});
+    sync();
+}
+
 QWidget* buildTitleBar(QWidget* parent, Bars& bars) {
     auto* bar = new QWidget(parent);
     bar->setObjectName("chrome-titlebar");
@@ -82,6 +179,9 @@ QWidget* buildTitleBar(QWidget* parent, Bars& bars) {
     row->addStretch(1);
 
     bars.autosaveLabel = mutedLabel(bar);
+    // Named: it is the readout somebody checks before deciding whether to
+    // press Save, so it is worth being able to assert on it.
+    bars.autosaveLabel->setObjectName("autosave-label");
     row->addWidget(bars.autosaveLabel);
     return bar;
 }
@@ -184,6 +284,35 @@ QPushButton* readout(QWidget* parent, const QString& tip, ActionRouter& router,
     return made;
 }
 
+/// The frame-size dropdown, with the chevron the rest of this bar uses.
+///
+/// Nothing in this program draws a combo box arrow: the stylesheet gives every
+/// QComboBox a bare drop-down area and no image for the indicator, so a combo
+/// in the toolbar is a rounded rectangle with a number in it and nothing says
+/// it opens. The readouts beside it solve that with a literal "⌄" in their
+/// text, and this draws the same glyph in the same place -- matching the bar's
+/// existing signal for "this can be opened" rather than inventing a second one.
+///
+/// Drawn rather than styled because the stylesheet route needs an image asset:
+/// the usual CSS zero-size-border triangle is not something Qt's stylesheet
+/// engine implements, and asking for one paints a filled square.
+class FormatCombo final : public QComboBox {
+public:
+    using QComboBox::QComboBox;
+
+protected:
+    void paintEvent(QPaintEvent* event) override {
+        QComboBox::paintEvent(event);
+        if (!isEnabled()) {
+            return;
+        }
+        QPainter painter{this};
+        painter.setPen(underMouse() ? app::theme::text() : app::theme::textAt(0.55));
+        painter.drawText(QRect(width() - 15, 0, 12, height()), Qt::AlignCenter,
+                         QStringLiteral("⌄"));
+    }
+};
+
 }  // namespace
 
 QWidget* buildToolBar(QWidget* parent, Bars& bars, ActionRouter& router, const Hooks& hooks,
@@ -198,15 +327,50 @@ QWidget* buildToolBar(QWidget* parent, Bars& bars, ActionRouter& router, const H
     // Snapping and markers used to be here. They belong with the timeline --
     // both of them are about where an edit lands, and the timeline is where
     // edits land -- so they moved down with the tools.
+    // A dropdown rather than another readout button. It is the project's
+    // resolution, it is a setting with a value, and the top left of the window
+    // is where somebody looks for it -- so it says what it is set to without
+    // being clicked, and opens its own list when it is.
+    bars.formatBox = new FormatCombo(bar);
+    bars.formatBox->setObjectName("chrome-format");
+    bars.formatBox->setToolTip(
+        "Frame size — the resolution this sequence renders and\n"
+        "exports at. Pick one, 1080\u00d71920 vertical included, or\n"
+        "Custom\u2026 to type a size. Also at Sequence \u25b8 Frame Size.");
+    bars.formatBox->setFocusPolicy(Qt::NoFocus);
+    bars.formatBox->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+    {
+        // `activated` and not `currentIndexChanged`: the box is repopulated
+        // whenever the sequence changes, and a change signal would fire on
+        // every one of those and resize the sequence to whatever the refresh
+        // had just selected.
+        const auto choose = hooks.chooseFrameSize;
+        QObject::connect(bars.formatBox, &QComboBox::activated, bars.formatBox,
+                         [box = bars.formatBox, choose](int index) {
+                             if (!choose) {
+                                 return;
+                             }
+                             const QVariant size = box->itemData(index);
+                             if (!size.isValid()) {
+                                 return;
+                             }
+                             const QPoint pair = size.toPoint();
+                             choose(pair.x(), pair.y());
+                         });
+    }
+
+    // The same slot in Deliver, where what belongs there is the render range.
     bars.formatButton = readout(bar,
                                 "Frame size — the resolution this sequence renders and\n"
                                 "exports at. Click to pick one, 1080\u00d71920 vertical\n"
                                 "included. Also at Sequence \u25b8 Frame Size.",
                                 router, "frame-size");
+    bars.formatButton->hide();
     bars.rateButton = readout(bar,
                               "Frame rate — how fast this sequence plays.\n"
                               "Click to change. Also at Sequence \u25b8 Frame Rate.",
                               router, "frame-rate");
+    row->addWidget(bars.formatBox);
     row->addWidget(bars.formatButton);
     row->addWidget(bars.rateButton);
     row->addStretch(1);

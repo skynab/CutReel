@@ -1962,14 +1962,15 @@ TEST_CASE("The GPU agrees with the CPU on a wipe", "[gpu][golden][transition]") 
                 render::transitionShapeFor(transition, progress, 64, 36);
 
             RgbaImage cpuOut{64, 36};
-            render::drawTransformed(source, cpuOut, Transform{}, BlendMode::Normal,
-                                    {.wipe = shape.wipe.isSet() ? &shape.wipe : nullptr});
+            render::drawTransformed(
+                source, cpuOut, Transform{}, BlendMode::Normal,
+                {.wipe = shape.incoming.mask.isSet() ? &shape.incoming.mask : nullptr});
 
             ZARO_REQUIRE_OK(compositor->beginFrame(64, 36));
-            ZARO_REQUIRE_OK(compositor->draw(source, Transform{}, BlendMode::Normal,
-                                             render::GradeConstants{}, nullptr, nullptr, nullptr,
-                                             1.0F, nullptr, nullptr, nullptr,
-                                             shape.wipe.isSet() ? &shape.wipe : nullptr));
+            ZARO_REQUIRE_OK(
+                compositor->draw(source, Transform{}, BlendMode::Normal, render::GradeConstants{},
+                                 nullptr, nullptr, nullptr, 1.0F, nullptr, nullptr, nullptr,
+                                 shape.incoming.mask.isSet() ? &shape.incoming.mask : nullptr));
             RgbaImage gpuOut;
             ZARO_REQUIRE_OK(compositor->endFrame(gpuOut));
 
