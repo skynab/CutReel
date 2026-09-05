@@ -6,6 +6,7 @@
 #include <fstream>
 #include <map>
 #include <sstream>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -80,6 +81,38 @@ Result<time::TimeRange> readRange(const json& node, const char* what) {
     return time::TimeRange{*start, *duration};
 }
 
+/// A span across a cut, as OTIO spells one.
+///
+/// An OTIO transition is not an item with a duration; it is a marker between
+/// two items with an offset reaching either side of the join. That is exactly
+/// this model's shape -- a span straddling a cut rather than an overlap -- so
+/// the two need no translation beyond naming the halves.
+json writeTransition(const model::Transition& span, const time::RationalTime& cut) {
+    json out{{"OTIO_SCHEMA", "Transition.1"},
+             {"name", model::toString(span.kind)},
+             // OTIO names one blend and calls everything else custom. A
+             // dissolve is the one it knows; the rest keep their own name in
+             // metadata, so a round trip through this reader loses nothing and
+             // every other tool sees a dissolve -- which is a cut somebody can
+             // still watch, and the same fallback an unknown kind gets on load.
+             {"transition_type",
+              span.kind == model::TransitionKind::CrossDissolve ? "SMPTE_Dissolve" : "Custom"},
+             {"in_offset", writeTime(cut - span.range.start())},
+             {"out_offset", writeTime(span.range.endExclusive() - cut)}};
+
+    json mine{{"kind", model::toString(span.kind)}, {"easing", model::toString(span.easing)}};
+    // Written only where they mean something, the way the project format does
+    // it: a dissolve has no direction to travel in and a slide has no edge.
+    if (model::transitionTravels(span.kind)) {
+        mine["direction"] = model::toString(span.direction);
+    }
+    if (model::transitionHasEdge(span.kind) && span.softness > 0.0) {
+        mine["softness"] = span.softness;
+    }
+    out["metadata"] = json{{"zaro", std::move(mine)}};
+    return out;
+}
+
 /// The schema family, without its version: "Clip.1" is a Clip.
 std::string schemaName(const json& node) {
     if (!node.is_object() || !node.contains("OTIO_SCHEMA")) {
@@ -143,6 +176,22 @@ Result<std::string> writeOtio(const model::Project& project, model::SequenceId s
                 }
                 children.push_back(std::move(item));
                 cursor = clip.endExclusive();
+
+                // A span leaving this clip goes between it and the one it
+                // joins, which is where OTIO puts a transition and why this
+                // sits inside the loop rather than after it.
+                //
+                // Cross fades only. A fade lies *inside* its clip and joins it
+                // to nothing, while an OTIO transition is a join between two
+                // items -- so writing one would be inventing the item on the
+                // far side. Left out rather than guessed at, which is the same
+                // call the reader makes about a Stack.
+                for (const model::Transition& span : track.transitions()) {
+                    if (span.from == clip.id && span.isCrossFade()) {
+                        children.push_back(writeTransition(span, clip.endExclusive()));
+                        break;
+                    }
+                }
             }
 
             tracks.push_back(json{{"OTIO_SCHEMA", "Track.1"},
@@ -239,8 +288,70 @@ Result<model::Project> readOtio(const std::string& text) {
         // Position is implied by order and duration; this is where it comes
         // back.
         time::RationalTime cursor{0, rate};
+        // A transition names the clips either side of it, and the one after it
+        // has not been read yet -- so what the file says is collected here and
+        // turned into spans once the whole track exists.
+        struct PendingSpan {
+            time::RationalTime cut;
+            time::RationalTime in;
+            time::RationalTime out;
+            model::TransitionKind kind{model::TransitionKind::CrossDissolve};
+            model::TransitionDirection direction{model::TransitionDirection::Right};
+            double softness{0.0};
+            model::TransitionEasing easing{model::TransitionEasing::Linear};
+        };
+        std::vector<PendingSpan> pending;
+
         for (const json& child : trackNode.value("children", json::array())) {
             const std::string what = schemaName(child);
+            // Before the source_range check below, because a transition has
+            // none: it is a marker between two items rather than an item with
+            // a duration, and it consumes no timeline time. That is also why
+            // this does not advance the cursor.
+            if (what == "Transition") {
+                PendingSpan span;
+                span.cut = cursor;
+                if (child.contains("in_offset")) {
+                    auto offset = readTime(child.at("in_offset"), "in_offset");
+                    if (!offset) {
+                        return offset.error();
+                    }
+                    span.in = offset->rescaledTo(rate);
+                }
+                if (child.contains("out_offset")) {
+                    auto offset = readTime(child.at("out_offset"), "out_offset");
+                    if (!offset) {
+                        return offset.error();
+                    }
+                    span.out = offset->rescaledTo(rate);
+                }
+                // Anything this writer wrote comes back exactly; anything else
+                // is a dissolve of the length the offsets give, which is what
+                // every tool that does not know our kinds will have meant.
+                const json meta = child.value("metadata", json::object());
+                const json mine =
+                    meta.is_object() ? meta.value("zaro", json::object()) : json::object();
+                if (mine.is_object()) {
+                    if (mine.contains("kind")) {
+                        span.kind = model::transitionKindFromString(
+                            mine.at("kind").get<std::string>().c_str());
+                    }
+                    if (mine.contains("direction")) {
+                        model::TransitionDirection direction{};
+                        if (model::transitionDirectionFromString(
+                                mine.at("direction").get<std::string>().c_str(), direction)) {
+                            span.direction = direction;
+                        }
+                    }
+                    if (mine.contains("easing")) {
+                        span.easing = model::transitionEasingFromString(
+                            mine.at("easing").get<std::string>().c_str());
+                    }
+                    span.softness = std::clamp(mine.value("softness", 0.0), 0.0, 1.0);
+                }
+                pending.push_back(span);
+                continue;
+            }
             if (!child.contains("source_range")) {
                 continue;
             }
@@ -289,6 +400,39 @@ Result<model::Project> readOtio(const std::string& text) {
 
             track->insert(clip);
             cursor = cursor + duration;
+        }
+
+        // Now that the whole track exists, each span can name the clips it
+        // joins. One that lands where two clips do not actually meet is
+        // dropped: the file said a join and there is not one, and a transition
+        // pointing at a clip that is not there is worse than none.
+        std::vector<model::Transition> spans;
+        for (const PendingSpan& span : pending) {
+            const model::Clip* incoming = track->clipAt(span.cut);
+            const model::Clip* outgoing = nullptr;
+            for (const model::Clip& candidate : track->clips()) {
+                if (candidate.endExclusive() == span.cut) {
+                    outgoing = &candidate;
+                }
+            }
+            if (outgoing == nullptr || incoming == nullptr) {
+                continue;
+            }
+            model::Transition made;
+            made.id = project.ids().next<model::TransitionTag>();
+            made.from = outgoing->id;
+            made.to = incoming->id;
+            made.range = time::TimeRange::fromStartEnd(span.cut - span.in, span.cut + span.out);
+            made.kind = span.kind;
+            made.direction = span.direction;
+            made.softness = span.softness;
+            made.easing = span.easing;
+            if (made.range.duration().frames() > 0) {
+                spans.push_back(made);
+            }
+        }
+        if (!spans.empty()) {
+            track->setTransitions(std::move(spans));
         }
     }
 

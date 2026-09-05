@@ -155,19 +155,26 @@ TEST_CASE("Something that is not a timeline is refused", "[io][otio]") {
 }
 
 TEST_CASE("An unknown item in a track does not move what follows it", "[io][otio]") {
-    // A Stack or a Transition inside a track is skipped rather than guessed at,
+    // An item this reader has no model for is skipped rather than guessed at,
     // but its duration still has to advance the cursor or everything after it
     // lands early.
+    //
+    // A nested Stack, which is what that now means. This was written with a
+    // Transition standing in, back when one was equally unknown -- and with a
+    // `source_range`, which a real OTIO transition does not have: it is a
+    // marker between two items rather than an item with a duration, and it
+    // consumes no time at all. Transitions are read properly now, so the case
+    // this guards needs an item that genuinely is both unknown and timed.
     const std::string text = R"({
         "OTIO_SCHEMA": "Timeline.1",
-        "name": "with a transition",
+        "name": "with a nested stack",
         "tracks": {
             "OTIO_SCHEMA": "Stack.1",
             "children": [{
                 "OTIO_SCHEMA": "Track.1",
                 "kind": "Video",
                 "children": [
-                    {"OTIO_SCHEMA": "Transition.1",
+                    {"OTIO_SCHEMA": "Stack.1",
                      "source_range": {"OTIO_SCHEMA": "TimeRange.1",
                         "start_time": {"OTIO_SCHEMA": "RationalTime.1", "rate": 25.0, "value": 0.0},
                         "duration": {"OTIO_SCHEMA": "RationalTime.1", "rate": 25.0, "value": 12.0}}},
@@ -186,4 +193,133 @@ TEST_CASE("An unknown item in a track does not move what follows it", "[io][otio
     REQUIRE(video.clips().size() == 1);
     CHECK(video.clips()[0].start().frames() == 12);
     CHECK(video.clips()[0].name == "after");
+}
+
+TEST_CASE("A transition round trips through OTIO", "[io][otio][transition]") {
+    // The gap this closes: transitions were written nowhere and read as
+    // nothing, so a cut built here and handed to another tool arrived as a
+    // hard cut. That is the silent-partial failure this format's reader
+    // already refuses to make elsewhere -- it skips a Stack rather than
+    // guessing at one -- and a dropped dissolve is the same thing on the way
+    // out.
+    Fixture f;
+    REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.v1), f.clip(0, 50, 500))));
+    REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.v1), f.clip(50, 50, 500))));
+    REQUIRE(f.run(edit::makeAddCrossDissolve(f.project, f.on(f.v1), f.at(50), f.at(20))));
+
+    const model::TransitionId id = f.track(f.v1).transitions().front().id;
+    edit::TransitionSettings settings;
+    settings.kind = model::TransitionKind::Wipe;
+    settings.direction = model::TransitionDirection::Up;
+    settings.softness = 0.4;
+    settings.easing = model::TransitionEasing::InOut;
+    REQUIRE(f.run(edit::makeSetTransitionSettings(f.project, f.on(f.v1), id, settings)));
+    const auto wanted = f.track(f.v1).transitions().front().range;
+
+    const auto text = io::writeOtio(f.project, f.sequenceId);
+    REQUIRE(text);
+    // OTIO's own vocabulary, so a reader that has never heard of this program
+    // still finds a transition where one belongs.
+    CHECK(text->find("Transition.1") != std::string::npos);
+    CHECK(text->find("in_offset") != std::string::npos);
+
+    const auto back = io::readOtio(*text);
+    REQUIRE(back);
+    const model::Track& video = back->sequences().front().videoTracks().front();
+    REQUIRE(video.transitions().size() == 1);
+    const model::Transition& span = video.transitions().front();
+
+    // Where it sits, and what it joins. The two clips are named rather than
+    // assumed: a span that came back pointing at the wrong pair would still
+    // have the right length.
+    CHECK(span.range.start().frames() == wanted.start().frames());
+    CHECK(span.range.duration().frames() == wanted.duration().frames());
+    REQUIRE(video.clips().size() == 2);
+    CHECK(span.from == video.clips()[0].id);
+    CHECK(span.to == video.clips()[1].id);
+    CHECK(span.isCrossFade());
+
+    // And everything OTIO has no word for, which rides in metadata.
+    CHECK(span.kind == model::TransitionKind::Wipe);
+    CHECK(span.direction == model::TransitionDirection::Up);
+    CHECK(span.softness == Approx(0.4));
+    CHECK(span.easing == model::TransitionEasing::InOut);
+}
+
+TEST_CASE("A dissolve is written in the type OTIO knows", "[io][otio][transition]") {
+    // A wipe is "Custom" because OTIO names only one blend; a dissolve is the
+    // one it does name, and writing it as Custom would hide the commonest
+    // transition there is from every tool that reads the file.
+    Fixture f;
+    REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.v1), f.clip(0, 50, 500))));
+    REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.v1), f.clip(50, 50, 500))));
+    REQUIRE(f.run(edit::makeAddCrossDissolve(f.project, f.on(f.v1), f.at(50), f.at(20))));
+
+    const auto text = io::writeOtio(f.project, f.sequenceId);
+    REQUIRE(text);
+    CHECK(text->find("SMPTE_Dissolve") != std::string::npos);
+}
+
+TEST_CASE("A transition from a tool that knows none of our kinds is a dissolve",
+          "[io][otio][transition]") {
+    // No metadata of ours, so nothing to read but the offsets and the type.
+    // A file from anywhere else lands as a dissolve of the right length rather
+    // than being dropped -- the same forgiving rule an unknown kind gets when
+    // a project is loaded.
+    const std::string text = R"({
+      "OTIO_SCHEMA": "Timeline.1",
+      "name": "from elsewhere",
+      "global_start_time": {"OTIO_SCHEMA": "RationalTime.1", "rate": 25.0, "value": 0.0},
+      "tracks": {"OTIO_SCHEMA": "Stack.1", "name": "tracks", "children": [
+        {"OTIO_SCHEMA": "Track.1", "name": "V1", "kind": "Video", "children": [
+          {"OTIO_SCHEMA": "Clip.1", "name": "a", "source_range":
+            {"OTIO_SCHEMA": "TimeRange.1",
+             "start_time": {"OTIO_SCHEMA": "RationalTime.1", "rate": 25.0, "value": 0.0},
+             "duration": {"OTIO_SCHEMA": "RationalTime.1", "rate": 25.0, "value": 50.0}}},
+          {"OTIO_SCHEMA": "Transition.1", "name": "x", "transition_type": "SMPTE_Dissolve",
+           "in_offset": {"OTIO_SCHEMA": "RationalTime.1", "rate": 25.0, "value": 6.0},
+           "out_offset": {"OTIO_SCHEMA": "RationalTime.1", "rate": 25.0, "value": 4.0}},
+          {"OTIO_SCHEMA": "Clip.1", "name": "b", "source_range":
+            {"OTIO_SCHEMA": "TimeRange.1",
+             "start_time": {"OTIO_SCHEMA": "RationalTime.1", "rate": 25.0, "value": 0.0},
+             "duration": {"OTIO_SCHEMA": "RationalTime.1", "rate": 25.0, "value": 50.0}}}
+        ]}
+      ]}
+    })";
+
+    const auto back = io::readOtio(text);
+    REQUIRE(back);
+    const model::Track& video = back->sequences().front().videoTracks().front();
+    // The transition consumed no timeline time: the second clip still starts
+    // at 50, not at 60. An item that advanced the cursor would shift
+    // everything after it, which is the bug this shape of reader invites.
+    REQUIRE(video.clips().size() == 2);
+    CHECK(video.clips()[1].start().frames() == 50);
+
+    REQUIRE(video.transitions().size() == 1);
+    const model::Transition& span = video.transitions().front();
+    CHECK(span.kind == model::TransitionKind::CrossDissolve);
+    // Asymmetric on purpose: the two offsets are not the same, and a reader
+    // that used one for both would pass a symmetric test and lose this.
+    CHECK(span.range.start().frames() == 44);
+    CHECK(span.range.endExclusive().frames() == 54);
+}
+
+TEST_CASE("A fade is left out rather than written as a join", "[io][otio][transition]") {
+    // A fade lies inside its clip and joins it to nothing, while an OTIO
+    // transition is a join between two items -- so writing one would be
+    // inventing the item on the far side. Left out, and said so here, because
+    // the alternative is a file that claims a join nobody made.
+    Fixture f;
+    REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.v1), f.clip(0, 50, 500))));
+    REQUIRE(f.run(edit::makeAddCrossDissolve(f.project, f.on(f.v1), f.at(50), f.at(10))));
+    REQUIRE(f.track(f.v1).transitions().front().isFadeOut());
+
+    const auto text = io::writeOtio(f.project, f.sequenceId);
+    REQUIRE(text);
+    CHECK(text->find("Transition.1") == std::string::npos);
+
+    const auto back = io::readOtio(*text);
+    REQUIRE(back);
+    CHECK(back->sequences().front().videoTracks().front().transitions().empty());
 }
