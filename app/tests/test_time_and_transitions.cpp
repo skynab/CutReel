@@ -345,6 +345,27 @@ TEST_CASE("Wipes and slides, through the real compositor", "[gui]") {
     const auto middle =
         span.start() + zaro::time::RationalTime{span.duration().frames() / 2, span.start().rate()};
 
+    // What this test is about is the picture, not the route to it. The kind is
+    // set through the operation, which is what every core test does and what
+    // the panel does one layer up -- the timeline used to carry a method for
+    // this that nothing but these two lines ever called.
+    const auto transitionId = window.project()
+                                  .findSequence(wipeSequenceId)
+                                  ->findTrack(wipeTrackId)
+                                  ->transitions()
+                                  .front()
+                                  .id;
+    const auto beKind = [&](zaro::model::TransitionKind kind) {
+        auto built = zaro::edit::makeSetTransitionKind(
+            window.project(), {wipeSequenceId, wipeTrackId}, transitionId, kind,
+            zaro::model::TransitionDirection::Right);
+        if (!built) {
+            zaro::app::testing::failf("%s\n", built.error().toString().c_str());
+        }
+        window.commands().execute(window.project(), std::move(*built));
+        window.commands().breakMerge();
+    };
+
     timeline->selectOnly(
         wipeTrackId,
         window.project().findSequence(wipeSequenceId)->findTrack(wipeTrackId)->clips().front().id);
@@ -355,10 +376,7 @@ TEST_CASE("Wipes and slides, through the real compositor", "[gui]") {
     const double dissolveRight =
         meanGray(blended.copy(blended.width() / 2, 0, blended.width() / 2, blended.height()));
 
-    if (!timeline->setTransitionKindAtPlayhead(zaro::model::TransitionKind::Wipe,
-                                               zaro::model::TransitionDirection::Right)) {
-        zaro::app::testing::failf("the transition kind could not be changed\n");
-    }
+    beKind(zaro::model::TransitionKind::Wipe);
     window.renderCache().clear();
     const QImage wiped = settledGrab(window.monitor());
     const double wipeLeft = meanGray(wiped.copy(0, 0, wiped.width() / 2, wiped.height()));
@@ -376,10 +394,7 @@ TEST_CASE("Wipes and slides, through the real compositor", "[gui]") {
         zaro::app::testing::failf("the wipe did not put the two shots either side\n");
     }
 
-    if (!timeline->setTransitionKindAtPlayhead(zaro::model::TransitionKind::Slide,
-                                               zaro::model::TransitionDirection::Right)) {
-        zaro::app::testing::failf("the transition could not be made a slide\n");
-    }
+    beKind(zaro::model::TransitionKind::Slide);
     window.renderCache().clear();
     static_cast<void>(settledGrab(window.monitor()));
     if (!window.monitor()->lastError().isEmpty()) {
@@ -1256,9 +1271,23 @@ TEST_CASE("The Transition tab chooses what a cut does", "[gui]") {
                     << " wide");
         CHECK(right <= effects->width());
     }
-    // A dissolve has nowhere to travel, so the direction row is not drawn.
+    auto* softness = effects->findChild<QDoubleSpinBox*>("transition-softness");
+    auto* pacing = effects->findChild<QComboBox*>("transition-easing");
+    if (softness == nullptr || pacing == nullptr) {
+        zaro::app::testing::failf("the softness and pacing controls are not in the panel\n");
+    }
+    // A dissolve has nowhere to travel, so the direction row is not drawn --
+    // and no edge to soften either.
     if (direction->isVisible()) {
         zaro::app::testing::failf("a dissolve is offering a direction to travel in\n");
+    }
+    if (softness->isVisible()) {
+        zaro::app::testing::failf("a dissolve is offering an edge to soften\n");
+    }
+    // Pacing is not like those two: it belongs to every kind, because it is a
+    // property of the blend rather than of the shape it makes.
+    if (!pacing->isVisible()) {
+        zaro::app::testing::failf("a dissolve is not offering a pacing\n");
     }
     if (std::abs(duration->value() - spanOf().range.duration().toSecondsDouble()) > 0.005) {
         zaro::app::testing::failf("the duration field says %.3f, the span is %.3f\n",
@@ -1271,16 +1300,75 @@ TEST_CASE("The Transition tab chooses what a cut does", "[gui]") {
     window.setPosition(middle);
     const QImage dissolved = settledGrab(window.monitor());
 
+    // Pacing reaches the picture, measured at the midpoint against the two
+    // curves that differ there. "Slow at both ends" is the one that cannot be
+    // measured here: it is symmetric, so it passes through the middle at
+    // exactly the place a constant rate does. A quarter of the way in would
+    // separate it, but this fixture is black except on its flash frames and a
+    // blend between two black shots measures nothing -- the same trap the
+    // wipes were caught by, and the reason that test settled on the midpoint.
+    {
+        pacing->setCurrentIndex(
+            pacing->findData(static_cast<int>(zaro::model::TransitionEasing::In)));
+        QApplication::processEvents();
+        if (spanOf().easing != zaro::model::TransitionEasing::In) {
+            zaro::app::testing::failf("choosing a pacing did not reach the model\n");
+        }
+        const double slowStart = meanGray(settledGrab(window.monitor()));
+        pacing->setCurrentIndex(
+            pacing->findData(static_cast<int>(zaro::model::TransitionEasing::Out)));
+        QApplication::processEvents();
+        const double slowFinish = meanGray(settledGrab(window.monitor()));
+        std::printf("  at the midpoint: %.1f slow to start, %.1f slow to finish\n", slowStart,
+                    slowFinish);
+        // The incoming shot is the graded-down one. Slow to start holds it
+        // back and leaves the frame bright; slow to finish is already most of
+        // the way into it and leaves the frame dark.
+        if (!(slowStart > slowFinish + 5.0)) {
+            zaro::app::testing::failf(
+                "the two curves put the same picture on screen: %.1f against %.1f\n", slowStart,
+                slowFinish);
+        }
+        pacing->setCurrentIndex(
+            pacing->findData(static_cast<int>(zaro::model::TransitionEasing::Linear)));
+        QApplication::processEvents();
+    }
+
     // Now ask for a wipe, through the control somebody would use.
     kind->setCurrentIndex(kind->findData(static_cast<int>(zaro::model::TransitionKind::Wipe)));
     QApplication::processEvents();
     if (spanOf().kind != zaro::model::TransitionKind::Wipe) {
         zaro::app::testing::failf("choosing a wipe did not reach the model\n");
     }
-    // And the direction row arrives with it, because a wipe has one.
+    // And the direction row arrives with it, because a wipe has one -- and so
+    // does softness, which is narrower still: a slide travels but has no edge.
     if (!direction->isVisible()) {
         zaro::app::testing::failf("a wipe is not offering a direction to travel in\n");
     }
+    if (!softness->isVisible()) {
+        zaro::app::testing::failf("a wipe is not offering an edge to soften\n");
+    }
+    softness->setValue(0.5);
+    QApplication::processEvents();
+    if (std::abs(spanOf().softness - 0.5) > 0.001) {
+        zaro::app::testing::failf("softening the edge did not reach the model: %.3f\n",
+                                  spanOf().softness);
+    }
+    // Choosing a direction after a softness keeps it: the four are one write,
+    // so a page that read only the field that moved would clear the other
+    // three every time any of them changed.
+    direction->setCurrentIndex(
+        direction->findData(static_cast<int>(zaro::model::TransitionDirection::Down)));
+    QApplication::processEvents();
+    if (std::abs(spanOf().softness - 0.5) > 0.001) {
+        zaro::app::testing::failf("choosing a direction threw the softness away\n");
+    }
+    // Back to a hard edge travelling right, so the halves measured below are
+    // the wipe's own split rather than its ramp.
+    softness->setValue(0.0);
+    direction->setCurrentIndex(
+        direction->findData(static_cast<int>(zaro::model::TransitionDirection::Right)));
+    QApplication::processEvents();
     // The header names the kind, and it is the panel's own job to re-read it:
     // `edited` goes to the monitor and the timeline, and only an edit made
     // somewhere else comes back round as a refresh. It sat over a wipe saying
@@ -1320,6 +1408,97 @@ TEST_CASE("The Transition tab chooses what a cut does", "[gui]") {
             "the wipe did not split the frame: %.1f between its halves against %.1f for the "
             "dissolve\n",
             wipeGap, dissolveGap);
+    }
+
+    // The two kinds that open from the centre. What each offers is asked of
+    // the model, so this is also the check that the panel and the shape agree:
+    // an iris has an edge and no direction, a zoom has neither.
+    {
+        kind->setCurrentIndex(kind->findData(static_cast<int>(zaro::model::TransitionKind::Iris)));
+        QApplication::processEvents();
+        if (spanOf().kind != zaro::model::TransitionKind::Iris) {
+            zaro::app::testing::failf("choosing an iris did not reach the model\n");
+        }
+        if (direction->isVisible()) {
+            zaro::app::testing::failf("an iris is offering a direction to travel in\n");
+        }
+        if (!softness->isVisible()) {
+            zaro::app::testing::failf("an iris is not offering an edge to soften\n");
+        }
+
+        kind->setCurrentIndex(kind->findData(static_cast<int>(zaro::model::TransitionKind::Zoom)));
+        QApplication::processEvents();
+        if (direction->isVisible() || softness->isVisible()) {
+            zaro::app::testing::failf("a zoom is offering a direction or an edge\n");
+        }
+
+        // And a zoom reaches the picture through the GPU compositor, which is
+        // the half the headless tests cannot see: the scale it asks for is two
+        // lines in each render path, and a shape field nothing reads renders
+        // as a cut.
+        //
+        // Measured as the same small box under two kinds rather than as the
+        // centre against a corner of one. The monitor letterboxes -- its
+        // corners are the bars either side of the picture, not the picture --
+        // so a corner sample reads black whatever the transition is doing.
+        const auto centreMean = [&] {
+            const QImage shot = settledGrab(window.monitor());
+            return meanGray(shot.copy((shot.width() * 7) / 16, (shot.height() * 7) / 16,
+                                      shot.width() / 8, shot.height() / 8));
+        };
+        const double zoomCentre = centreMean();
+        kind->setCurrentIndex(
+            kind->findData(static_cast<int>(zaro::model::TransitionKind::CrossDissolve)));
+        QApplication::processEvents();
+        const double dissolveCentre = centreMean();
+        std::printf("  in the middle of the frame: %.1f zooming, %.1f dissolving\n", zoomCentre,
+                    dissolveCentre);
+        // Half way through, a zoom shows the incoming shot alone in the middle
+        // of the frame; a dissolve shows it half mixed with the brighter
+        // outgoing one. The incoming shot is the graded-down one, so the zoom
+        // reads darker there. A zoom that reached nothing would read the same
+        // as the dissolve.
+        if (!(dissolveCentre > zoomCentre + 5.0)) {
+            zaro::app::testing::failf(
+                "the zoom did not grow the incoming shot in the centre: %.1f against %.1f "
+                "dissolving\n",
+                zoomCentre, dissolveCentre);
+        }
+
+        // The two that act on the outgoing clip as well. A push travels and
+        // has no edge; a dip has neither.
+        kind->setCurrentIndex(kind->findData(static_cast<int>(zaro::model::TransitionKind::Push)));
+        QApplication::processEvents();
+        if (!direction->isVisible()) {
+            zaro::app::testing::failf("a push is not offering a direction to travel in\n");
+        }
+        if (softness->isVisible()) {
+            zaro::app::testing::failf("a push is offering an edge to soften\n");
+        }
+
+        kind->setCurrentIndex(
+            kind->findData(static_cast<int>(zaro::model::TransitionKind::DipToBlack)));
+        QApplication::processEvents();
+        if (spanOf().kind != zaro::model::TransitionKind::DipToBlack) {
+            zaro::app::testing::failf("choosing a dip did not reach the model\n");
+        }
+        if (direction->isVisible() || softness->isVisible()) {
+            zaro::app::testing::failf("a dip is offering a direction or an edge\n");
+        }
+
+        // And the dip reaches the picture. At the midpoint the outgoing shot
+        // has gone and the incoming one has not arrived, so the frame is
+        // black -- which is the half no one-sided shape could produce, because
+        // it had no way to turn the outgoing clip off at all.
+        const double dipped = meanGray(settledGrab(window.monitor()));
+        std::printf("  dip at the midpoint: %.1f\n", dipped);
+        if (!(dipped < 2.0)) {
+            zaro::app::testing::failf("the dip left %.1f on screen at its midpoint\n", dipped);
+        }
+
+        // Back to a wipe, which is what the rows below were measured against.
+        kind->setCurrentIndex(kind->findData(static_cast<int>(zaro::model::TransitionKind::Wipe)));
+        QApplication::processEvents();
     }
 
     // The duration field writes back, and the span keeps straddling its cut.
@@ -1374,5 +1553,150 @@ TEST_CASE("The Transition tab chooses what a cut does", "[gui]") {
         window.commands().undo(window.project());
     }
     window.monitor()->update();
+    QApplication::processEvents();
+}
+
+// The right-click route to a transition, and the selection a new one gets.
+//
+// Two gestures that used to disagree with each other. Left-clicking a span
+// picked the transition; right-clicking the same pixel opened the menu for the
+// clip underneath, because the context handler tested clips first. And adding a
+// dissolve left the clip selected, so the panel that exists to change its kind
+// was one hunt-for-a-two-pixel-span away.
+//
+// The menu is modal -- `exec` does not return until it closes -- so the
+// inspection is queued before the event is sent and runs from inside the menu's
+// own event loop. Without that this test would hang rather than fail.
+TEST_CASE("Right-clicking a transition offers its own menu", "[gui]") {
+    auto& window = zaro::app::testing::gui();
+    const zaro::app::testing::Rewind rewind;
+    auto* timeline = window.timeline();
+    const auto& sequence = *window.sequence();
+    const auto sequenceId = sequence.id();
+    const auto& videoTrack = sequence.videoTracks().front();
+    const auto trackId = videoTrack.id();
+    const auto rate = sequence.frameRate();
+    const auto row = timeline->rowFor(trackId);
+    REQUIRE(row.has_value());
+    const int y = row->top + row->height / 2;
+
+    const auto first = videoTrack.clips().front();
+    const auto cutAt = first.start() + zaro::time::RationalTime{
+                                           first.duration().rescaledTo(rate).frames() / 2, rate};
+    auto razored = zaro::edit::makeRazor(window.project(), {sequenceId, trackId}, cutAt);
+    if (!razored) {
+        zaro::app::testing::failf("%s\n", razored.error().toString().c_str());
+    }
+    window.commands().execute(window.project(), std::move(*razored));
+    window.commands().breakMerge();
+
+    // Added the way the menu item does it, so this also covers the selection
+    // that adding one now leaves behind.
+    timeline->selectOnly(trackId, first.id);
+    window.setPosition(cutAt);
+    QApplication::processEvents();
+    timeline->addDissolveAtPlayhead();
+    QApplication::processEvents();
+
+    const auto& spans =
+        window.project().findSequence(sequenceId)->findTrack(trackId)->transitions();
+    REQUIRE(!spans.empty());
+    const auto transitionId = spans.front().id;
+    const auto span = spans.front().range;
+
+    // Adding one selects it. Until the panel existed there was nothing to
+    // select it into; now the very next thing somebody does is change its kind.
+    if (timeline->selectedTransition() != transitionId) {
+        zaro::app::testing::failf("adding a dissolve did not select what it added\n");
+    }
+    if (!timeline->selection().empty()) {
+        zaro::app::testing::failf("adding a dissolve left the clip selected as well\n");
+    }
+
+    const int startX = static_cast<int>(timeline->layout().xForTime(span.start()));
+    const int endX = static_cast<int>(timeline->layout().xForTime(span.endExclusive()));
+    const int middleX = (startX + endX) / 2;
+    REQUIRE(endX - startX >= 12);
+
+    // Open the menu over the span, look at it, and optionally pick a kind.
+    struct Seen {
+        bool opened{false};
+        bool offeredType{false};
+        bool offeredRemove{false};
+        bool tickedCurrent{false};
+        int kindCount{0};
+    };
+    const auto rightClick = [&](const QPoint& at, const QString& choose) {
+        Seen seen;
+        QTimer::singleShot(0, [&] {
+            auto* menu = qobject_cast<QMenu*>(QApplication::activePopupWidget());
+            if (menu == nullptr) {
+                return;
+            }
+            seen.opened = true;
+            for (QAction* action : menu->actions()) {
+                if (action->text() == QStringLiteral("Remove Transition")) {
+                    seen.offeredRemove = true;
+                }
+                QMenu* sub = action->menu();
+                if (sub == nullptr || action->text() != QStringLiteral("Type")) {
+                    continue;
+                }
+                seen.offeredType = true;
+                for (QAction* kind : sub->actions()) {
+                    ++seen.kindCount;
+                    // The menu says which kind this already is, so a list of
+                    // seven does not send somebody to the panel to find out.
+                    if (kind->isChecked() && kind->text() == QStringLiteral("Cross Dissolve")) {
+                        seen.tickedCurrent = true;
+                    }
+                    if (!choose.isEmpty() && kind->text() == choose) {
+                        sub->setActiveAction(kind);
+                        QKeyEvent pick(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+                        QCoreApplication::sendEvent(sub, &pick);
+                    }
+                }
+            }
+            if (menu->isVisible()) {
+                menu->close();
+            }
+        });
+        QContextMenuEvent event(QContextMenuEvent::Mouse, at, timeline->mapToGlobal(at));
+        QCoreApplication::sendEvent(timeline, &event);
+        QApplication::processEvents();
+        return seen;
+    };
+
+    const Seen seen = rightClick(QPoint(middleX, y), {});
+    if (!seen.opened) {
+        zaro::app::testing::failf("right-clicking a transition opened no menu\n");
+    }
+    if (!seen.offeredType) {
+        zaro::app::testing::failf(
+            "the menu over a transition offered no Type: it is the clip's menu\n");
+    }
+    if (!seen.offeredRemove) {
+        zaro::app::testing::failf("the transition menu did not offer to remove it\n");
+    }
+    if (seen.kindCount != 7) {
+        zaro::app::testing::failf("the Type menu offered %d kinds, wanted 7\n", seen.kindCount);
+    }
+    if (!seen.tickedCurrent) {
+        zaro::app::testing::failf("the Type menu did not tick the kind it already is\n");
+    }
+    std::printf("  transition menu: %d kinds, remove offered, current ticked\n", seen.kindCount);
+
+    // And a clip's own menu still wins where a clip is what the pointer is on.
+    // The span is a fraction of the clip, so a point well clear of it is still
+    // over the same track.
+    const Seen onClip = rightClick(QPoint(startX - 40, y), {});
+    if (onClip.offeredType) {
+        zaro::app::testing::failf("right-clicking a clip opened the transition menu\n");
+    }
+
+    while (window.commands().canUndo()) {
+        window.commands().undo(window.project());
+    }
+    timeline->selectTransition({}, {});
     QApplication::processEvents();
 }

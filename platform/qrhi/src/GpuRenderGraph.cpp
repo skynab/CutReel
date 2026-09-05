@@ -208,26 +208,30 @@ Status GpuRenderGraph::drawClips(const model::Sequence& sequence, const time::Ra
 
             if (outgoing != nullptr && incoming != nullptr) {
                 const double progress = transition->progressAt(at);
+                // The same function the CPU path calls, so the two cannot come
+                // to different answers about where a wipe's edge is -- and the
+                // same composition helper, so they cannot differ about how a
+                // side lands on a clip's own transform either.
+                const render::TransitionShape shape = render::transitionShapeFor(
+                    *transition, progress, sequence.width(), sequence.height());
 
                 if (outgoing->enabled &&
-                    drawTransitionSide(*outgoing, sequence,
-                                       pinnedTransformAt(sequence, *outgoing, at), at, generated_,
-                                       nullptr)) {
+                    drawTransitionSide(
+                        *outgoing, sequence,
+                        render::shapedTransform(pinnedTransformAt(sequence, *outgoing, at),
+                                                shape.outgoing),
+                        at, generated_,
+                        shape.outgoing.mask.isSet() ? &shape.outgoing.mask : nullptr)) {
                     ++lastClipCount_;
                 }
-                if (incoming->enabled) {
-                    // The same function the CPU path calls, so the two cannot
-                    // come to different answers about where a wipe's edge is.
-                    const render::TransitionShape shape = render::transitionShapeFor(
-                        *transition, progress, sequence.width(), sequence.height());
-                    model::Transform moving = pinnedTransformAt(sequence, *incoming, at);
-                    moving.opacity *= shape.opacity;
-                    moving.positionX += shape.offsetX;
-                    moving.positionY += shape.offsetY;
-                    if (drawTransitionSide(*incoming, sequence, moving, at, generatedB_,
-                                           shape.wipe.isSet() ? &shape.wipe : nullptr)) {
-                        ++lastClipCount_;
-                    }
+                if (incoming->enabled &&
+                    drawTransitionSide(
+                        *incoming, sequence,
+                        render::shapedTransform(pinnedTransformAt(sequence, *incoming, at),
+                                                shape.incoming),
+                        at, generatedB_,
+                        shape.incoming.mask.isSet() ? &shape.incoming.mask : nullptr)) {
+                    ++lastClipCount_;
                 }
                 continue;
             }

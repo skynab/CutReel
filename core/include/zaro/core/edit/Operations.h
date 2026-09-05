@@ -648,11 +648,50 @@ struct PastedClip {
 
 // --- Transitions ------------------------------------------------------------
 
-/// Change an existing transition's kind and direction.
+/// Everything about a transition that is a choice rather than an identity or a
+/// time: what a panel of its properties can write.
+///
+/// A bundle rather than an operation per field, for the reason `TrackState` is
+/// one: these are the answers to a single question -- what does this cut do --
+/// and a page that wrote them one at a time would make choosing a wipe and
+/// then choosing its direction two things to undo.
+///
+/// Deliberately not the model's own `Transition`: that carries the id, the two
+/// clips and the range, and none of those are this page's to change. Handing
+/// the whole record to a setter is how a control that means to change a kind
+/// ends up able to move a span onto a different cut.
+struct TransitionSettings {
+    model::TransitionKind kind{model::TransitionKind::CrossDissolve};
+    model::TransitionDirection direction{model::TransitionDirection::Right};
+    double softness{0.0};
+    model::TransitionEasing easing{model::TransitionEasing::Linear};
+
+    friend bool operator==(const TransitionSettings&, const TransitionSettings&) = default;
+};
+
+/// Read what a transition is currently set to, so a caller can change one field
+/// and write the rest back unchanged.
+[[nodiscard]] TransitionSettings settingsOf(const model::Transition& transition);
+
+/// Change what an existing transition does.
 ///
 /// Separate from adding one, because that is how it is used: somebody drops a
 /// dissolve on a cut and then decides it wants to be a wipe. Making them
 /// re-add it would mean re-choosing the duration and re-finding the cut.
+///
+/// Merged under the transition's id, so dragging a softness slider is one undo
+/// step rather than one per pixel.
+[[nodiscard]] Result<CommandPtr> makeSetTransitionSettings(model::Project& project,
+                                                           const EditTarget& target,
+                                                           model::TransitionId transition,
+                                                           const TransitionSettings& settings);
+
+/// The kind and direction alone, leaving the rest as it is.
+///
+/// Kept because it is what the two render tests and the timeline already ask
+/// for, and because "make this a wipe" is a whole thought on its own. It is a
+/// call to the one above with the other fields read back off the transition,
+/// not a second way of writing it.
 [[nodiscard]] Result<CommandPtr> makeSetTransitionKind(model::Project& project,
                                                        const EditTarget& target,
                                                        model::TransitionId transition,

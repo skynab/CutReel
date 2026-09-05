@@ -1196,6 +1196,10 @@ void EffectControls::buildTransitionGroup() {
                              static_cast<int>(model::TransitionKind::CrossDissolve));
     transitionKind_->addItem("Wipe", static_cast<int>(model::TransitionKind::Wipe));
     transitionKind_->addItem("Slide", static_cast<int>(model::TransitionKind::Slide));
+    transitionKind_->addItem("Push", static_cast<int>(model::TransitionKind::Push));
+    transitionKind_->addItem("Iris", static_cast<int>(model::TransitionKind::Iris));
+    transitionKind_->addItem("Zoom", static_cast<int>(model::TransitionKind::Zoom));
+    transitionKind_->addItem("Dip to black", static_cast<int>(model::TransitionKind::DipToBlack));
     form->addRow("Type", transitionKind_);
 
     // One word for both kinds, as the model has it: a wipe to the right
@@ -1209,6 +1213,28 @@ void EffectControls::buildTransitionGroup() {
     transitionDirection_->addItem("Down", static_cast<int>(model::TransitionDirection::Down));
     transitionDirection_->addItem("Up", static_cast<int>(model::TransitionDirection::Up));
     form->addRow("Direction", transitionDirection_);
+
+    // A fraction of the distance the edge travels, so the same number reads
+    // the same on a wide frame and a tall one. At 1 the ramp is as wide as the
+    // frame, which is a wipe most of the way to a dissolve -- an odd thing to
+    // want, but the honest end of the range rather than a cap chosen by eye.
+    transitionSoftness_ = makeSpin(0.0, 1.0, 0.05, 2);
+    transitionSoftness_->setObjectName("transition-softness");
+    transitionSoftness_->setToolTip("How soft the travelling edge is. 0 is a hard line");
+    form->addRow("Softness", transitionSoftness_);
+
+    // Applies to every kind, unlike the two above: pacing is a property of the
+    // blend rather than of the shape it makes, which is also why it is applied
+    // where the sound can see it.
+    transitionEasing_ = new QComboBox(this);
+    transitionEasing_->setObjectName("transition-easing");
+    transitionEasing_->addItem("Constant", static_cast<int>(model::TransitionEasing::Linear));
+    transitionEasing_->addItem("Slow to start", static_cast<int>(model::TransitionEasing::In));
+    transitionEasing_->addItem("Slow to finish", static_cast<int>(model::TransitionEasing::Out));
+    transitionEasing_->addItem("Slow at both ends",
+                               static_cast<int>(model::TransitionEasing::InOut));
+    transitionEasing_->setToolTip("How the blend is paced. Eases the sound with the picture");
+    form->addRow("Pacing", transitionEasing_);
 
     // In seconds rather than frames, because it is a length of time somebody
     // has an opinion about -- "half a second" -- and the sequence's rate is
@@ -1236,9 +1262,11 @@ void EffectControls::buildTransitionGroup() {
     form->addRow(transitionRemove_);
     transitionGroup_ = box;
 
-    for (QComboBox* combo : {transitionKind_, transitionDirection_}) {
-        connect(combo, &QComboBox::currentIndexChanged, this, [this] { pushTransitionKind(); });
+    for (QComboBox* combo : {transitionKind_, transitionDirection_, transitionEasing_}) {
+        connect(combo, &QComboBox::currentIndexChanged, this, [this] { pushTransitionSettings(); });
     }
+    connect(transitionSoftness_, &QDoubleSpinBox::valueChanged, this,
+            [this] { pushTransitionSettings(); });
     connect(transitionDuration_, &QDoubleSpinBox::valueChanged, this,
             [this] { pushTransitionRange(); });
     connect(transitionAlignment_, &QComboBox::currentIndexChanged, this,
@@ -1290,16 +1318,19 @@ void EffectControls::setTransitionSelection(model::TrackId track, model::Transit
     refresh();
 }
 
-void EffectControls::pushTransitionKind() {
+void EffectControls::pushTransitionSettings() {
     if (updating_ || commands_ == nullptr || project_ == nullptr ||
         !transitionSelection_.isValid()) {
         return;
     }
-    const auto kind = static_cast<model::TransitionKind>(transitionKind_->currentData().toInt());
-    const auto direction =
+    edit::TransitionSettings wanted;
+    wanted.kind = static_cast<model::TransitionKind>(transitionKind_->currentData().toInt());
+    wanted.direction =
         static_cast<model::TransitionDirection>(transitionDirection_->currentData().toInt());
-    auto built = edit::makeSetTransitionKind(*project_, {sequenceId_, transitionTrack_},
-                                             transitionSelection_, kind, direction);
+    wanted.softness = transitionSoftness_->value();
+    wanted.easing = static_cast<model::TransitionEasing>(transitionEasing_->currentData().toInt());
+    auto built = edit::makeSetTransitionSettings(*project_, {sequenceId_, transitionTrack_},
+                                                 transitionSelection_, wanted);
     if (!built) {
         return;
     }
@@ -1388,7 +1419,7 @@ void EffectControls::pushTransitionRange() {
     commands_->execute(*project_, std::move(*built));
     commands_->breakMerge();
     // The header carries the length, so it goes stale otherwise -- the same
-    // reason `pushTransitionKind` re-reads it.
+    // reason `pushTransitionSettings` re-reads it.
     applyIdentity();
     emit edited();
 }
@@ -2299,6 +2330,9 @@ void EffectControls::applyTransition() {
     transitionKind_->setCurrentIndex(transitionKind_->findData(static_cast<int>(transition->kind)));
     transitionDirection_->setCurrentIndex(
         transitionDirection_->findData(static_cast<int>(transition->direction)));
+    transitionSoftness_->setValue(transition->softness);
+    transitionEasing_->setCurrentIndex(
+        transitionEasing_->findData(static_cast<int>(transition->easing)));
     transitionDuration_->setValue(transition->range.duration().toSecondsDouble());
 
     // Which of the three the span already is. Worked out rather than
@@ -2728,11 +2762,17 @@ void EffectControls::applyPaneVisibility() {
         if (transitionForm_ != nullptr) {
             // A dissolve has nowhere to travel, so it has no direction to
             // choose. A fade lies inside its clip and straddles no cut, so it
-            // has no alignment to choose either -- both rows go rather than
-            // grey out, because a control for a question this kind does not
-            // ask says less than no control at all.
-            transitionForm_->setRowVisible(
-                transitionDirection_, transition->kind != model::TransitionKind::CrossDissolve);
+            // has no alignment to choose either -- rows go rather than grey
+            // out, because a control for a question this kind does not ask
+            // says less than no control at all.
+            //
+            // Which kinds those are is the model's answer, not a second list
+            // kept here: a kind that travels in the shape but not in this
+            // panel is a transition nobody can aim.
+            transitionForm_->setRowVisible(transitionDirection_,
+                                           model::transitionTravels(transition->kind));
+            transitionForm_->setRowVisible(transitionSoftness_,
+                                           model::transitionHasEdge(transition->kind));
             transitionForm_->setRowVisible(transitionAlignment_, transition->isCrossFade());
         }
         // The other three describe a clip, and there is not one. Disabled
@@ -2740,12 +2780,17 @@ void EffectControls::applyPaneVisibility() {
         inspectorTab_->setEnabled(false);
         audioTab_->setEnabled(false);
         infoTab_->setEnabled(false);
-        // The reset arrow puts the kind back and leaves the length alone. It
-        // is narrower than the tab it sits over on every other page too: the
-        // length is what somebody dragged, and an arrow that threw that away
-        // as well would be the most expensive click here.
-        resetButton_->setEnabled(transition->kind != model::TransitionKind::CrossDissolve);
-        resetButton_->setToolTip("Back to a cross dissolve");
+        // The reset arrow puts back what the cut does and leaves the length
+        // alone. It is narrower than the tab it sits over on every other page
+        // too: the length is what somebody dragged, and an arrow that threw
+        // that away as well would be the most expensive click here.
+        //
+        // Enabled against the whole default rather than against the kind
+        // alone. An eased dissolve is not a plain one, and an arrow greyed out
+        // over a page with something to undo reads as a page with nothing on
+        // it.
+        resetButton_->setEnabled(edit::settingsOf(*transition) != edit::TransitionSettings{});
+        resetButton_->setToolTip("Back to a plain cross dissolve");
         return;
     }
 
@@ -3178,21 +3223,26 @@ void EffectControls::resetPane() {
     // and one arrow that threw all of them away would be the most expensive
     // click in the panel. The tooltip says which it is, and the command stack
     // takes it back either way.
-    // A transition's reset is its kind, and deliberately not its length. The
-    // length is what somebody dragged an edge to get, and it is the one thing
-    // on this page that is a piece of work rather than a choice from a list.
+    // A transition's reset is what it does, and deliberately not how long it
+    // lasts. The length is what somebody dragged an edge to get, and it is the
+    // one thing on this page that is a piece of work rather than a choice from
+    // a list -- so back to a plain cross dissolve, straddling the same cut for
+    // exactly as long as it did.
     if (pane_ == Pane::Transition) {
         if (commands_ == nullptr || project_ == nullptr || selectedTransition() == nullptr) {
             return;
         }
         commands_->breakMerge();
         updating_ = true;
-        transitionKind_->setCurrentIndex(
-            transitionKind_->findData(static_cast<int>(model::TransitionKind::CrossDissolve)));
+        const edit::TransitionSettings plain;
+        transitionKind_->setCurrentIndex(transitionKind_->findData(static_cast<int>(plain.kind)));
         transitionDirection_->setCurrentIndex(
-            transitionDirection_->findData(static_cast<int>(model::TransitionDirection::Right)));
+            transitionDirection_->findData(static_cast<int>(plain.direction)));
+        transitionSoftness_->setValue(plain.softness);
+        transitionEasing_->setCurrentIndex(
+            transitionEasing_->findData(static_cast<int>(plain.easing)));
         updating_ = false;
-        pushTransitionKind();
+        pushTransitionSettings();
         commands_->breakMerge();
         refresh();
         emit edited();

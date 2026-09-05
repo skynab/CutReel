@@ -302,6 +302,10 @@ Status RenderGraph::compositeInto(const model::Sequence& sequence, const time::R
 
             if (outgoing != nullptr && incoming != nullptr) {
                 const auto progress = transition->progressAt(at);
+                // One function decides what a transition looks like part way
+                // through, and both render paths call it -- for both clips.
+                const TransitionShape shape =
+                    transitionShapeFor(*transition, progress, out.width(), out.height());
 
                 // The outgoing clip is read past its out point and the incoming
                 // one before its in point, both reaching into the handles
@@ -310,8 +314,10 @@ Status RenderGraph::compositeInto(const model::Sequence& sequence, const time::R
                 if (outgoing->enabled) {
                     if (const RgbaImage* image =
                             clipImage(*outgoing, at, generated_, out.width(), out.height())) {
-                        drawClip(*outgoing, *image, out, pinnedTransformAt(sequence, *outgoing, at),
-                                 at);
+                        drawClip(*outgoing, *image, out,
+                                 shapedTransform(pinnedTransformAt(sequence, *outgoing, at),
+                                                 shape.outgoing),
+                                 at, shape.outgoing.mask.isSet() ? &shape.outgoing.mask : nullptr);
                         ++lastClipCount_;
                     }
                 }
@@ -321,16 +327,10 @@ Status RenderGraph::compositeInto(const model::Sequence& sequence, const time::R
                         // Drawn over the outgoing clip at the dissolve's
                         // progress: with premultiplied `over` and an opaque
                         // source that gives out*(1-p) + in*p.
-                        // One function decides what a transition looks like
-                        // part way through, and both render paths call it.
-                        const TransitionShape shape =
-                            transitionShapeFor(*transition, progress, out.width(), out.height());
-                        model::Transform moving = pinnedTransformAt(sequence, *incoming, at);
-                        moving.opacity *= shape.opacity;
-                        moving.positionX += shape.offsetX;
-                        moving.positionY += shape.offsetY;
-                        drawClip(*incoming, *image, out, moving, at,
-                                 shape.wipe.isSet() ? &shape.wipe : nullptr);
+                        drawClip(*incoming, *image, out,
+                                 shapedTransform(pinnedTransformAt(sequence, *incoming, at),
+                                                 shape.incoming),
+                                 at, shape.incoming.mask.isSet() ? &shape.incoming.mask : nullptr);
                         ++lastClipCount_;
                     }
                 }

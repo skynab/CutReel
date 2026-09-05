@@ -471,6 +471,48 @@ TEST_CASE("A fade out on a sound clip goes to silence", "[render][audio][mixer][
     }
 }
 
+TEST_CASE("Easing a transition eases the sound with it", "[render][audio][mixer][transition]") {
+    // The whole argument for putting easing in `progressAt` rather than in the
+    // shape: this mixer never learned about curves, and it is eased anyway,
+    // because it asks the same question of the same function the picture does.
+    // Easing in `transitionShapeFor` instead would have given an eased
+    // dissolve sitting over a crossfade that still ran at a constant rate --
+    // two answers to one question, which is what that file exists to avoid.
+    Fixture f;
+    ConstantAudioSource source;
+    source.define(f.longMedia, 1.0F, 2);
+    render::AudioGraph graph{source};
+    REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.a1), f.clip(0, 50, 500))));
+    REQUIRE(f.run(edit::makeAddCrossDissolve(f.project, f.on(f.a1), f.at(50), f.at(10))));
+    const model::TransitionId id = f.track(f.a1).transitions().front().id;
+    REQUIRE(f.track(f.a1).transitions().front().isFadeOut());
+
+    // A fifth of the way down the fade, where the asymmetric curves are far
+    // apart. The span runs frames 40 to 50.
+    const auto levelAt = [&](std::int64_t frame) {
+        auto block = graph.mix(f.sequence(), samples(frame * kSamplesPerFrame), 1);
+        REQUIRE(block);
+        return block->channel(0)[0];
+    };
+    const float constant = levelAt(42);
+
+    edit::TransitionSettings settings;
+    settings.easing = model::TransitionEasing::In;
+    REQUIRE(f.run(edit::makeSetTransitionSettings(f.project, f.on(f.a1), id, settings)));
+    const float slowStart = levelAt(42);
+
+    settings.easing = model::TransitionEasing::Out;
+    REQUIRE(f.run(edit::makeSetTransitionSettings(f.project, f.on(f.a1), id, settings)));
+    const float slowFinish = levelAt(42);
+
+    INFO("a fifth down: " << constant << " constant, " << slowStart << " slow to start, "
+                          << slowFinish << " slow to finish");
+    // Slow to start holds the level up; slow to finish has already taken it
+    // down. The constant rate sits between the two.
+    CHECK(slowStart > constant);
+    CHECK(slowFinish < constant);
+}
+
 TEST_CASE("A fade in on a sound clip comes up from silence", "[render][audio][mixer][transition]") {
     Fixture f;
     ConstantAudioSource source;

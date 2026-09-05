@@ -632,14 +632,17 @@ private:
     QFormLayout* transitionForm_{nullptr};
     QComboBox* transitionKind_{nullptr};
     QComboBox* transitionDirection_{nullptr};
+    QDoubleSpinBox* transitionSoftness_{nullptr};
+    QComboBox* transitionEasing_{nullptr};
     QDoubleSpinBox* transitionDuration_{nullptr};
     QComboBox* transitionAlignment_{nullptr};
     QPushButton* transitionRemove_{nullptr};
     void buildTransitionGroup();
-    /// Kind and direction are one write: they are one question -- what does
-    /// this cut do -- and `makeSetTransitionKind` takes both, so changing a
-    /// wipe's direction should not be a second undo step from choosing a wipe.
-    void pushTransitionKind();
+    /// Kind, direction, softness and easing are one write: they are one
+    /// question -- what does this cut do -- and `edit::TransitionSettings`
+    /// carries all four, so choosing a wipe and then softening its edge is one
+    /// thing to undo rather than two.
+    void pushTransitionSettings();
     /// Duration and alignment are the other. Both are the span's range, and
     /// which one moved decides which end stays put -- see `transitionRange`.
     void pushTransitionRange();

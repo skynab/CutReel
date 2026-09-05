@@ -503,13 +503,6 @@ public:
     /// does not reorder, and the primary is what the panel's header names.
     void selectAlso(model::TrackId track, model::ClipId clip);
 
-    /// Change the transition under the playhead to another kind.
-    ///
-    /// Separate from adding one, because that is how it is used: somebody drops
-    /// a dissolve on a cut and then decides it wants to be a wipe.
-    bool setTransitionKindAtPlayhead(model::TransitionKind kind,
-                                     model::TransitionDirection direction);
-
     /// Pick a transition, without a mouse.
     ///
     /// The mouse-free twin of pressing the span, wanted for the reason
@@ -608,6 +601,13 @@ private:
     [[nodiscard]] std::optional<TransitionRef> transitionBodyAt(int x, int y) const;
     /// Take the picked transition off its track. Nothing when none is picked.
     void removeSelectedTransition();
+    /// What a transition can do, on its own right-click.
+    ///
+    /// Tested before the clips, exactly as the left button's hit tests are.
+    /// Left-clicking a span picked the transition while right-clicking it
+    /// opened the menu for the clip underneath -- two buttons disagreeing
+    /// about what the pointer was on.
+    void transitionMenu(const TransitionRef& ref, const QPoint& at);
     void updateTransitionDrag(int x);
 
     /// The keyframe being dragged, or an invalid clip id when none is.

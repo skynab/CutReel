@@ -2356,6 +2356,83 @@ void TimelineWidget::clipMenu(const ui::TimelineLayout::Hit& hit, const QPoint& 
     }
 }
 
+void TimelineWidget::transitionMenu(const TransitionRef& ref, const QPoint& at) {
+    const model::Sequence* seq = sequence();
+    const model::Track* track = seq != nullptr ? seq->findTrack(ref.track) : nullptr;
+    const model::Transition* transition =
+        track != nullptr ? track->findTransition(ref.transition) : nullptr;
+    if (transition == nullptr) {
+        return;
+    }
+    // What is pointed at becomes what is selected, the way the clip menu does
+    // it -- and here it matters more, because the panel this opens beside is
+    // the only other place these choices live.
+    selectTransition(ref.track, ref.transition);
+
+    QMenu menu;
+    // The same names and the same order the panel offers, read from one table
+    // so the two cannot drift into calling a kind different things.
+    struct Choice {
+        const char* label;
+        model::TransitionKind kind;
+    };
+    static constexpr Choice kChoices[] = {
+        {"Cross Dissolve", model::TransitionKind::CrossDissolve},
+        {"Wipe", model::TransitionKind::Wipe},
+        {"Slide", model::TransitionKind::Slide},
+        {"Push", model::TransitionKind::Push},
+        {"Iris", model::TransitionKind::Iris},
+        {"Zoom", model::TransitionKind::Zoom},
+        {"Dip to Black", model::TransitionKind::DipToBlack},
+    };
+    QMenu* kinds = menu.addMenu(QStringLiteral("Type"));
+    std::vector<QAction*> kindActions;
+    kindActions.reserve(std::size(kChoices));
+    for (const Choice& choice : kChoices) {
+        QAction* action = kinds->addAction(QString::fromUtf8(choice.label));
+        // Ticked rather than merely listed: a menu of seven that does not say
+        // which one this already is makes somebody open the panel to find out.
+        action->setCheckable(true);
+        action->setChecked(transition->kind == choice.kind);
+        kindActions.push_back(action);
+    }
+    // A locked track refuses the edit, so the choices are offered greyed
+    // rather than silently doing nothing when picked.
+    kinds->setEnabled(!track->isLocked());
+
+    menu.addSeparator();
+    QAction* remove = menu.addAction(QStringLiteral("Remove Transition"));
+    remove->setEnabled(!track->isLocked());
+
+    const QAction* picked = menu.exec(at);
+    if (picked == nullptr) {
+        return;
+    }
+    if (picked == remove) {
+        removeSelectedTransition();
+        return;
+    }
+    for (std::size_t i = 0; i < kindActions.size(); ++i) {
+        if (picked != kindActions[i]) {
+            continue;
+        }
+        if (project_ == nullptr || commands_ == nullptr) {
+            return;
+        }
+        auto built =
+            edit::makeSetTransitionKind(*project_, {sequenceId_, ref.track}, ref.transition,
+                                        kChoices[i].kind, transition->direction);
+        if (!built) {
+            return;
+        }
+        commands_->execute(*project_, std::move(*built));
+        commands_->breakMerge();
+        emit edited();
+        update();
+        return;
+    }
+}
+
 void TimelineWidget::contextMenuEvent(QContextMenuEvent* event) {
     const HeaderHit hit = headerHitTest(event->pos().x(), event->pos().y());
     if (hit.track.isValid()) {
@@ -2369,6 +2446,14 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* event) {
     const model::Sequence* seq = sequence();
     if (seq == nullptr) {
         QWidget::contextMenuEvent(event);
+        return;
+    }
+    // Transitions before clips, for the reason the left button tests them
+    // first: a span is drawn over the cut it straddles, so a clip-first test
+    // would open the wrong menu every time.
+    if (const auto span = transitionBodyAt(event->pos().x(), event->pos().y())) {
+        event->accept();
+        transitionMenu(*span, event->globalPos());
         return;
     }
     const auto clip = layout_.hitTest(*seq, event->pos().x(), event->pos().y());
@@ -2958,41 +3043,41 @@ void TimelineWidget::addDissolveAtPlayhead() {
     // A second, which is what most editors default to and what a dissolve
     // usually wants to be before anyone adjusts it.
     const auto duration = time::RationalTime::fromSeconds(time::Rational{1, 1}, seq->frameRate());
-    auto built =
-        edit::makeAddCrossDissolve(*project_, {sequenceId_, selectedTrack_}, playhead_, duration);
+    const model::TrackId onTrack = selectedTrack_;
+    auto built = edit::makeAddCrossDissolve(*project_, {sequenceId_, onTrack}, playhead_, duration);
     if (!built) {
         return;
     }
-    commands_->execute(*project_, std::move(*built));
-    commands_->breakMerge();
-    emit edited();
-    update();
-}
+    // Which spans were already there, so the new one can be told from them.
+    // By id rather than by count: the add replaces an existing fade at the
+    // same end rather than stacking one, so a count can stay where it was.
+    std::vector<model::TransitionId> before;
+    if (const model::Track* track = seq->findTrack(onTrack); track != nullptr) {
+        for (const model::Transition& existing : track->transitions()) {
+            before.push_back(existing.id);
+        }
+    }
 
-bool TimelineWidget::setTransitionKindAtPlayhead(model::TransitionKind kind,
-                                                 model::TransitionDirection direction) {
-    if (project_ == nullptr || commands_ == nullptr || !selectedTrack_.isValid()) {
-        return false;
-    }
-    const model::Sequence* seq = sequence();
-    const model::Track* track = seq != nullptr ? seq->findTrack(selectedTrack_) : nullptr;
-    if (track == nullptr) {
-        return false;
-    }
-    const model::Transition* under = track->transitionAt(playhead_);
-    if (under == nullptr) {
-        return false;
-    }
-    auto built = edit::makeSetTransitionKind(*project_, {sequenceId_, selectedTrack_}, under->id,
-                                             kind, direction);
-    if (!built) {
-        return false;
-    }
     commands_->execute(*project_, std::move(*built));
     commands_->breakMerge();
+
+    // And it is what is selected afterwards. "Somebody drops a dissolve on a
+    // cut and then decides it wants to be a wipe" is what the operation's own
+    // comment says this is for, and until the panel existed there was nothing
+    // to select it *into*. Leaving the clip selected meant hunting for a span
+    // that can be two pixels wide before any of that could be reached.
+    const model::Sequence* after = sequence();
+    const model::Track* track = after != nullptr ? after->findTrack(onTrack) : nullptr;
+    if (track != nullptr) {
+        for (const model::Transition& candidate : track->transitions()) {
+            if (std::find(before.begin(), before.end(), candidate.id) == before.end()) {
+                selectTransition(onTrack, candidate.id);
+                break;
+            }
+        }
+    }
     emit edited();
     update();
-    return true;
 }
 
 void TimelineWidget::selectOnly(model::TrackId track, model::ClipId clip) {
