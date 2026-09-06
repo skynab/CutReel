@@ -36,6 +36,9 @@ add_library(zaro_app_ui STATIC
     GradeNodes.cpp
     GradeNodes.h
     Hotkeys.cpp
+    Hotkeys.h
+    KeyboardMap.cpp
+    KeyboardMap.h
     HueBand.cpp
     HueBand.h
     Icons.cpp

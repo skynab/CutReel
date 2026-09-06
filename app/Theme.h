@@ -45,6 +45,15 @@ namespace zaro::app::theme {
 /// against a darker one does not.
 [[nodiscard]] QColor audio(int step);
 
+/// A hue per group of commands, for anything that has to tell a dozen groups
+/// apart at a glance -- which is the keyboard map, and so far only that.
+///
+/// Indexed rather than named, and wrapping, so the caller decides what a group
+/// is and a thirteenth one gets a colour rather than a crash. `tintCount()` is
+/// how many there are before they repeat.
+[[nodiscard]] QColor tint(int index);
+[[nodiscard]] int tintCount();
+
 /// Mix `over` into `under` by `amount` (0..1). The stylesheet needs literal
 /// colours, so every blend the design expresses as `color-mix` is resolved
 /// once, here, at the point the sheet is built.

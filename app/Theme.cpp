@@ -36,6 +36,35 @@ constexpr std::array<QRgb, 9> kAccentRamp{0xfff5f4ff, 0xffe7e5fe, 0xffd2cefd,
 constexpr std::array<QRgb, 9> kAudioRamp{0xffeaf9fb, 0xffcbf0f5, 0xff90e4ee, 0xff57cbd7, 0xff40a9b4,
                                          0xff238995, 0xff0e6a74, 0xff064c54, 0xff003238};
 
+/// One hue per group of commands, for the keyboard map.
+///
+/// **A ramp, not a free choice per caller.** Everything else in this palette
+/// says what a thing *is* -- ground, surface, accent -- and two families were
+/// enough while the only distinction to draw was picture against sound. The
+/// hotkey map has to say which of a dozen groups a key belongs to at a glance,
+/// across sixty keys too small for a word, and no amount of one accent does
+/// that.
+///
+/// Generated the way the other ramps were: one lightness band, one chroma
+/// band, hues spread around it -- so no tint reads as brighter or more
+/// important than another, and the whole row sits at the same value as the
+/// text it labels. Ordered so that neighbours in the catalogue are not
+/// neighbours on the wheel.
+constexpr std::array<QRgb, 12> kTints{
+    0xffe97871,  // red
+    0xffec9c63,  // amber
+    0xff89d298,  // green
+    0xffa2ca6c,  // lime
+    0xffaa9df1,  // blurple, the accent's own hue
+    0xff78d5e0,  // sky
+    0xffe4b750,  // yellow
+    0xffe492c9,  // pink
+    0xffc3a5f9,  // violet
+    0xff50bfbe,  // teal, the audio family's hue
+    0xff76b3f1,  // blue
+    0xff9fa4b2,  // grey, for the group that is not about the picture at all
+};
+
 /// Step 100..900 to an index into a ramp, clamped.
 int rampIndex(int step) {
     const int index = (std::clamp(step, 100, 900) / 100) - 1;
@@ -72,6 +101,15 @@ QColor neutral(int step) {
 }
 QColor audio(int step) {
     return QColor::fromRgba(kAudioRamp[static_cast<std::size_t>(rampIndex(step))]);
+}
+
+QColor tint(int index) {
+    const int wrapped = ((index % tintCount()) + tintCount()) % tintCount();
+    return QColor::fromRgba(kTints[static_cast<std::size_t>(wrapped)]);
+}
+
+int tintCount() {
+    return static_cast<int>(kTints.size());
 }
 
 QColor mix(const QColor& under, const QColor& over, double amount) {
@@ -511,6 +549,50 @@ QPushButton[class="inspector-tab"]:disabled { color: %FAINT%; background: transp
 /* The console sits in a well, like the viewer: it is a row of instruments. */
 #mixer-console { background: %WELL%; }
 #loudness-measure { font-size: 10px; padding: 2px 8px; border-radius: 6px; }
+
+/* --- the keyboard manager ------------------------------------------------
+
+   Four bands: a filter bar, the map in a well, the three panes, a status line.
+   The well is the same well the viewer and the mixer console sit in -- the
+   keyboard is a picture of a thing, and pictures go in wells. */
+
+#hotkey-bar { background: %SURFACE%; border-bottom: 1px solid %DIVIDER%; }
+#hotkey-well { background: %WELL%; border-bottom: 1px solid %DIVIDER%; }
+#hotkey-side { background: %SURFACE%; border-right: 1px solid %DIVIDER%; }
+#hotkey-detail { background: %SURFACE%; border-left: 1px solid %DIVIDER%; }
+#hotkey-status { background: %BG%; border-top: 1px solid %DIVIDER%; }
+#hotkey-status QLabel { color: %FAINT%; font-size: 10px; }
+#hotkey-caption {
+    font-size: 10px; letter-spacing: 0.07em; text-transform: uppercase; color: %FAINT%;
+}
+#hotkey-name { font-size: 15px; }
+#hotkey-legend { font-size: 10px; color: %MUTED%; }
+#hotkey-bar QLabel[muted="true"], #hotkey-detail QLabel[muted="true"] {
+    color: %MUTED%; font-size: 11px;
+}
+/* A modifier, drawn as the key it stands for rather than as a checkbox: the
+   gesture is "hold this", and a held key is lit. */
+#hotkey-mod {
+    min-width: 30px; padding: 3px 7px; border-radius: 6px; border: 1px solid transparent;
+    background: %HOVER%; color: %MUTED%; font-family: Menlo, monospace;
+}
+#hotkey-mod:hover { color: %TEXT%; }
+#hotkey-mod:checked { background: %ACCENTWASH%; color: %ACCENT100%; border-color: %ACCENT600%; }
+/* What the selected command is bound to, big enough to read from where the
+   hands are. Checked is recording: dashed, because nothing is decided yet. */
+#hotkey-binding {
+    min-height: 44px; border: 1px solid %DIVIDER%; border-radius: 8px; background: %BG%;
+    font-family: Menlo, monospace; font-size: 17px; color: %TEXT%;
+}
+#hotkey-binding:hover { border-color: %NEUTRAL600%; }
+#hotkey-binding:checked {
+    background: %ACCENTWASH%; border: 1px dashed %ACCENT300%; color: %ACCENT100%;
+}
+#hotkey-table { background: %BG%; border: none; border-radius: 0; }
+#hotkey-tree { background: transparent; border: none; font-size: 11px; }
+#hotkey-tree::item { padding: 4px 6px; border-radius: 5px; }
+#hotkey-tree::item:hover { background: %BINHOVER%; }
+#hotkey-tree::item:selected { background: %ACCENTWASH%; color: %ACCENT100%; }
 )";
     // -1 for the terminator: the cap is on the literal's own bytes.
     static_assert(sizeof(kSheetTop) - 1 < 16380, "the first half of the sheet is over MSVC's cap");
