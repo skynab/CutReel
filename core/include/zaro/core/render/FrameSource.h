@@ -53,7 +53,12 @@ public:
     SourceFrameProvider& operator=(const SourceFrameProvider&) = delete;
 
     /// The decoded frame for `media` at `sourceTime`, in its native pixel
-    /// format. Valid until the next call on this provider.
+    /// format. Valid until the next call for the same media.
+    ///
+    /// Per media rather than one frame at a time, because a compositor reads
+    /// every track before it comes back to the first: an implementation that
+    /// kept one frame in total would answer nothing from memory the moment a
+    /// second video track existed.
     [[nodiscard]] virtual Result<const media::VideoFrame*> sourceFrameFor(
         model::MediaRefId media, const time::RationalTime& sourceTime) = 0;
 

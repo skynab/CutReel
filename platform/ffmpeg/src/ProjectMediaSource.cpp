@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cstdint>
+#include <list>
 #include <map>
 #include <memory>
 #include <set>
@@ -18,19 +19,71 @@ struct ProjectMediaSource::State {
         std::unique_ptr<media::VideoDecoder> decoder;
     };
 
-    /// The frame handed out by sourceFrameFor, kept alive until the next call.
+    /// The frames handed out by sourceFrameFor, kept alive until the next call
+    /// for the same media.
     ///
-    /// Also a one-frame memo. Asking the decoder for a time it has already
-    /// passed forces a seek and a decode forward from the keyframe before it,
-    /// so a second request for the frame already on screen is one of the most
-    /// expensive things that can be asked of it -- and the monitor asks
-    /// constantly: a resize, an overlay moving, any edit that repaints without
-    /// moving the playhead. Remembering which frame this is turns all of those
-    /// back into nothing.
-    media::VideoFrame lastSourceFrame;
-    std::uint64_t lastSourceMedia{0};
-    time::RationalTime lastSourceTime{};
-    bool haveLastSourceFrame{false};
+    /// Also a memo. Asking the decoder for a time it has already passed forces
+    /// a seek and a decode forward from the keyframe before it, so a second
+    /// request for the frame already on screen is one of the most expensive
+    /// things that can be asked of it -- and the monitor asks constantly: a
+    /// resize, an overlay moving, any edit that repaints without moving the
+    /// playhead. Remembering which frame this is turns all of those back into
+    /// nothing.
+    ///
+    /// One slot per media rather than one slot in total, because the
+    /// compositor visits every track before it comes back to the first. A
+    /// single slot remembers whichever track drew last, so with two tracks on
+    /// screen every request missed and every repaint of a stationary playhead
+    /// cost two seeks -- measured at 1080p, a repeated composite went from
+    /// 2.8ms to 19ms the moment a second video track existed. The memo has to
+    /// span a whole composite to be a memo at all.
+    ///
+    /// Bounded, because each slot holds a decoded frame -- 33 MB of one at 4K
+    /// -- and a long edit touches far more media than it ever shows at once.
+    /// Least recently used goes first, and the capacity is well past the
+    /// number of video tracks anybody stacks at one instant.
+    struct SourceMemo {
+        std::uint64_t media{0};
+        time::RationalTime at{};
+        media::VideoFrame frame;
+    };
+    /// Most recently used at the front. A list rather than a vector: the
+    /// pointer handed back has to survive the next lookup reordering these.
+    std::list<SourceMemo> sourceMemos;
+    static constexpr std::size_t kMaxSourceMemos = 8;
+
+    /// The memo for `media` at `at`, moved to the front, or null.
+    [[nodiscard]] media::VideoFrame* findSourceMemo(std::uint64_t media,
+                                                    const time::RationalTime& at) {
+        for (auto it = sourceMemos.begin(); it != sourceMemos.end(); ++it) {
+            if (it->media == media) {
+                sourceMemos.splice(sourceMemos.begin(), sourceMemos, it);
+                // Kept even when the time is wrong: the slot belongs to this
+                // media either way, and the next store overwrites it in place.
+                return it->at == at ? &it->frame : nullptr;
+            }
+        }
+        return nullptr;
+    }
+
+    /// Take ownership of a frame and hand back where it now lives.
+    media::VideoFrame* storeSourceMemo(std::uint64_t media, const time::RationalTime& at,
+                                       media::VideoFrame frame) {
+        for (auto it = sourceMemos.begin(); it != sourceMemos.end(); ++it) {
+            if (it->media == media) {
+                it->at = at;
+                it->frame = std::move(frame);
+                sourceMemos.splice(sourceMemos.begin(), sourceMemos, it);
+                return &sourceMemos.front().frame;
+            }
+        }
+        sourceMemos.push_front(SourceMemo{media, at, std::move(frame)});
+        if (sourceMemos.size() > kMaxSourceMemos) {
+            sourceMemos.pop_back();
+        }
+        return &sourceMemos.front().frame;
+    }
+
     struct AudioEntry {
         std::unique_ptr<media::AudioDecoder> decoder;
         media::AudioBuffer pending;     ///< Decoded but not yet handed out.
@@ -156,9 +209,8 @@ Result<const media::VideoFrame*> ProjectMediaSource::sourceFrameFor(
     const time::RationalTime sourceAt = state_->stills.count(media.value()) != 0
                                             ? time::RationalTime{0, sourceTime.rate()}
                                             : sourceTime;
-    if (state_->haveLastSourceFrame && state_->lastSourceMedia == media.value() &&
-        state_->lastSourceTime == sourceAt) {
-        return &state_->lastSourceFrame;
+    if (media::VideoFrame* memo = state_->findSourceMemo(media.value(), sourceAt)) {
+        return memo;
     }
 
     const auto path = state_->paths.find(media.value());
@@ -182,11 +234,7 @@ Result<const media::VideoFrame*> ProjectMediaSource::sourceFrameFor(
     applyOverride(media, *decoded);
     // No working-space cache here: the GPU converts on upload, so the frame the
     // caller wants is the one the decoder just produced.
-    state_->lastSourceFrame = std::move(*decoded);
-    state_->lastSourceMedia = media.value();
-    state_->lastSourceTime = sourceAt;
-    state_->haveLastSourceFrame = true;
-    return &state_->lastSourceFrame;
+    return state_->storeSourceMemo(media.value(), sourceAt, std::move(*decoded));
 }
 
 Status ProjectMediaSource::read(model::MediaRefId media, const time::RationalTime& sourceStart,

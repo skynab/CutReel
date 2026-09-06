@@ -448,6 +448,21 @@ struct GpuCompositor::State {
         std::unique_ptr<QRhiTexture> texture;
         std::unique_ptr<QRhiTextureRenderTarget> target;
         QSize size;
+
+        /// The decoder's planes, uploaded into textures owned by this slot.
+        ///
+        /// Pooled for the reason the staging surface above is: a plane texture
+        /// is the frame itself -- 33 MB of one for 4K 10-bit -- and building
+        /// three of them per clip per frame costs more than the pass they feed.
+        /// Per slot rather than per compositor because two clips are on screen
+        /// at once and neither may overwrite what the other's queued draw still
+        /// reads.
+        struct Plane {
+            std::unique_ptr<QRhiTexture> texture;
+            QSize size;
+            QRhiTexture::Format format{QRhiTexture::UnknownFormat};
+        };
+        std::array<Plane, 3> planes;
     };
     std::vector<Intermediate> intermediates;
     std::size_t intermediateIndex{0};
@@ -1185,20 +1200,24 @@ Status GpuCompositor::drawSource(const media::VideoFrame& source, const model::T
             media::rowBytes(source.format(), source.width(), index) / bytesPerTexel;
         const std::int32_t rows = media::planeHeight(source.format(), source.height(), index);
 
-        auto texture = std::unique_ptr<QRhiTexture>(state.rhi->newTexture(
-            textureFormat, QSize(planeWidth, rows), 1, QRhiTexture::UsedAsTransferSource));
-        if (!texture->create()) {
-            return nullptr;
+        const QSize wanted(planeWidth, rows);
+        State::Intermediate::Plane& slot = staging.planes[plane];
+        if (!slot.texture || slot.size != wanted || slot.format != textureFormat) {
+            slot.texture.reset(
+                state.rhi->newTexture(textureFormat, wanted, 1, QRhiTexture::UsedAsTransferSource));
+            if (!slot.texture->create()) {
+                slot.texture.reset();
+                return nullptr;
+            }
+            slot.size = wanted;
+            slot.format = textureFormat;
         }
         QRhiTextureSubresourceUploadDescription upload;
         upload.setData(QByteArray(reinterpret_cast<const char*>(source.plane(plane)),
                                   static_cast<qsizetype>(rows) * source.stride(plane)));
         upload.setDataStride(static_cast<quint32>(source.stride(plane)));
-        batch->uploadTexture(texture.get(), QRhiTextureUploadDescription({0, 0, upload}));
-
-        QRhiTexture* raw = texture.get();
-        state.sourceTextures.push_back(std::move(texture));
-        return raw;
+        batch->uploadTexture(slot.texture.get(), QRhiTextureUploadDescription({0, 0, upload}));
+        return slot.texture.get();
     };
 
     const QRhiTexture::Format lumaFormat = deep ? QRhiTexture::R16 : QRhiTexture::R8;
