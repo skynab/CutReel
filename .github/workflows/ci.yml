@@ -361,12 +361,30 @@ jobs:
           # Resolved through PATH, the way a user's shell resolves it.
           command -v cutreel
           test -x /usr/bin/cutreel
-          # The launcher entry and the icon it names.
-          test -f /usr/share/applications/cutreel.desktop
-          test -f /usr/share/icons/hicolor/256x256/apps/cutreel.png
-          if command -v desktop-file-validate >/dev/null; then
-            desktop-file-validate /usr/share/applications/cutreel.desktop
+          # The launcher entry -- and not just that the file landed. A file in
+          # the right place is not the same as an entry the menu shows, and
+          # these are the ways it can install perfectly and still be invisible:
+          # marked hidden, malformed enough that the desktop skips it, or
+          # pointing Exec at something that is not on the machine. Each one
+          # looks exactly like "the package installed and nothing happened".
+          entry=/usr/share/applications/cutreel.desktop
+          test -f "$entry"
+          if grep -qE '^(NoDisplay|Hidden)=true' "$entry"; then
+            echo "$entry is installed but marked hidden; it will never appear"
+            exit 1
           fi
+          # Installed rather than used if present: a check that silently skips
+          # itself is a check that was never run.
+          sudo apt-get install -y desktop-file-utils
+          desktop-file-validate "$entry"
+          # Exec's first word, resolved the way a launcher resolves it.
+          command -v "$(grep -m1 '^Exec=' "$entry" | cut -d= -f2 | cut -d' ' -f1)"
+          # And the icon, read out of the entry rather than assumed, in the
+          # theme it is named from. index.theme belongs to hicolor-icon-theme,
+          # which the package depends on precisely so that these directories
+          # are a theme a desktop searches and not three loose folders.
+          test -f /usr/share/icons/hicolor/index.theme
+          test -f "/usr/share/icons/hicolor/256x256/apps/$(sed -n 's/^Icon=//p' "$entry").png"
           # Started the way a user starts it, with no display, far enough to
           # prove the installed binary loads its Qt and its platform plugin.
           # --selftest needs a project of its own; --quiet with no arguments

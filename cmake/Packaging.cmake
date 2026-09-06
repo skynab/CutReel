@@ -176,17 +176,27 @@ else()
     set(CPACK_DEBIAN_PACKAGE_MAINTAINER "${CPACK_PACKAGE_VENDOR}")
     set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "https://github.com/skynab/Zaro-Video")
 
-    # Three, and only three. The package carries its own Qt, FFmpeg and SDL, so
+    # Four, and only four. The package carries its own Qt, FFmpeg and SDL, so
     # the only things it needs from the distribution are the ones no program can
     # bring with it. Naming more would be naming them wrongly: what the desktop
     # stack is called moves between releases -- libasound2 became libasound2t64
     # in 24.04 -- and a Depends line that names a package apt cannot find is an
     # install that fails on a machine that had everything it needed.
     #
+    # hicolor-icon-theme is the exception, and it earns it twice over. It owns
+    # /usr/share/icons/hicolor and the index.theme in it, which is what makes
+    # the directories this package drops cutreel.png into a theme a desktop
+    # will look in rather than three loose folders; without it the launcher
+    # entry installs correctly and shows a blank icon. And it is safe to name
+    # in a way the libraries above are not: an architecture-independent data
+    # package, not an ABI, so it has been spelled the same in every Debian and
+    # Ubuntu release rather than being renamed by a toolchain transition.
+    #
     # Deliberately not CPACK_DEBIAN_PACKAGE_SHLIBDEPS: dpkg-shlibdeps resolves
     # every library a binary links, ours included, and cannot name a package for
     # the copy of Qt in lib/cutreel because no package provides it.
-    set(CPACK_DEBIAN_PACKAGE_DEPENDS "libc6, libstdc++6, libgcc-s1")
+    set(CPACK_DEBIAN_PACKAGE_DEPENDS
+        "libc6, libstdc++6, libgcc-s1, hicolor-icon-theme")
 endif()
 
 # --- What the Linux packages carry ---------------------------------------------

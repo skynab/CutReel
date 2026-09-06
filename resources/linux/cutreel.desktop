@@ -19,6 +19,6 @@ Comment=A non-linear video editor
 Exec=cutreel %f
 Icon=cutreel
 Terminal=false
-Categories=AudioVideo;Video;AudioVideoEditing;
+Categories=AudioVideo;AudioVideoEditing;
 Keywords=video;editor;editing;cut;timeline;nle;
 StartupNotify=true
