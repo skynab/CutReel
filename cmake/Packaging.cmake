@@ -243,6 +243,26 @@ if(UNIX AND NOT APPLE)
         POST_EXCLUDE_REGEXES ${zaro_system_libraries}
         DESTINATION "${ZARO_PRIVATE_LIBDIR}"
         COMPONENT runtime)
+
+    # The same list, one regex per line, for the CI check that proves the
+    # package is self-contained: every library the loader resolves for an
+    # installed binary has to come from lib/cutreel or be on this list. Written
+    # from here rather than copied into the workflow so that there is one list,
+    # and adding a library to it above is adding it there as well.
+    list(JOIN zaro_system_libraries "\n" zaro_system_libraries_text)
+    file(WRITE "${CMAKE_BINARY_DIR}/system-libraries.txt"
+        "${zaro_system_libraries_text}\n")
+
+    # Copying the libraries into lib/cutreel is half of the job. The other half
+    # is making sure each of them can find the others from there, which the
+    # executables' RPATH does not do for them: a bundled libavcodec looking for
+    # its libvpx is not consulting cutreel's RPATH to do it. The script runs
+    # after the copy above, and gives every object in the directory an RPATH of
+    # $ORIGIN. See the script for the loader rule that makes this necessary,
+    # and for the release that shipped without it.
+    configure_file("${CMAKE_CURRENT_SOURCE_DIR}/cmake/InstallBundledRpath.cmake.in"
+                   "${CMAKE_BINARY_DIR}/InstallBundledRpath.cmake" @ONLY)
+    install(SCRIPT "${CMAKE_BINARY_DIR}/InstallBundledRpath.cmake" COMPONENT runtime)
 endif()
 
 # Nothing in the archive should be a test binary or a header.

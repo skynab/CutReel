@@ -76,7 +76,10 @@ jobs:
             libgl1-mesa-dev libglu1-mesa-dev libxkbcommon-x11-0 libxcb-cursor0 \
             libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
             libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 \
-            libvulkan-dev
+            libvulkan-dev \
+            patchelf
+          # patchelf is for packaging: it gives the bundled libraries an RPATH
+          # so they can find each other. See cmake/InstallBundledRpath.cmake.in.
 
       # What ilammy/msvc-dev-cmd@v1 was doing, done directly. That action is
       # the last node20 one in this workflow and has no newer major to move

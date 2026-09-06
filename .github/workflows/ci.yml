@@ -86,7 +86,11 @@ jobs:
             libgl1-mesa-dev libglu1-mesa-dev libxkbcommon-x11-0 libxcb-cursor0 \
             libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
             libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 \
-            libvulkan-dev mesa-vulkan-drivers
+            libvulkan-dev mesa-vulkan-drivers \
+            patchelf
+          # patchelf is for packaging, not building: it is what gives the
+          # bundled libraries an RPATH so they can find each other once they
+          # are in lib/cutreel. See cmake/InstallBundledRpath.cmake.in.
 
       # Windows has no system package manager for the libraries we link, so they
       # come from the vcpkg manifest instead.
@@ -319,30 +323,60 @@ jobs:
           test -n "$(ls -A dist)"
 
       # The claim the .deb makes is that it runs on a machine holding none of
-      # the build's dependencies, and the only way to know is to try. This is a
-      # fair test on the runner despite Qt and FFmpeg being installed on it:
-      # the Qt is at a path install-qt-action chose, which the loader does not
-      # search, and the build tree's RPATH is replaced by the relative one at
-      # install time -- so a package unpacked somewhere else and run with
-      # LD_LIBRARY_PATH cleared resolves through lib/cutreel or not at all.
+      # the build's dependencies. Grepping ldd for "not found" cannot test that
+      # claim on this runner, and it took a broken release to see why: the
+      # runner has every build dependency installed into the default loader
+      # path, so a library the package forgot -- or one it carries but the
+      # loader never looks for there, which is the shape the libvpx failure
+      # took -- resolves to the system's copy and "not found" is never
+      # printed. The check passed on the one machine it could not tell apart
+      # from a clean one. (The reasoning that made it look fair was true of
+      # Qt, which install-qt-action puts somewhere the loader does not search,
+      # and false of FFmpeg and every codec library apt put under /usr/lib.)
       #
-      # zaro-render as well as zaro-probe, because it is the tool that needs Qt
-      # and a platform plugin, which is the half no dependency walk can find.
+      # So the question is not "does everything resolve" but "does everything
+      # resolve to the right place": each library ldd reports must come from
+      # inside the unpacked package, or be one the package deliberately leaves
+      # to the machine. That list is read from the file configure wrote, so it
+      # is the very list Packaging.cmake excludes from bundling.
+      #
+      # cutreel itself is in the loop, not just the tools: it is the binary a
+      # user runs, and it was the one absent from here when the bug shipped.
+      # zaro-render as well as zaro-probe, because it is the tool that needs
+      # Qt and a platform plugin, which is the half no dependency walk sees.
       - name: Check the .deb is self-contained
         if: runner.os == 'Linux' && matrix.artifact != ''
         shell: bash
         run: |
           rm -rf /tmp/unpacked && mkdir -p /tmp/unpacked
           dpkg-deb -x dist/cutreel_*.deb /tmp/unpacked
+          # One anchored alternation of the regexes, one per line in the file.
+          allowed="^($(paste -sd'|' "build/${{ matrix.preset }}/system-libraries.txt"))$"
           status=0
-          for tool in zaro-probe zaro-render zaro-cut zaro-otio; do
-            missing=$(env -u LD_LIBRARY_PATH ldd "/tmp/unpacked/usr/bin/$tool" | grep 'not found' || true)
+          for bin in cutreel zaro-probe zaro-render zaro-cut zaro-otio; do
+            path="/tmp/unpacked/usr/bin/$bin"
+            test -x "$path"
+            # Every "soname => /resolved/path" line: the loader's own answer to
+            # where each library would come from, with LD_LIBRARY_PATH cleared
+            # so that only the RPATHs and the machine's defaults can speak.
+            while read -r soname _ resolved _; do
+              case "$resolved" in
+                /tmp/unpacked/*) continue ;;
+              esac
+              if ! printf '%s\n' "$soname" | grep -qE "$allowed"; then
+                echo "$bin: $soname resolves to $resolved -- outside the package, and not a library it leaves to the machine"
+                status=1
+              fi
+            done < <(env -u LD_LIBRARY_PATH ldd "$path" | grep ' => /')
+            missing=$(env -u LD_LIBRARY_PATH ldd "$path" | grep 'not found' || true)
             if [ -n "$missing" ]; then
-              echo "$tool is missing libraries:"
+              echo "$bin is missing libraries:"
               echo "$missing"
               status=1
-              continue
             fi
+          done
+          # And then actually run the tools, with the environment emptied.
+          for tool in zaro-probe zaro-render zaro-cut zaro-otio; do
             env -i "PATH=$PATH" "HOME=$HOME" "/tmp/unpacked/usr/bin/$tool" --version || status=1
           done
           exit $status
