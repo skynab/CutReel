@@ -179,14 +179,41 @@ jobs:
       # a run is superseded, and the next run starts from source again. Saving
       # in a step of its own, on failure as well as success, makes the
       # dependency build survive whatever our own build then does.
+      #
+      # The key carries the runner image's version as well as the manifest's
+      # hash, and it took a run of forty-minute Windows jobs -- each restoring
+      # a cache that reported a hit -- to learn why. A vcpkg tree is reusable
+      # only on the toolchain that built it: a new image, with its new MSVC and
+      # new vcpkg, changes the ABI hash of every port, and vcpkg rebuilds the
+      # lot from a restored tree exactly as it would from nothing. Keyed on the
+      # manifest alone, that rebuild was invisible and permanent: the restore
+      # was an exact hit, an exact hit is what skips the save below, so the
+      # fresh tree was never written back, and the stale one was restored,
+      # rejected and rebuilt on every push after the image moved. With the
+      # image in the key, a new image is a new key: the old tree still comes
+      # back through the prefix, vcpkg rebuilds only what actually changed, and
+      # the result is saved because there was no exact hit to skip it.
+      # (builtin-baseline in vcpkg.json removes the other thing that used to
+      # move the ABI between images: the ports themselves.)
+      - name: Read the runner image version
+        id: image
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "version=${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+
       - name: Restore vcpkg packages
         id: vcpkg-cache
         if: runner.os == 'Windows'
         uses: actions/cache/restore@v6
         with:
           path: vcpkg_installed
-          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
-          restore-keys: vcpkg-${{ runner.os }}-
+          key: vcpkg-${{ runner.os }}-${{ steps.image.outputs.version }}-${{ hashFiles('vcpkg.json') }}
+          # Same image first, so a manifest change reuses every port it did not
+          # touch; any image after that, which still beats starting from source
+          # when the toolchain moved but most ports did not.
+          restore-keys: |
+            vcpkg-${{ runner.os }}-${{ steps.image.outputs.version }}-
+            vcpkg-${{ runner.os }}-
 
       # Built as its own step rather than as a side effect of configuring, so
       # that the log says plainly how much of the job is other people's code.
@@ -201,7 +228,7 @@ jobs:
         uses: actions/cache/save@v6
         with:
           path: vcpkg_installed
-          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+          key: vcpkg-${{ runner.os }}-${{ steps.image.outputs.version }}-${{ hashFiles('vcpkg.json') }}
 
       - name: Install FFmpeg CLI (Windows)
         if: runner.os == 'Windows'

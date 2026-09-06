@@ -3,6 +3,7 @@
     "name": "zaro-video",
     "version": "0.1.0",
     "description": "A non-linear video editor",
+    "builtin-baseline": "3f7b5a12ef0a55e7b59339b2b69cac4b56d6dbf9",
     "dependencies": [
         "nlohmann-json",
         "sdl2",
@@ -62,6 +63,16 @@
         "to C++14 and will not link against our C++20 test sources.",
         "",
         "pkgconf is a host dependency because cmake/FindFFmpeg.cmake locates FFmpeg",
-        "through pkg-config, which Windows has no system copy of."
+        "through pkg-config, which Windows has no system copy of.",
+        "",
+        "builtin-baseline pins every port to the version one vcpkg commit records.",
+        "Without it the versions come from whatever vcpkg checkout the machine has,",
+        "and on a GitHub runner that is whatever the image shipped this week: each",
+        "image update changed the ABI hash of every port, so the Windows CI cache",
+        "restored a tree vcpkg then rejected and rebuilt from source -- 31 minutes",
+        "of FFmpeg, x264 and x265 on every push, with a cache reporting a hit on",
+        "every one. The commit is the one the Windows development machine's vcpkg",
+        "is on, so CI and a developer build the same versions. Move it on purpose,",
+        "with `vcpkg x-update-baseline`, and expect the next CI run to rebuild once."
     ]
 }

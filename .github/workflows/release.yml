@@ -147,15 +147,25 @@ jobs:
           modules: qtshadertools
           cache: true
 
-      # Same key the CI workflow writes, so a tag build reuses the dependency
-      # tree CI already paid for instead of rebuilding FFmpeg from source.
+      # The same key the CI workflow writes, spelled the same way, so a tag
+      # build reuses the dependency tree CI already paid for instead of
+      # rebuilding FFmpeg from source. The CI workflow explains why the runner
+      # image's version is part of it.
+      - name: Read the runner image version
+        id: image
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "version=${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+
       - name: Restore vcpkg packages
         if: runner.os == 'Windows'
         uses: actions/cache/restore@v6
         with:
           path: vcpkg_installed
-          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
-          restore-keys: vcpkg-${{ runner.os }}-
+          key: vcpkg-${{ runner.os }}-${{ steps.image.outputs.version }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-${{ steps.image.outputs.version }}-
+            vcpkg-${{ runner.os }}-
 
       # No tests in a release build: the tag being built has already been
       # through CI, and Catch2 is not something to ship or to wait for here.
