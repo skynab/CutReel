@@ -7,6 +7,7 @@
 
 #include <QApplication>
 #include <QDir>
+#include <QGuiApplication>
 #include <QIcon>
 #include <QMessageBox>
 #include <QPixmap>
@@ -81,6 +82,19 @@ int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IOLBF, 0);
 #endif
     QApplication application(argc, argv);
+
+    // Which launcher entry this process belongs to. On X11 Qt writes it into
+    // WM_CLASS and on Wayland it is reported as the app id, and both are how a
+    // desktop matches a window on screen to an installed .desktop file. Without
+    // it the answer comes from the executable's own name, zaro-preview, which
+    // no installed file is called -- so the taskbar showed a generic icon and a
+    // name nobody recognises beside a window titled CutReel.
+    //
+    // The name of resources/linux/cutreel.desktop, minus the extension, as the
+    // specification requires. Ignored on Windows and macOS, which identify an
+    // application by its executable and its bundle instead.
+    QGuiApplication::setDesktopFileName("cutreel");
+
     // Before any window exists: the palette and the sheet decide what every
     // widget looks like the moment it is constructed, and a window built first
     // flashes the platform's own colours on its way to these.

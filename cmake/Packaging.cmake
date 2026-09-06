@@ -8,8 +8,8 @@
 #   cmake --build   --preset release
 #   cpack           --preset release
 #
-# produces build/release/CutReel-<version>-<platform>.tar.gz on Unix, and on
-# Windows the installer described below.
+# produces build/release/cutreel_<version>_amd64.deb on Linux, a .tar.gz on
+# macOS, and on Windows the installer described below.
 
 # Windows ships one file: the bootstrapper .exe, which is an MSI inside a
 # wrapper that can carry an icon. The MSI is still built -- it is what the .exe
@@ -24,9 +24,11 @@
 # SDL from the vcpkg DLLs installed in cmake/WindowsRuntimeDeps.cmake, and the
 # MSVC runtime from InstallRequiredSystemLibraries below.
 #
-# Linux produces two as well: the tarball, self-contained, unpack it anywhere;
-# and a .deb that puts the same tree under /usr. Everything both carry is in
-# lib/cutreel, found through the relative RPATH set in tools/ and app/.
+# Linux ships one file too: a .deb that puts the tree under /usr, adds a
+# launcher entry and an icon, and answers to `cutreel` as well as to
+# zaro-preview. Everything it carries is in lib/cutreel, found through the
+# relative RPATH set in tools/ and app/. The tarball that used to sit beside it
+# is gone; see the generator below for why.
 #
 # Known limitation: macOS. Only zaro-preview.app is made self-contained there,
 # so the command-line tools in bin/ still expect a machine carrying the same
@@ -150,7 +152,20 @@ if(WIN32)
 elseif(APPLE)
     set(CPACK_GENERATOR TGZ)
 else()
-    set(CPACK_GENERATOR TGZ DEB)
+    # One file, and it is the .deb. There was a tarball beside it -- unpack it
+    # anywhere, run bin/zaro-preview -- and it was a second Linux package to
+    # build, upload, test and answer questions about, for the same tree the .deb
+    # already installs. The .deb is the one that puts CutReel in the
+    # applications menu, gives it a `cutreel` command, and can be removed again
+    # with `apt remove`; the tarball could do none of those, so shipping both
+    # meant offering a download that is worse in every way except that it needs
+    # no root, and then answering for it.
+    #
+    # Nothing about the tarball's contents is gone: the install rules are the
+    # same ones, and `cmake --install build/release --prefix somewhere` still
+    # produces exactly the tree it carried, for anybody who wants it without a
+    # package manager.
+    set(CPACK_GENERATOR DEB)
 
     # --- The .deb --------------------------------------------------------------
     # Lowercase, because a Debian package name has to be. The rest of CPack's

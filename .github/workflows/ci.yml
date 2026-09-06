@@ -262,13 +262,13 @@ jobs:
       # when somebody wants to look at a build by hand. cpack installs the
       # runtime component only, so no test binary reaches the archive.
       #
-      # The same archives the Release workflow attaches to a draft release,
-      # plus the Windows MSI; this makes them available from every run rather
-      # than only from a tag. Windows is self-contained -- Qt, FFmpeg, SDL and
-      # the MSVC runtime all travel with it. macOS and Linux are not, for the
-      # reason recorded in cmake/Packaging.cmake: only zaro-preview.app carries
-      # its Qt, and the command-line tools in bin/ expect the libraries they
-      # were built against to be on the machine.
+      # The same packages the Release workflow attaches to a draft release;
+      # this makes them available from every run rather than only from a tag.
+      # Windows and Linux are self-contained -- Qt, FFmpeg and SDL travel with
+      # both, plus the MSVC runtime on Windows. macOS is not, for the reason
+      # recorded in cmake/Packaging.cmake: only zaro-preview.app carries its
+      # Qt, and the command-line tools in bin/ expect the libraries they were
+      # built against to be on the machine.
       - name: Package
         if: matrix.artifact != ''
         run: cpack --preset ${{ matrix.preset }}
@@ -318,34 +318,68 @@ jobs:
           # than a red one.
           test -n "$(ls -A dist)"
 
-      # The claim the Linux packages make is that they run on a machine holding
-      # none of the build's dependencies, and the only way to know is to try.
-      # This is a fair test on the runner despite Qt and FFmpeg being installed
-      # on it: the Qt is at a path install-qt-action chose, which the loader
-      # does not search, and the build tree's RPATH is replaced by the relative
-      # one at install time -- so a tarball unpacked somewhere else and run with
+      # The claim the .deb makes is that it runs on a machine holding none of
+      # the build's dependencies, and the only way to know is to try. This is a
+      # fair test on the runner despite Qt and FFmpeg being installed on it:
+      # the Qt is at a path install-qt-action chose, which the loader does not
+      # search, and the build tree's RPATH is replaced by the relative one at
+      # install time -- so a package unpacked somewhere else and run with
       # LD_LIBRARY_PATH cleared resolves through lib/cutreel or not at all.
       #
       # zaro-render as well as zaro-probe, because it is the tool that needs Qt
       # and a platform plugin, which is the half no dependency walk can find.
-      - name: Check the Linux tarball is self-contained
+      - name: Check the .deb is self-contained
         if: runner.os == 'Linux' && matrix.artifact != ''
         shell: bash
         run: |
           rm -rf /tmp/unpacked && mkdir -p /tmp/unpacked
-          tar xzf dist/CutReel-*.tar.gz -C /tmp/unpacked --strip-components=1
+          dpkg-deb -x dist/cutreel_*.deb /tmp/unpacked
           status=0
           for tool in zaro-probe zaro-render zaro-cut zaro-otio; do
-            missing=$(env -u LD_LIBRARY_PATH ldd "/tmp/unpacked/bin/$tool" | grep 'not found' || true)
+            missing=$(env -u LD_LIBRARY_PATH ldd "/tmp/unpacked/usr/bin/$tool" | grep 'not found' || true)
             if [ -n "$missing" ]; then
               echo "$tool is missing libraries:"
               echo "$missing"
               status=1
               continue
             fi
-            env -i "PATH=$PATH" "HOME=$HOME" "/tmp/unpacked/bin/$tool" --version || status=1
+            env -i "PATH=$PATH" "HOME=$HOME" "/tmp/unpacked/usr/bin/$tool" --version || status=1
           done
           exit $status
+
+      # And the claim installing it makes is that `cutreel` is then a command
+      # and CutReel is then in the applications menu. Neither is something the
+      # build can check -- both are files whose absence is invisible until
+      # somebody has installed the package and typed the name -- which is how a
+      # release shipped with the executable installed under a name the package
+      # never mentions. So it is installed here, for real, and asked.
+      - name: Check the .deb installs and is launchable
+        if: runner.os == 'Linux' && matrix.artifact != ''
+        shell: bash
+        run: |
+          sudo apt-get install -y ./dist/cutreel_*.deb
+          # Resolved through PATH, the way a user's shell resolves it, and
+          # pointing at the executable rather than dangling.
+          command -v cutreel
+          test -x "$(command -v cutreel)"
+          test -x /usr/bin/zaro-preview
+          # The launcher entry and the icon it names.
+          test -f /usr/share/applications/cutreel.desktop
+          test -f /usr/share/icons/hicolor/256x256/apps/cutreel.png
+          if command -v desktop-file-validate >/dev/null; then
+            desktop-file-validate /usr/share/applications/cutreel.desktop
+          fi
+          # Started under the name the desktop entry uses, with no display, far
+          # enough to prove the symlink reaches a binary that loads its Qt and
+          # its platform plugin. --selftest needs a project; --quiet with no
+          # arguments exits 2 by design, after QApplication and the platform
+          # plugin -- the two things that fail on an incomplete package -- have
+          # both been through. `|| code=$?` rather than a bare call: this shell
+          # runs under -e, which would take the expected 2 for a failure.
+          code=0
+          QT_QPA_PLATFORM=offscreen cutreel --quiet || code=$?
+          test "$code" -eq 2
+          sudo apt-get remove -y cutreel
 
       - name: Upload the archive
         if: matrix.artifact != ''

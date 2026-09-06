@@ -265,4 +265,56 @@ if(UNIX AND NOT APPLE)
     install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/qt.conf"
         DESTINATION "${CMAKE_INSTALL_BINDIR}"
         COMPONENT runtime)
+
+    # --- Being installable ------------------------------------------------------
+    # Three things a .deb has to carry that a tarball does not, because a tarball
+    # is a directory somebody unpacks and looks inside, and an installed package
+    # is a name somebody types and an icon somebody clicks.
+    #
+    # The name first. The package is called cutreel, so `apt install ./cutreel...`
+    # is followed by somebody typing `cutreel`, and until this symlink existed the
+    # answer was "command not found": the executable is zaro-preview, which is not
+    # a name the package, the icon, the documentation or the website ever says.
+    # A symlink rather than a rename of the target -- the seven command-line tools
+    # are all zaro-*, the Windows shortcut and the macOS bundle point at
+    # zaro-preview, and the build tree is what every test and script here runs
+    # from. One extra name in bin/ is cheaper than that rename in all four places.
+    #
+    # Relative, and resolved at install time against the staging directory CPack
+    # packages from, so the link inside the .deb is `cutreel -> zaro-preview` and
+    # not a path pointing into a build machine's home directory. Nothing about it
+    # depends on which of the two files the loader starts from: /proc/self/exe
+    # resolves the symlink, so $ORIGIN and the qt.conf lookup both land in
+    # /usr/bin either way.
+    #
+    # Removed before it is made, because file(CREATE_LINK) fails on a path that
+    # already exists and a second `cmake --install` into the same tree -- which
+    # is every rebuild of the package -- would otherwise stop there.
+    install(CODE "
+        set(zaro_link \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/cutreel\")
+        file(REMOVE \"\${zaro_link}\")
+        file(CREATE_LINK \"zaro-preview\" \"\${zaro_link}\" SYMBOLIC)
+        message(STATUS \"Symlinking: \${zaro_link} -> zaro-preview\")
+    " COMPONENT runtime)
+
+    # Then the launcher entry, which is what puts CutReel in the applications
+    # menu and in a search for "video". Without it an installed package is
+    # reachable only from a terminal, which for a video editor is most of the way
+    # to not being installed at all.
+    install(FILES "${CMAKE_SOURCE_DIR}/resources/linux/cutreel.desktop"
+        DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/applications"
+        COMPONENT runtime)
+
+    # And the icon the entry names, in every size the branding directory has, in
+    # the hicolor theme -- the one fallback every desktop reads. Named cutreel.png
+    # rather than CutReel-48.png because an Icon= line names a theme entry, and a
+    # theme entry is the file's basename: the size comes from the directory it is
+    # in, not from the name.
+    foreach(zaro_icon_size 16 32 48 64 128 256 512)
+        install(FILES "${ZARO_BRANDING_DIR}/CutReel-${zaro_icon_size}.png"
+            DESTINATION
+                "${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/${zaro_icon_size}x${zaro_icon_size}/apps"
+            RENAME "cutreel.png"
+            COMPONENT runtime)
+    endforeach()
 endif()
