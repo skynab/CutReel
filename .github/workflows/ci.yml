@@ -361,47 +361,60 @@ jobs:
       # Qt, which install-qt-action puts somewhere the loader does not search,
       # and false of FFmpeg and every codec library apt put under /usr/lib.)
       #
-      # So the question is not "does everything resolve" but "does everything
-      # resolve to the right place": each library ldd reports must come from
-      # inside the unpacked package, or be one the package deliberately leaves
-      # to the machine. That list is read from the file configure wrote, so it
-      # is the very list Packaging.cmake excludes from bundling.
+      # So the question is where each library resolves *to*, and it is asked
+      # of every ELF the package ships -- the executables, the bundled
+      # libraries, and the Qt plugins, which nothing links and which ldd of
+      # the app therefore never sees. For each one, every library it directly
+      # asks for (its DT_NEEDED entries) that is not on the list of libraries
+      # the package leaves to the machine must be found by the loader inside
+      # the package. Not somewhere else, and not nowhere.
       #
-      # cutreel itself is in the loop, not just the tools: it is the binary a
-      # user runs, and it was the one absent from here when the bug shipped.
-      # zaro-render as well as zaro-probe, because it is the tool that needs
-      # Qt and a platform plugin, which is the half no dependency walk sees.
+      # Direct needs, and not the whole closure ldd prints, on purpose. A
+      # library left to the machine brings its own dependencies from the
+      # machine -- fontconfig its libexpat, glib its libpcre2 -- and that is
+      # correct: a bundled libexpat underneath the system's fontconfig is
+      # exactly the mismatch the exclusion list exists to prevent. Judging the
+      # closure flagged both of those and would have flagged the next one;
+      # judging what our own files ask for flags only what we were supposed to
+      # ship. It still catches the libvpx case, because libavcodec is ours and
+      # asks for it directly -- and running ldd on each bundled library means
+      # each one is resolved through its own RPATH, which is the very thing
+      # that was missing. The list is read from the file configure wrote, so it
+      # is the very list Packaging.cmake excludes from bundling.
       - name: Check the .deb is self-contained
         if: runner.os == 'Linux' && matrix.artifact != ''
         shell: bash
         run: |
           rm -rf /tmp/unpacked && mkdir -p /tmp/unpacked
           dpkg-deb -x dist/cutreel_*.deb /tmp/unpacked
+          test -x /tmp/unpacked/usr/bin/cutreel
           # One anchored alternation of the regexes, one per line in the file.
           allowed="^($(paste -sd'|' "build/${{ matrix.preset }}/system-libraries.txt"))$"
           status=0
-          for bin in cutreel zaro-probe zaro-render zaro-cut zaro-otio; do
-            path="/tmp/unpacked/usr/bin/$bin"
-            test -x "$path"
-            # Every "soname => /resolved/path" line: the loader's own answer to
-            # where each library would come from, with LD_LIBRARY_PATH cleared
-            # so that only the RPATHs and the machine's defaults can speak.
-            while read -r soname _ resolved _; do
-              case "$resolved" in
-                /tmp/unpacked/*) continue ;;
+          checked=0
+          while IFS= read -r elf; do
+            # Not every file under lib/cutreel is an ELF object; qt.conf is not.
+            needed=$(objdump -p "$elf" 2>/dev/null | awk '/NEEDED/ {print $2}') || continue
+            checked=$((checked + 1))
+            # The loader's own answer for this file, with LD_LIBRARY_PATH
+            # cleared so that only its RPATH and the machine's defaults speak.
+            resolved=$(env -u LD_LIBRARY_PATH ldd "$elf" 2>/dev/null || true)
+            for soname in $needed; do
+              if printf '%s\n' "$soname" | grep -qE "$allowed"; then continue; fi
+              where=$(printf '%s\n' "$resolved" | awk -v s="$soname" '$1 == s && $2 == "=>" { if ($3 == "not") print "not found"; else print $3 }')
+              case "$where" in
+                /tmp/unpacked/*) ;;
+                ""|"not found")
+                  echo "${elf#/tmp/unpacked}: asks for $soname, and the loader cannot find it"
+                  status=1 ;;
+                *)
+                  echo "${elf#/tmp/unpacked}: asks for $soname, which resolves to $where -- outside the package, and not a library it leaves to the machine"
+                  status=1 ;;
               esac
-              if ! printf '%s\n' "$soname" | grep -qE "$allowed"; then
-                echo "$bin: $soname resolves to $resolved -- outside the package, and not a library it leaves to the machine"
-                status=1
-              fi
-            done < <(env -u LD_LIBRARY_PATH ldd "$path" | grep ' => /')
-            missing=$(env -u LD_LIBRARY_PATH ldd "$path" | grep 'not found' || true)
-            if [ -n "$missing" ]; then
-              echo "$bin is missing libraries:"
-              echo "$missing"
-              status=1
-            fi
-          done
+            done
+          done < <(find /tmp/unpacked/usr/bin /tmp/unpacked/usr/lib/cutreel -type f | sort)
+          echo "checked $checked ELF objects"
+          test "$checked" -gt 0
           # And then actually run the tools, with the environment emptied.
           for tool in zaro-probe zaro-render zaro-cut zaro-otio; do
             env -i "PATH=$PATH" "HOME=$HOME" "/tmp/unpacked/usr/bin/$tool" --version || status=1

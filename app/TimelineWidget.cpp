@@ -2951,6 +2951,28 @@ void TimelineWidget::wheelEvent(QWheelEvent* event) {
     if (seq == nullptr) {
         return;
     }
+
+    // A horizontal swipe is the timeline's own gesture: two fingers left and
+    // right along a strip that runs left to right. Taken first, and taken by
+    // pixels rather than by notches -- a trackpad reports how far the fingers
+    // actually went, and following that exactly is what makes the timeline feel
+    // like it is being pushed rather than nudged a step at a time.
+    //
+    // `pixelDelta` is empty on an ordinary mouse, which has no horizontal axis
+    // to report anyway; `angleDelta` covers the tilt wheels that do.
+    const int swipeX =
+        event->pixelDelta().x() != 0 ? event->pixelDelta().x() : event->angleDelta().x() / 8;
+    if (swipeX != 0 && !event->modifiers().testFlag(Qt::ControlModifier) &&
+        !event->modifiers().testFlag(Qt::MetaModifier)) {
+        scrollByPixels(-swipeX, *seq);
+        // Ended here rather than falling through: a diagonal swipe reports both
+        // axes, and letting each move the same scroll would run the timeline
+        // along at twice the speed of the fingers on it.
+        emit viewChanged();
+        update();
+        return;
+    }
+
     const double steps = event->angleDelta().y() / 120.0;
     if (steps == 0.0) {
         return;
@@ -2960,17 +2982,58 @@ void TimelineWidget::wheelEvent(QWheelEvent* event) {
         event->modifiers().testFlag(Qt::MetaModifier)) {
         layout_.zoomBy(std::pow(1.2, steps), event->position().x(), seq->frameRate());
         discardQueuedThumbnails();
+    } else if (event->pixelDelta().y() != 0) {
+        // A vertical two-finger swipe, on a trackpad that measures it. There is
+        // nothing above or below in this widget -- the rows are laid out to fit
+        // -- so it moves along the timeline like the horizontal one, and by the
+        // same pixels, so the two do not disagree about how fast a swipe goes.
+        scrollByPixels(-event->pixelDelta().y(), *seq);
     } else {
-        // Scroll by a fraction of the visible span, so the feel is the same at
-        // every zoom level.
+        // A wheel notch, which is a step rather than a distance: a fraction of
+        // the visible span, so the feel is the same at every zoom level.
         const time::TimeRange visible = layout_.visibleRange(seq->frameRate());
         const std::int64_t delta = static_cast<std::int64_t>(
             -steps * static_cast<double>(visible.duration().frames()) / 6.0);
         layout_.setScroll(layout_.scroll().rescaledTo(seq->frameRate()) +
                           time::RationalTime{delta, seq->frameRate()});
+        swipeCarry_ = 0.0;
     }
     emit viewChanged();
     update();
+}
+
+/// Move the view along by a distance in pixels, carrying the remainder.
+void TimelineWidget::scrollByPixels(double pixels, const model::Sequence& seq) {
+    const double perSecond = layout_.metrics().pixelsPerSecond;
+    const double perFrame = perSecond / seq.frameRate().toDouble();
+    if (perFrame <= 0.0) {
+        return;
+    }
+    // Converted to frames before it is banked, not after. Carried as pixels it
+    // would mean different amounts of time at different zooms, and the pixels
+    // left over from a swipe at four hundred pixels a frame would come back as
+    // hundreds of frames the next time somebody zoomed out. In frames the
+    // remainder is always less than one, whatever happens to the zoom in
+    // between.
+    swipeCarry_ += pixels / perFrame;
+    // Truncated, not rounded: what is left over is kept for the next event in
+    // the swipe rather than thrown away, so a hundred small steps add up to the
+    // distance the fingers travelled.
+    const auto whole = static_cast<std::int64_t>(swipeCarry_);
+    if (whole == 0) {
+        return;
+    }
+    swipeCarry_ -= static_cast<double>(whole);
+
+    const time::RationalTime from = layout_.scroll().rescaledTo(seq.frameRate());
+    const time::RationalTime wanted = from + time::RationalTime{whole, seq.frameRate()};
+    layout_.setScroll(wanted);
+    // `setScroll` refuses to go before the start. Without dropping the carry
+    // here, swiping back past zero would bank a debt that the next swipe
+    // forward has to pay off before anything moves.
+    if (wanted.frames() < 0) {
+        swipeCarry_ = 0.0;
+    }
 }
 
 bool TimelineWidget::pressWithTool(const ui::TimelineLayout::Hit* hit, int x, int /*y*/,

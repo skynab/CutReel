@@ -281,6 +281,8 @@ private:
     bool paintFilmstrip(QPainter& painter, const model::Clip& clip, const QRectF& body);
     /// Throw away filmstrip decodes queued for a zoom level that has changed.
     void discardQueuedThumbnails();
+    /// Move the view along the timeline by a distance in pixels.
+    void scrollByPixels(double pixels, const model::Sequence& seq);
     void paintTransitions(QPainter& painter, const ui::TimelineLayout::Row& row);
     /// The eye/speaker, the lock and the remove button in a track's header.
     void paintTrackControls(QPainter& painter, const ui::TimelineLayout::Row& row,
@@ -666,6 +668,17 @@ private:
     /// Where a pan started, in pixels and in time.
     int panAnchorX_{0};
     time::RationalTime panAnchorScroll_{};
+    /// The fraction of a frame a trackpad swipe has travelled but not yet spent.
+    ///
+    /// Scroll is a whole number of frames, and a swipe arrives as a stream of
+    /// two- and three-pixel events. Zoomed in far enough that a frame is wider
+    /// than the swipe's step, rounding each event on its own rounds every one
+    /// of them to nothing and the timeline does not move at all. The remainder
+    /// is carried instead, so the movement is what the fingers did.
+    ///
+    /// In frames rather than in pixels, so that a zoom between one swipe and
+    /// the next cannot turn a leftover into a jump.
+    double swipeCarry_{0.0};
     bool snapEnabled_{true};
 
     /// What the last snapped time latched onto. `SnapKind` and the track come

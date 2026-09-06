@@ -11,7 +11,9 @@
 #include <QListWidget>
 #include <QMimeData>
 #include <QMouseEvent>
+#include <QWheelEvent>
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <memory>
@@ -1723,5 +1725,137 @@ TEST_CASE("Unlinking a clip breaks the whole pair, in one step", "[gui]") {
 
     window.commands().undo(window.project());
     window.commands().undo(window.project());
+    QApplication::processEvents();
+}
+
+// A two-finger swipe along the timeline, as a trackpad reports one.
+//
+// Written because the gesture cannot be tried by hand on the machine this was
+// developed on: a trackpad swipe arrives as a QWheelEvent carrying a *pixel*
+// delta on the x axis, and the handler read only the y angle -- so swiping left
+// and right over the timeline did nothing whatsoever. Synthesising the event is
+// the only way to cover that from here, and it covers the three things that
+// were wrong or could be:
+//
+//   * a horizontal swipe moves the view at all;
+//   * it moves it by the distance the fingers went, not by a notch;
+//   * small steps accumulate rather than each rounding away to nothing, which
+//     is what happens at a zoom where one frame is wider than one swipe step.
+//
+// The ordinary wheel is checked alongside, because it shares the handler and a
+// mouse has no horizontal axis to fall back on.
+TEST_CASE("A two-finger swipe scrolls the timeline sideways", "[gui]") {
+    auto& window = zaro::app::testing::gui();
+    const zaro::app::testing::Rewind rewind;
+    auto* timeline = window.timeline();
+    const time::Rational rate = window.sequence()->frameRate();
+
+    const auto swipe = [&](QPoint pixels, QPoint angle) {
+        QWheelEvent event{QPointF{400.0, 200.0},
+                          timeline->mapToGlobal(QPointF{400.0, 200.0}),
+                          pixels,
+                          angle,
+                          Qt::NoButton,
+                          Qt::NoModifier,
+                          Qt::ScrollUpdate,
+                          false};
+        QCoreApplication::sendEvent(timeline, &event);
+        QApplication::processEvents();
+    };
+    const auto scrolledFrames = [&] {
+        return timeline->layout().scroll().rescaledTo(rate).frames();
+    };
+
+    // Zoomed in, so there is somewhere to scroll to, and started away from the
+    // head so a swipe back has room as well.
+    timeline->zoomToFit();
+    timeline->zoomBy(6.0);
+    QApplication::processEvents();
+    const double perFrame = timeline->layout().metrics().pixelsPerSecond / rate.toDouble();
+
+    // --- a swipe moves the view, by the distance the fingers went -----------
+    const std::int64_t start = scrolledFrames();
+    // Negative x is the content moving left, which is forward along a timeline
+    // that runs left to right.
+    swipe(QPoint{-240, 0}, QPoint{});
+    const std::int64_t forward = scrolledFrames() - start;
+    const auto wantedFrames = static_cast<std::int64_t>(240.0 / perFrame);
+    if (forward <= 0) {
+        zaro::app::testing::failf(
+            "a two-finger swipe left did not move the timeline forward (still at frame %lld)\n",
+            static_cast<long long>(scrolledFrames()));
+    }
+    // Within a frame of the distance swiped: this is content tracking, not a
+    // step, and a swipe that moved the timeline by some other amount would feel
+    // like the picture sliding out from under the fingers.
+    if (std::llabs(forward - wantedFrames) > 1) {
+        zaro::app::testing::failf("240 pixels of swipe moved %lld frames, not the %lld under it\n",
+                                  static_cast<long long>(forward),
+                                  static_cast<long long>(wantedFrames));
+    }
+
+    // --- and back, symmetrically -------------------------------------------
+    swipe(QPoint{240, 0}, QPoint{});
+    if (scrolledFrames() != start) {
+        zaro::app::testing::failf("swiping back did not return to frame %lld (it is at %lld)\n",
+                                  static_cast<long long>(start),
+                                  static_cast<long long>(scrolledFrames()));
+    }
+
+    // --- small steps accumulate --------------------------------------------
+    //
+    // Aimed at ten pixels a frame rather than at some factor of the last zoom:
+    // what this needs is a band, and which factor lands in it depends on the
+    // fixture's rate and the width the window happened to open at. A frame
+    // wider than one three-pixel step, so each step alone rounds to nothing;
+    // narrow enough that forty of them are worth a dozen frames, so there is
+    // something to see when they are carried instead.
+    timeline->zoomBy(10.0 / perFrame);
+    QApplication::processEvents();
+    const double fineFrame = timeline->layout().metrics().pixelsPerSecond / rate.toDouble();
+    if (fineFrame <= 3.0 || fineFrame >= 40.0) {
+        zaro::app::testing::failf("the zoom for the carry check missed its band: %.2f px a frame\n",
+                                  fineFrame);
+    }
+    const std::int64_t beforeSteps = scrolledFrames();
+    for (int step = 0; step < 40; ++step) {
+        swipe(QPoint{-3, 0}, QPoint{});
+    }
+    const std::int64_t crept = scrolledFrames() - beforeSteps;
+    const auto wantedCreep = static_cast<std::int64_t>(120.0 / fineFrame);
+    if (crept <= 0) {
+        zaro::app::testing::failf(
+            "forty three-pixel swipe steps moved the timeline nowhere at %.2f px a frame\n",
+            fineFrame);
+    }
+    if (std::llabs(crept - wantedCreep) > 1) {
+        zaro::app::testing::failf("forty three-pixel steps moved %lld frames, not %lld\n",
+                                  static_cast<long long>(crept),
+                                  static_cast<long long>(wantedCreep));
+    }
+
+    // --- the ordinary wheel still steps ------------------------------------
+    //
+    // No pixel delta, one notch on the y axis: the mouse path, which shares
+    // this handler and must keep scrolling by a fraction of the visible span.
+    timeline->zoomToFit();
+    timeline->zoomBy(6.0);
+    QApplication::processEvents();
+    const std::int64_t beforeNotch = scrolledFrames();
+    const std::int64_t visible =
+        timeline->layout().visibleRange(rate).duration().rescaledTo(rate).frames();
+    swipe(QPoint{}, QPoint{0, -120});
+    const std::int64_t notched = scrolledFrames() - beforeNotch;
+    if (std::llabs(notched - (visible / 6)) > 1) {
+        zaro::app::testing::failf(
+            "a wheel notch moved %lld frames, not the sixth of %lld it used to\n",
+            static_cast<long long>(notched), static_cast<long long>(visible));
+    }
+
+    std::printf("  swipe: 240 px moved %lld frames, 40 small steps moved %lld, a notch %lld\n",
+                static_cast<long long>(forward), static_cast<long long>(crept),
+                static_cast<long long>(notched));
+
+    timeline->zoomToFit();
     QApplication::processEvents();
 }
