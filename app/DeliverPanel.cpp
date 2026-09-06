@@ -17,11 +17,14 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QShowEvent>
+#include <QSignalBlocker>
 #include <QSlider>
 #include <QSplitter>
 #include <QUrl>
 #include <QVBoxLayout>
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <utility>
@@ -442,7 +445,14 @@ void DeliverPanel::buildSettings(QVBoxLayout* into) {
 
     video->addWidget(fieldLabel("Resolution", content), 2, 0);
     video->addWidget(fieldLabel("Frame rate", content), 2, 1);
-    resolution_ = factField("—", content);
+    // A menu, because scaling down is something a delivery genuinely needs --
+    // a 4K master and a 1080 review copy are the same cut. Only reductions are
+    // offered: enlarging a deliverable invents detail that was never shot, and
+    // a menu that offered it would be a menu whose top half is a trap.
+    resolution_ = new QComboBox(content);
+    resolution_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    resolution_->setMinimumContentsLength(8);
+    connect(resolution_, &QComboBox::currentIndexChanged, this, [this] { updateDerived(); });
     frameRate_ = factField("—", content);
     video->addWidget(resolution_, 3, 0);
     video->addWidget(frameRate_, 3, 1);
@@ -461,10 +471,12 @@ void DeliverPanel::buildSettings(QVBoxLayout* into) {
     video->addWidget(audioSwitchHolder, 5, 1);
     column->addLayout(video);
 
-    // Resolution and frame rate are the sequence's, and this program has no
-    // scaler or retimer on the export path -- so they are stated, not offered.
+    // The frame rate is still the sequence's -- there is no retimer on the
+    // export path -- so it is stated rather than offered, and the note says
+    // which of the two is a choice and which is a fact.
     auto* fixedNote = new QLabel(
-        "Resolution and frame rate come from the sequence: export does not scale or retime.",
+        "Frame rate comes from the sequence: export does not retime. A smaller resolution is "
+        "scaled from the finished frame, so the framing is the one on the monitor.",
         content);
     fixedNote->setWordWrap(true);
     fixedNote->setStyleSheet(
@@ -671,6 +683,11 @@ void DeliverPanel::refresh() {
     updateDerived();
 }
 
+void DeliverPanel::showEvent(QShowEvent* event) {
+    QWidget::showEvent(event);
+    updateDerived();
+}
+
 void DeliverPanel::applyPreset(int index) {
     if (index < 0 || index >= static_cast<int>(presets_.size())) {
         return;
@@ -750,6 +767,83 @@ std::pair<std::int64_t, std::int64_t> DeliverPanel::chosenRange() const {
     }
 }
 
+namespace {
+
+/// Round up to even. Every codec here subsamples chroma and cannot represent an
+/// odd dimension; up rather than to-nearest so a requested size is a floor.
+std::int32_t evenUp(double value) {
+    const auto whole = static_cast<std::int64_t>(std::ceil(value));
+    return static_cast<std::int32_t>(std::max<std::int64_t>(2, whole + (whole % 2)));
+}
+
+/// The long edge of the sizes worth offering, largest first.
+///
+/// Keyed on the long edge rather than on the height so a vertical timeline gets
+/// the same ladder the right way up: 1080 on a 9:16 sequence has to mean
+/// 608 x 1080, not 1080 x 1920 squashed into somebody else's shape.
+constexpr std::int32_t kLadder[] = {3840, 2560, 1920, 1280, 960, 640};
+
+/// The source's shape, with its long edge set to `edge`.
+std::pair<std::int32_t, std::int32_t> sizeForLongEdge(std::int32_t sourceWidth,
+                                                      std::int32_t sourceHeight,
+                                                      std::int32_t edge) {
+    const bool landscape = sourceWidth >= sourceHeight;
+    const double shortOverLong = landscape ? static_cast<double>(sourceHeight) / sourceWidth
+                                           : static_cast<double>(sourceWidth) / sourceHeight;
+    return landscape ? std::pair{evenUp(edge), evenUp(edge * shortOverLong)}
+                     : std::pair{evenUp(edge * shortOverLong), evenUp(edge)};
+}
+
+}  // namespace
+
+std::pair<std::int32_t, std::int32_t> DeliverPanel::outputResolution() const {
+    const model::Sequence* seq = sequence();
+    if (seq == nullptr) {
+        return {0, 0};
+    }
+    const std::int32_t sourceWidth = seq->width();
+    const std::int32_t sourceHeight = seq->height();
+    const int longEdge = resolution_ != nullptr ? resolution_->currentData().toInt() : 0;
+    if (longEdge <= 0 || sourceWidth <= 0 || sourceHeight <= 0) {
+        return {sourceWidth, sourceHeight};
+    }
+    return sizeForLongEdge(sourceWidth, sourceHeight, longEdge);
+}
+
+void DeliverPanel::rebuildResolutions() {
+    const model::Sequence* seq = sequence();
+    const std::int32_t sourceWidth = seq != nullptr ? seq->width() : 0;
+    const std::int32_t sourceHeight = seq != nullptr ? seq->height() : 0;
+    if (resolution_ == nullptr ||
+        (sourceWidth == builtForWidth_ && sourceHeight == builtForHeight_)) {
+        return;
+    }
+    builtForWidth_ = sourceWidth;
+    builtForHeight_ = sourceHeight;
+
+    // Signals off while the list is replaced: each add and remove would
+    // otherwise re-enter updateDerived, which is what called this.
+    const QSignalBlocker quiet{resolution_};
+    resolution_->clear();
+    if (seq == nullptr || sourceWidth <= 0 || sourceHeight <= 0) {
+        resolution_->addItem("—", 0);
+        return;
+    }
+    resolution_->addItem(QString("%1 × %2 · sequence").arg(sourceWidth).arg(sourceHeight), 0);
+    const std::int32_t sourceLong = std::max(sourceWidth, sourceHeight);
+    for (const std::int32_t edge : kLadder) {
+        // Strictly smaller, and by enough to be worth a menu entry: an entry
+        // that comes out a handful of pixels off the sequence's own size is
+        // a re-encode nobody asked for wearing a different number.
+        if (edge >= sourceLong || edge * 100 > sourceLong * 97) {
+            continue;
+        }
+        const auto [wide, tall] = sizeForLongEdge(sourceWidth, sourceHeight, edge);
+        resolution_->addItem(QString("%1 × %2").arg(wide).arg(tall), edge);
+    }
+    resolution_->setCurrentIndex(0);
+}
+
 std::int64_t DeliverPanel::bitRate() const {
     const Preset& preset = presets_[static_cast<std::size_t>(preset_)];
     const model::Sequence* seq = sequence();
@@ -759,9 +853,13 @@ std::int64_t DeliverPanel::bitRate() const {
     // Bits per pixel rather than a flat number: the same setting has to mean
     // the same picture at 720p and at 4K, and it is the pixel rate that
     // decides what a codec needs.
+    //
+    // The *delivered* pixels, not the sequence's: a 1080 copy of a 4K master
+    // given 4K's bit rate is four times the file it needs to be.
+    const auto [wide, tall] = outputResolution();
     const double quality = quality_->value() / 1000.0;
     const double bitsPerPixel = 0.015 + quality * 0.185;
-    const double pixels = static_cast<double>(seq->width()) * static_cast<double>(seq->height());
+    const double pixels = static_cast<double>(wide) * static_cast<double>(tall);
     return static_cast<std::int64_t>(pixels * seq->frameRate().toDouble() * bitsPerPixel);
 }
 
@@ -814,9 +912,9 @@ void DeliverPanel::updateDerived() {
     fullPath_->setText(QString::fromStdString(outputPath()));
 
     const model::Sequence* seq = sequence();
+    rebuildResolutions();
     const auto [start, count] = chosenRange();
     if (seq != nullptr) {
-        resolution_->setText(QString("%1 × %2").arg(seq->width()).arg(seq->height()));
         frameRate_->setText(QString("%1 fps").arg(seq->frameRate().toDouble(), 0, 'g', 5));
         audioRate_->setText(
             QString("%1 kHz").arg(seq->audioSampleRate().toDouble() / 1000.0, 0, 'g', 3));
@@ -929,10 +1027,11 @@ void DeliverPanel::queueCurrent() {
     auto job = std::make_unique<Job>();
     job->path = outputPath();
     job->name = QFileInfo(QString::fromStdString(job->path)).fileName();
+    const auto [outWidth, outHeight] = outputResolution();
     job->spec = QString("%1 · %2 × %3")
                     .arg(codec_->currentText().section(' ', 0, 0))
-                    .arg(seq->width())
-                    .arg(seq->height());
+                    .arg(outWidth)
+                    .arg(outHeight);
     job->project = *project_;
     job->reveal = revealWhenDone_->isChecked();
     job->framesTotal = count;
@@ -949,6 +1048,12 @@ void DeliverPanel::queueCurrent() {
                                   ? encoderName(audioCodec_->currentText()).toLower().toStdString()
                                   : std::string{};
     job->request.videoBitRate = preset.takesBitRate ? bitRate() : 0;
+    // Left at zero when the delivery is the sequence's own size, so an export
+    // that is not being scaled takes exactly the path it always took --
+    // including the smart-render copy, which a resize necessarily rules out.
+    const bool scaled = outWidth != seq->width() || outHeight != seq->height();
+    job->request.width = scaled ? outWidth : 0;
+    job->request.height = scaled ? outHeight : 0;
 
     jobs_.push_back(std::move(job));
     rebuildQueueView();

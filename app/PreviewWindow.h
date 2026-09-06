@@ -899,6 +899,15 @@ private:
     /// second one would be a different picture the moment anything about the
     /// grade or the proxy setting differed.
     void grabStill();
+    /// Write the frame under the playhead to an image file.
+    ///
+    /// Composited on the CPU at the sequence's own size rather than read back
+    /// from the monitor: the monitor is however many pixels the window happens
+    /// to give it, and a cover image taken from a half-size viewer is a
+    /// half-size cover image.
+    void exportStill();
+    /// The context menu over the program monitor.
+    void showProgramMenu(const QPoint& where);
 
     /// Put a .cube on the selected shot.
     void applyLookToSelection(const QString& path);

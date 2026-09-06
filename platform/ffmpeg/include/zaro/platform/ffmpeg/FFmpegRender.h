@@ -83,6 +83,21 @@ struct RenderRequest {
     /// codecs that do not take a rate -- ProRes picks its own from the profile
     /// -- ignore it.
     std::int64_t videoBitRate{0};
+
+    /// What size to write, when it should not be the sequence's own. Zero --
+    /// both of them -- keeps the sequence's frame size, which is what every
+    /// caller meant before there was a choice.
+    ///
+    /// The composite still happens at the sequence's size and the scale is the
+    /// last thing before the encoder, which is the only order that is correct:
+    /// a title laid out for a 4K frame has to be rasterised at 4K and then
+    /// reduced, not laid out into a 1080 frame it was never positioned for.
+    ///
+    /// Both are rounded up to even numbers -- every codec here subsamples
+    /// chroma and cannot represent an odd one -- and giving only one of the two
+    /// takes the other from the sequence's aspect ratio.
+    std::int32_t width{0};
+    std::int32_t height{0};
 };
 
 /// What the encoder actually wrote.

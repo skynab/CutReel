@@ -72,6 +72,16 @@ signals:
     /// The queue, or what it is doing, changed: the window's chrome follows it.
     void queueChanged();
 
+protected:
+    /// Re-read the sequence on the way in.
+    ///
+    /// This panel is a page of a stack and the sequence can change while
+    /// another page is up -- a resize, most of all, which is the one edit that
+    /// changes what the settings here are settings *for*. Without this the
+    /// Resolution menu would go on offering the ladder for a size the sequence
+    /// no longer is.
+    void showEvent(QShowEvent* event) override;
+
 private:
     struct Preset;
     struct Job;
@@ -94,6 +104,17 @@ private:
     [[nodiscard]] std::pair<std::int64_t, std::int64_t> chosenRange() const;
     [[nodiscard]] std::int64_t bitRate() const;
     [[nodiscard]] std::string outputPath() const;
+    /// The size the file will be written at, in pixels.
+    ///
+    /// The sequence's own size unless the Resolution menu says otherwise; the
+    /// menu offers reductions only, since enlarging a delivery invents detail
+    /// that was never shot.
+    [[nodiscard]] std::pair<std::int32_t, std::int32_t> outputResolution() const;
+    /// Refill the Resolution menu for the sequence's shape and size.
+    ///
+    /// Does nothing while the size it was last built for still holds, because
+    /// rebuilding it would throw away whatever the user picked.
+    void rebuildResolutions();
 
     const model::Project* project_{nullptr};
     model::SequenceId sequenceId_;
@@ -116,7 +137,11 @@ private:
 
     QComboBox* container_{nullptr};
     QComboBox* codec_{nullptr};
-    QLabel* resolution_{nullptr};
+    QComboBox* resolution_{nullptr};
+    /// The sequence size the Resolution menu was last filled in for, so it is
+    /// refilled when the sequence changes and left alone when it has not.
+    std::int32_t builtForWidth_{0};
+    std::int32_t builtForHeight_{0};
     QLabel* frameRate_{nullptr};
     QLabel* depth_{nullptr};
     QSlider* quality_{nullptr};

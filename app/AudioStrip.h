@@ -104,6 +104,10 @@ private:
     int held_{0};
     float reductionDb_{0.0F};
     Grab grab_{Grab::None};
+    /// Where the pointer was last seen while the pot was held. The pot is
+    /// turned by how far the mouse moved, so it needs somewhere to remember
+    /// where the mouse was.
+    int panFrom_{0};
 };
 
 }  // namespace zaro::app

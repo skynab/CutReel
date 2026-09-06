@@ -1,8 +1,12 @@
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
+#include <utility>
 
 #include "zaro/core/render/AudioGraph.h"
 #include "zaro/core/render/RenderGraph.h"
+#include "zaro/core/render/Resample.h"
 #include "zaro/core/render/SmartRender.h"
 #include "zaro/platform/ffmpeg/FFmpegRender.h"
 
@@ -27,6 +31,42 @@ namespace {
         return avcodec_get_name(encoder->id);
     }
     return {};
+}
+
+/// Round up to an even number, never below two.
+///
+/// Up rather than to-nearest so that asking for 1079 lines never quietly
+/// delivers 1078: a request for a size is a floor on what somebody expects to
+/// see, and the half-pixel of aspect error is invisible where a missing line
+/// of picture is not.
+[[nodiscard]] std::int32_t toEven(double value) {
+    const auto whole = static_cast<std::int64_t>(std::ceil(value));
+    return static_cast<std::int32_t>(std::max<std::int64_t>(2, whole + (whole % 2)));
+}
+
+/// What the file should be, in pixels.
+///
+/// Zero for both is the sequence's own size. One of the two given takes the
+/// other from the sequence's shape, so asking for 1280 wide on a vertical
+/// timeline does not silently letterbox it into somebody else's aspect ratio.
+[[nodiscard]] std::pair<std::int32_t, std::int32_t> outputSize(const model::Sequence& sequence,
+                                                               const RenderRequest& request) {
+    const std::int32_t sourceWidth = sequence.width();
+    const std::int32_t sourceHeight = sequence.height();
+    if (request.width <= 0 && request.height <= 0) {
+        return {sourceWidth, sourceHeight};
+    }
+    if (sourceWidth <= 0 || sourceHeight <= 0) {
+        return {std::max(request.width, 2), std::max(request.height, 2)};
+    }
+    const double aspect = static_cast<double>(sourceWidth) / static_cast<double>(sourceHeight);
+    if (request.width <= 0) {
+        return {toEven(request.height * aspect), toEven(request.height)};
+    }
+    if (request.height <= 0) {
+        return {toEven(request.width), toEven(request.width / aspect)};
+    }
+    return {toEven(request.width), toEven(request.height)};
 }
 
 }  // namespace
@@ -72,8 +112,9 @@ Status renderSequence(const model::Project& project, const RenderRequest& reques
 
     EncodeSettings settings;
     settings.path = request.outputPath;
-    settings.width = sequence->width();
-    settings.height = sequence->height();
+    const auto [outWidth, outHeight] = outputSize(*sequence, request);
+    settings.width = outWidth;
+    settings.height = outHeight;
     settings.frameRate = rate;
     settings.audioSampleRate = audioRate;
     settings.includeAudio = request.includeAudio;
@@ -163,6 +204,15 @@ Status renderSequence(const model::Project& project, const RenderRequest& reques
     };
 
     render::RgbaImage frame;
+    // Where the picture goes when the file is not the sequence's size. Kept
+    // between frames rather than allocated per frame, and left empty when
+    // nothing needs scaling so the ordinary export costs exactly what it did.
+    const bool scaling =
+        settings.width != sequence->width() || settings.height != sequence->height();
+    render::RgbaImage scaled;
+    if (scaling) {
+        scaled = render::RgbaImage{settings.width, settings.height};
+    }
     const auto began = std::chrono::steady_clock::now();
 
     for (std::int64_t index = 0; index < frameCount; ++index) {
@@ -177,7 +227,15 @@ Status renderSequence(const model::Project& project, const RenderRequest& reques
             return status;
         }
         skippedText += video.lastSkippedTextCount();
-        if (Status status = encoder.writeVideo(frame); !status) {
+        // Scaled last, after everything has been composited at the sequence's
+        // own size. Compositing into the delivery size instead would lay out
+        // titles, masks and transforms against a frame they were never
+        // positioned for -- the framing has to be the framing that was judged
+        // on the monitor, only smaller.
+        if (scaling) {
+            render::resizeInto(frame, scaled);
+        }
+        if (Status status = encoder.writeVideo(scaling ? scaled : frame); !status) {
             return status;
         }
 

@@ -31,15 +31,22 @@ constexpr int kButtonHeight = 16;
 constexpr double kMinDb = -96.0;
 constexpr double kMaxDb = 12.0;
 
+/// The exponent goes on the way *out* of decibels, not on the way in. Written
+/// the other way round -- which is how this shipped -- the curve bends the
+/// wrong way: 0 dB lands at 0.95 of the travel rather than 0.77, so the whole
+/// working range of a mix is crammed into the top twentieth of the fader and a
+/// dozen pixels below unity is already ten decibels down. That is what made a
+/// small movement read as muting the channel.
+constexpr double kFaderCurve = 2.2;
+
 double faderFraction(double db) {
     const double clamped = std::clamp(db, kMinDb, kMaxDb);
-    // A square curve on the normalised decibel, which puts 0 dB at about 0.79.
     const double linear = (clamped - kMinDb) / (kMaxDb - kMinDb);
-    return std::pow(linear, 1.0 / 2.2);
+    return std::pow(linear, kFaderCurve);
 }
 
 double faderDb(double fraction) {
-    const double linear = std::pow(std::clamp(fraction, 0.0, 1.0), 2.2);
+    const double linear = std::pow(std::clamp(fraction, 0.0, 1.0), 1.0 / kFaderCurve);
     return kMinDb + (linear * (kMaxDb - kMinDb));
 }
 
@@ -405,9 +412,17 @@ void AudioStrip::takeFader(const QPoint& where) {
 void AudioStrip::takePan(const QPoint& where) {
     // Horizontal, because a pot that answers to up and down is a pot nobody can
     // aim: left and right is what the control means.
-    const QRect pan = panRect();
-    const double from = pan.center().x();
-    pan_ = std::clamp((where.x() - from) / 40.0 + pan_, -1.0, 1.0);
+    //
+    // By how far the pointer moved since the last event, not by how far it is
+    // from the pot. Measured from the pot, a pointer held twenty pixels to the
+    // right adds the same offset again on every single mouse-move -- so the pan
+    // runs away to hard right while the mouse is standing still, and the
+    // control is unaimable. A full sweep takes 180 pixels of horizontal travel,
+    // which is a deliberate drag rather than a twitch.
+    constexpr double kSweepPixels = 180.0;
+    const int moved = where.x() - panFrom_;
+    panFrom_ = where.x();
+    pan_ = std::clamp(pan_ + (moved * 2.0 / kSweepPixels), -1.0, 1.0);
     update();
 }
 
@@ -427,6 +442,7 @@ void AudioStrip::mousePressEvent(QMouseEvent* event) {
     }
     if (panRect().adjusted(-4, -4, 4, 4).contains(event->pos())) {
         grab_ = Grab::Pan;
+        panFrom_ = event->pos().x();
         return;
     }
     if (faderRect().adjusted(-6, 0, 6, 0).contains(event->pos())) {

@@ -21,6 +21,8 @@
 
 #include "PreviewWindow.h"
 
+#include <QContextMenuEvent>
+#include <QDir>
 #include <QFont>
 #include <QFontDatabase>
 #include <QHBoxLayout>
@@ -35,6 +37,7 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <vector>
 
 #include <zaro/Version.h>
 
@@ -2241,6 +2244,13 @@ bool PreviewWindow::eventFilter(QObject* watched, QEvent* event) {
         titleOverlay_->setGeometry(monitor_->rect());
         viewerOverlay_->setGeometry(monitor_->rect());
     }
+    // Right-click on the picture. Filtered here rather than given to the
+    // monitor because the monitor renders and knows nothing about the project
+    // or where a file should go, and everything this menu does is the window's.
+    if (watched == monitor_ && event->type() == QEvent::ContextMenu) {
+        showProgramMenu(static_cast<QContextMenuEvent*>(event)->globalPos());
+        return true;
+    }
     return QWidget::eventFilter(watched, event);
 }
 
@@ -2882,6 +2892,95 @@ void PreviewWindow::grabStill() {
                       .toString())
             : QString{"still"};
     gallery_->addStill(shot, position_, name);
+}
+
+void PreviewWindow::exportStill() {
+    const model::Sequence* sequence = liveSequence();
+    if (media_ == nullptr || sequence == nullptr) {
+        app::say(this, "Still", "There is nothing loaded to take a still of.");
+        return;
+    }
+
+    // Colons are legal in a timecode and not in a Windows file name, so the
+    // suggested name uses dashes. It is a suggestion; whatever gets typed over
+    // it is what the file is called.
+    const bool dropFrame = time::supportsDropFrame(sequence->frameRate());
+    QString stamp = QString::fromStdString(
+        time::timecodeFromFrames(position_.frames(), sequence->frameRate(), dropFrame).toString());
+    stamp.replace(QChar(':'), QChar('-'));
+    const QString stem = QString::fromStdString(sequence->name()) + " " + stamp;
+    // Beside the project when there is one, since that is where the rest of
+    // this piece of work lives.
+    const QString folder = document_.path().empty()
+                               ? QDir::homePath()
+                               : QFileInfo(QString::fromStdString(document_.path())).absolutePath();
+
+    QString path = QFileDialog::getSaveFileName(this, "Export still", QDir(folder).filePath(stem),
+                                                "PNG image (*.png);;JPEG image (*.jpg);;TIFF "
+                                                "image (*.tif)");
+    if (path.isEmpty()) {
+        return;
+    }
+    // A name with no suffix is one QImage cannot pick a format for, and it
+    // fails by writing nothing rather than by saying so.
+    if (QFileInfo(path).suffix().isEmpty()) {
+        path += ".png";
+    }
+
+    // Composited here rather than read back off the monitor. The monitor is
+    // whatever size the window gave it and is letterboxed inside that, so a
+    // cover image taken from it would be the wrong size with black down two
+    // edges. This is the same graph the export uses, at the sequence's size.
+    render::RenderGraph graph{*media_};
+    graph.setTextRasterizer(&text_);
+    graph.setProject(&document_.project());
+    auto frame = graph.composite(*sequence, position_);
+    if (!frame) {
+        app::say(this, "Still",
+                 QString("The frame could not be rendered — %1")
+                     .arg(QString::fromStdString(frame.error().toString())));
+        return;
+    }
+
+    // The delivery's rolloff, for the same reason the encoder applies it: a
+    // still that clipped where the export rolls off is not a picture of what
+    // is being delivered.
+    if (sequence->output().highlightKnee < 1.0) {
+        render::toneMap(*frame, static_cast<float>(sequence->output().highlightKnee));
+    }
+
+    const int wide = frame->width();
+    const int tall = frame->height();
+    const int stride = wide * 3;
+    std::vector<std::uint8_t> rgb(static_cast<std::size_t>(stride) *
+                                  static_cast<std::size_t>(tall));
+    if (Status written =
+            render::toDisplayRgb24(*frame, rgb.data(), stride, sequence->output().transfer);
+        !written) {
+        app::say(this, "Still",
+                 QString("The frame could not be written — %1")
+                     .arg(QString::fromStdString(written.error().toString())));
+        return;
+    }
+
+    // The QImage borrows the vector, and save() reads it before returning.
+    const QImage image{rgb.data(), wide, tall, stride, QImage::Format_RGB888};
+    if (!image.save(path)) {
+        app::say(this, "Still", QString("Nothing could be written to %1.").arg(path));
+        return;
+    }
+    app::say(this, "Still", QString("Written to %1.").arg(QDir::toNativeSeparators(path)));
+}
+
+void PreviewWindow::showProgramMenu(const QPoint& where) {
+    QMenu menu{this};
+    QAction* save = menu.addAction("Export Still Frame…");
+    connect(save, &QAction::triggered, this, [this] { exportStill(); });
+    QAction* grab = menu.addAction("Grab Still to Gallery");
+    connect(grab, &QAction::triggered, this, [this] { grabStill(); });
+    save->setEnabled(liveSequence() != nullptr && media_ != nullptr);
+    grab->setEnabled(save->isEnabled());
+    menu.exec(where);
 }
 
 void PreviewWindow::applyLookToSelection(const QString& path) {

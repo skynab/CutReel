@@ -33,6 +33,8 @@ void printUsage() {
     std::puts("  --video-codec <n> FFmpeg encoder name (default: the container's)");
     std::puts("  --audio-codec <n> FFmpeg encoder name (default: the container's)");
     std::puts("  --bit-rate <n>    picture bits per second (default: the encoder's)");
+    std::puts("  --width <n>       write this wide, scaled down from the finished frame");
+    std::puts("  --height <n>      write this tall (either alone keeps the sequence's shape)");
     std::puts("  --no-copy         re-encode even where the export is a piece of one file");
     std::puts("  --cache-mb <n>    frame cache budget in MB (default 64; export is");
     std::puts("                    linear, so a big cache buys nothing here)");
@@ -65,6 +67,8 @@ int main(int argc, char** argv) {
     std::string videoCodec;
     std::string audioCodec;
     std::int64_t videoBitRate = 0;
+    std::int32_t width = 0;
+    std::int32_t height = 0;
 
     for (int i = 3; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -82,6 +86,10 @@ int main(int argc, char** argv) {
             audioCodec = argv[++i];
         } else if (arg == "--bit-rate" && i + 1 < argc) {
             videoBitRate = std::atoll(argv[++i]);
+        } else if (arg == "--width" && i + 1 < argc) {
+            width = static_cast<std::int32_t>(std::atoll(argv[++i]));
+        } else if (arg == "--height" && i + 1 < argc) {
+            height = static_cast<std::int32_t>(std::atoll(argv[++i]));
         } else if (arg == "--no-copy") {
             allowCopy = false;
         } else if (arg == "--quiet") {
@@ -126,6 +134,8 @@ int main(int argc, char** argv) {
     request.videoCodec = videoCodec;
     request.audioCodec = audioCodec;
     request.videoBitRate = videoBitRate;
+    request.width = width;
+    request.height = height;
 
     // The same function the export dialog calls. Two loops doing this would
     // have to be kept agreeing, and the one nobody runs would be the one that
