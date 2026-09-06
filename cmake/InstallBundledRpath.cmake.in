@@ -26,15 +26,26 @@
 # On a machine that does, it silently links against that one instead, which is
 # the same bug wearing a disguise.
 #
-# The fix is to stop relying on inheritance: give each bundled library a
-# DT_RUNPATH of $ORIGIN, so that every one of them finds its siblings in the
-# directory it is itself sitting in, whatever loaded it and whatever that
-# object's own RPATH says.
+# The fix is to stop relying on inheritance: give each bundled object a
+# DT_RUNPATH that points at the directory the libraries are in, so that it
+# finds them whatever loaded it and whatever that object's own RPATH says.
+#
+# Pointing at that directory is not the same as pointing at $ORIGIN, and the
+# difference is the plugins. A library sits in lib/cutreel itself, so $ORIGIN
+# is the answer for it; a plugin sits two levels down, in
+# lib/cutreel/plugins/platforms, where $ORIGIN holds the other plugins and none
+# of the libraries. Given $ORIGIN, every plugin in the package was unable to
+# find libQt6Core -- and the xcb one could not find libQt6XcbQpa, which is the
+# platform plugin, which is the difference between an application that starts
+# and one that aborts with "could not load the Qt platform plugin". So the
+# offset is computed per object rather than assumed, and an object one
+# directory further down would get $ORIGIN/../../.. without anyone editing
+# this file.
 #
 # --disable-new-dtags on the executables was the other candidate -- one linker
 # flag, and DT_RPATH does inherit. It is not enough: inheritance stops at any
 # object in the chain that has a DT_RUNPATH of its own, and we do not control
-# what the distribution put on the libraries we copied. $ORIGIN on each library
+# what the distribution put on the libraries we copied. An RPATH on each object
 # does not care what the chain looks like.
 
 set(zaro_libdir "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/@ZARO_PRIVATE_LIBDIR@")
@@ -78,8 +89,23 @@ foreach(zaro_object IN LISTS zaro_bundled)
         continue()
     endif()
 
+    # How far this object sits below the directory the libraries are in, as a
+    # relative path: empty for a library in it, ../.. for a plugin two down.
+    get_filename_component(zaro_object_dir "${zaro_object}" DIRECTORY)
+    file(RELATIVE_PATH zaro_to_libdir "${zaro_object_dir}" "${zaro_libdir}")
+    # A prefix with a trailing or doubled separator makes RELATIVE_PATH answer
+    # "../../" rather than "../..", which the loader reads the same way and a
+    # person reading `readelf -d` does not. Normalised so that what ships is
+    # the spelling this file describes.
+    string(REGEX REPLACE "/+$" "" zaro_to_libdir "${zaro_to_libdir}")
+    if(zaro_to_libdir STREQUAL "")
+        set(zaro_rpath "$ORIGIN")
+    else()
+        set(zaro_rpath "$ORIGIN/${zaro_to_libdir}")
+    endif()
+
     execute_process(
-        COMMAND "${ZARO_PATCHELF}" --set-rpath "$ORIGIN" "${zaro_object}"
+        COMMAND "${ZARO_PATCHELF}" --set-rpath "${zaro_rpath}" "${zaro_object}"
         RESULT_VARIABLE zaro_patch_result
         ERROR_VARIABLE zaro_patch_error)
     if(NOT zaro_patch_result EQUAL 0)
@@ -89,4 +115,4 @@ foreach(zaro_object IN LISTS zaro_bundled)
     math(EXPR zaro_patched "${zaro_patched} + 1")
 endforeach()
 
-message(STATUS "Set RPATH $ORIGIN on ${zaro_patched} bundled objects in ${zaro_libdir}")
+message(STATUS "Set an RPATH on ${zaro_patched} bundled objects in ${zaro_libdir}")
