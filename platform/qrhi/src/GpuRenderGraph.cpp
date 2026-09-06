@@ -224,10 +224,19 @@ Status GpuRenderGraph::drawClips(const model::Sequence& sequence, const time::Ra
                 const model::Clip* only = transition->isFadeIn() ? incoming : outgoing;
                 if (only != nullptr && only->enabled) {
                     const double progress = transition->progressAt(at);
-                    const double opacity = transition->isFadeIn() ? progress : 1.0 - progress;
-                    model::Transform faded = pinnedTransformAt(sequence, *only, at);
-                    faded.opacity *= opacity;
-                    if (drawTransitionSide(*only, sequence, faded, at, generated_, nullptr)) {
+                    // The CPU path's twin, and it has to stay its twin -- see
+                    // there for why a fade out is a fade in played backwards
+                    // and why this goes through the shape rather than ramping
+                    // an opacity of its own.
+                    const render::TransitionShape shape = render::transitionShapeFor(
+                        *transition, transition->isFadeIn() ? progress : 1.0 - progress,
+                        sequence.width(), sequence.height());
+                    if (drawTransitionSide(
+                            *only, sequence,
+                            render::shapedTransform(pinnedTransformAt(sequence, *only, at),
+                                                    shape.incoming),
+                            at, generated_,
+                            shape.incoming.mask.isSet() ? &shape.incoming.mask : nullptr)) {
                         ++lastClipCount_;
                     }
                 }

@@ -309,16 +309,33 @@ Status RenderGraph::compositeInto(const model::Sequence& sequence, const time::R
                 const model::Clip* only = transition->isFadeIn() ? incoming : outgoing;
                 if (only != nullptr && only->enabled) {
                     const double progress = transition->progressAt(at);
-                    // Linear, not equal power: this is coverage against a
-                    // background, and the eye reads a straight opacity ramp as
-                    // an even fade. The sound version is equal power for the
-                    // opposite reason -- see render::AudioGraph.
-                    const double opacity = transition->isFadeIn() ? progress : 1.0 - progress;
+                    // A fade out is a fade in played backwards, so one shape
+                    // serves both: the shot arrives at `progress` or departs at
+                    // what is left of it. The incoming side is the one used
+                    // either way, because there is only ever one clip here.
+                    //
+                    // Through `transitionShapeFor` rather than an opacity of
+                    // its own, so a kind means the same thing at the end of a
+                    // run as it does across a cut -- a wipe uncovers the shot
+                    // against black, a slide brings it on from off screen.
+                    // This branch used to ramp the opacity itself, which made
+                    // every kind look like a dissolve and made the panel's Type
+                    // control a lie wherever a span had one side empty.
+                    //
+                    // A dissolve is unchanged by that: its shape *is* an
+                    // opacity of exactly this ramp. Linear, not equal power --
+                    // this is coverage against a background, and the eye reads
+                    // a straight ramp as an even fade. The sound version is
+                    // equal power for the opposite reason: see AudioGraph.
+                    const TransitionShape shape = transitionShapeFor(
+                        *transition, transition->isFadeIn() ? progress : 1.0 - progress,
+                        out.width(), out.height());
                     if (const RgbaImage* image =
-                            clipImage(*only, at, generated_, out.width(), out.height())) {
-                        model::Transform faded = pinnedTransformAt(sequence, *only, at);
-                        faded.opacity *= opacity;
-                        drawClip(*only, *image, out, faded, at);
+                            transitionSideImage(*only, at, 0, out.width(), out.height())) {
+                        drawClip(
+                            *only, *image, out,
+                            shapedTransform(pinnedTransformAt(sequence, *only, at), shape.incoming),
+                            at, shape.incoming.mask.isSet() ? &shape.incoming.mask : nullptr);
                         ++lastClipCount_;
                     }
                 }

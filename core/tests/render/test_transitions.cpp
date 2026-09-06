@@ -1,3 +1,4 @@
+#include <cmath>
 #include <cstdint>
 #include <utility>
 
@@ -711,4 +712,111 @@ TEST_CASE("A transition kind survives a round trip through its name", "[render][
         REQUIRE(model::transitionDirectionFromString(model::toString(direction), back));
         CHECK(back == direction);
     }
+}
+
+TEST_CASE("A fade obeys its kind instead of always dissolving", "[render][transition]") {
+    // The bug, reported from the running app: the Type control appeared to do
+    // nothing. It worked across a cut and did nothing at the end of a run,
+    // because the one-sided branch ramped an opacity of its own and never
+    // asked what kind of transition this was. Every kind looked like a
+    // dissolve there, which made the control a lie wherever a span had one
+    // side empty -- and a span at the head or tail of a track always does.
+    Fixture f;
+    f.sequence().setSize(64, 16);
+    SolidFrameSource source{64, 16};
+    source.define(f.longMedia, render::Rgba{1.0F, 1.0F, 1.0F, 1.0F});
+    render::RenderGraph graph{source};
+
+    REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.v1), f.clip(0, 50, 500))));
+    REQUIRE(f.run(edit::makeAddCrossDissolve(f.project, f.on(f.v1), f.at(50), f.at(20))));
+    const model::Transition& fade = f.track(f.v1).transitions().front();
+    REQUIRE(fade.isFadeOut());
+    const model::TransitionId id = fade.id;
+    const auto range = fade.range;
+    const time::RationalTime middle =
+        range.start() + time::RationalTime{range.duration().frames() / 2, range.start().rate()};
+
+    const auto asKind = [&](model::TransitionKind kind) {
+        edit::TransitionSettings settings;
+        settings.kind = kind;
+        settings.direction = model::TransitionDirection::Right;
+        REQUIRE(f.run(edit::makeSetTransitionSettings(f.project, f.on(f.v1), id, settings)));
+    };
+
+    // A dissolve is the behaviour this branch always had: an even ramp, so
+    // both ends of the frame read the same part of the way through.
+    asKind(model::TransitionKind::CrossDissolve);
+    {
+        auto frame = graph.composite(f.sequence(), middle);
+        REQUIRE(frame);
+        const float left = frame->at(2, 8).a;
+        const float right = frame->at(61, 8).a;
+        INFO("dissolve fade: left " << left << " right " << right);
+        CHECK(left == Approx(right).margin(0.02F));
+        // Part way gone, rather than fully there or fully absent.
+        CHECK(left > 0.2F);
+        CHECK(left < 0.8F);
+    }
+
+    // A wipe uncovers the shot against black rather than blending it, so the
+    // two ends of the frame are nothing alike. This is what read as a dissolve
+    // before, and what the panel promised all along.
+    asKind(model::TransitionKind::Wipe);
+    {
+        auto frame = graph.composite(f.sequence(), middle);
+        REQUIRE(frame);
+        const float left = frame->at(2, 8).a;
+        const float right = frame->at(61, 8).a;
+        INFO("wipe fade: left " << left << " right " << right);
+        CHECK(std::fabs(left - right) > 0.5F);
+    }
+
+    // And a slide takes the shot off the frame rather than fading it, so what
+    // is left where the picture was is nothing at all.
+    asKind(model::TransitionKind::Slide);
+    {
+        auto frame = graph.composite(f.sequence(), middle);
+        REQUIRE(frame);
+        // Half a frame off to the left at the midpoint: the right-hand end
+        // still holds picture, the left-hand end has been vacated.
+        INFO("slide fade: left " << frame->at(2, 8).a << " right " << frame->at(61, 8).a);
+        CHECK(std::fabs(frame->at(2, 8).a - frame->at(61, 8).a) > 0.5F);
+    }
+}
+
+TEST_CASE("A fade in runs its kind the other way round", "[render][transition]") {
+    // A fade out is a fade in played backwards, which is the whole reason one
+    // shape serves both. If the direction of travel were not reversed, a fade
+    // in would end with the shot half uncovered.
+    Fixture f;
+    f.sequence().setSize(64, 16);
+    SolidFrameSource source{64, 16};
+    source.define(f.longMedia, render::Rgba{1.0F, 1.0F, 1.0F, 1.0F});
+    render::RenderGraph graph{source};
+
+    REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.v1), f.clip(0, 50, 500))));
+    REQUIRE(f.run(edit::makeAddCrossDissolve(f.project, f.on(f.v1), f.at(0), f.at(20))));
+    const model::Transition& fade = f.track(f.v1).transitions().front();
+    REQUIRE(fade.isFadeIn());
+
+    edit::TransitionSettings settings;
+    settings.kind = model::TransitionKind::Wipe;
+    settings.direction = model::TransitionDirection::Right;
+    REQUIRE(f.run(edit::makeSetTransitionSettings(f.project, f.on(f.v1), fade.id, settings)));
+
+    const auto range = f.track(f.v1).transitions().front().range;
+    // At the end of the span the shot is fully there, whatever the kind: a
+    // transition that did not finish where its clip is would be a jump.
+    auto arrived = graph.composite(f.sequence(), range.endExclusive());
+    REQUIRE(arrived);
+    CHECK(arrived->at(2, 8).a == Approx(1.0F).margin(0.02F));
+    CHECK(arrived->at(61, 8).a == Approx(1.0F).margin(0.02F));
+
+    // And part way through it is uncovering rather than blending.
+    const time::RationalTime middle =
+        range.start() + time::RationalTime{range.duration().frames() / 2, range.start().rate()};
+    auto part = graph.composite(f.sequence(), middle);
+    REQUIRE(part);
+    INFO("wipe fade in: left " << part->at(2, 8).a << " right " << part->at(61, 8).a);
+    CHECK(std::fabs(part->at(2, 8).a - part->at(61, 8).a) > 0.5F);
 }
