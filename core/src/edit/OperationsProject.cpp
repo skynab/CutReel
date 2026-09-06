@@ -101,6 +101,54 @@ private:
     model::MediaRef media_;
 };
 
+class RemoveMediaCommand final : public ProjectCommand {
+public:
+    RemoveMediaCommand(model::MediaRefId media, std::string description)
+        : ProjectCommand{std::move(description)}, media_{media} {}
+
+protected:
+    void mutate(Project& project) override {
+        // Every sequence, not just the open one: a file removed from the bin is
+        // removed from the project, and a clip of it left in a sequence nobody
+        // happens to be looking at is the copy that surfaces at export.
+        //
+        // By id rather than by reference, because the project deliberately
+        // hands out no mutable list of sequences -- editing one goes through a
+        // command, which is what this is.
+        std::vector<model::SequenceId> ids;
+        ids.reserve(project.sequences().size());
+        for (const Sequence& sequence : project.sequences()) {
+            ids.push_back(sequence.id());
+        }
+
+        for (const model::SequenceId id : ids) {
+            Sequence& sequence = *project.findSequence(id);
+            for (const model::TrackKind kind : {model::TrackKind::Video, model::TrackKind::Audio}) {
+                for (Track& track : sequence.tracksMutable(kind)) {
+                    std::vector<Clip> kept;
+                    kept.reserve(track.clips().size());
+                    for (const Clip& clip : track.clips()) {
+                        if (clip.source != media_) {
+                            kept.push_back(clip);
+                        }
+                    }
+                    if (kept.size() != track.clips().size()) {
+                        track.setClips(std::move(kept));
+                    }
+                }
+            }
+            // A fade on a clip that has just gone is a fade over nothing. The
+            // sequence commands get this from LambdaCommand; this one is a
+            // project command and has to say so itself.
+            detail::dropOrphanTransitions(sequence);
+        }
+        static_cast<void>(project.removeMedia(media_));
+    }
+
+private:
+    model::MediaRefId media_;
+};
+
 }  // namespace
 
 Result<CommandPtr> makeImportMedia(Project& project, model::MediaRef media) {
@@ -115,6 +163,31 @@ Result<CommandPtr> makeImportMedia(Project& project, model::MediaRef media) {
     }
     const std::string name = media.name.empty() ? media.path : media.name;
     return CommandPtr{std::make_unique<ImportMediaCommand>(std::move(media), "Import " + name)};
+}
+
+int clipsUsingMedia(const Project& project, model::MediaRefId media) {
+    int count = 0;
+    for (const Sequence& sequence : project.sequences()) {
+        for (const auto* list : {&sequence.videoTracks(), &sequence.audioTracks()}) {
+            for (const Track& track : *list) {
+                for (const Clip& clip : track.clips()) {
+                    if (clip.source == media) {
+                        ++count;
+                    }
+                }
+            }
+        }
+    }
+    return count;
+}
+
+Result<CommandPtr> makeRemoveMedia(Project& project, model::MediaRefId mediaId) {
+    const model::MediaRef* media = project.findMedia(mediaId);
+    if (media == nullptr) {
+        return Error{ErrorCode::NotFound, "no such media in this project"};
+    }
+    const std::string name = media->name.empty() ? media->path : media->name;
+    return CommandPtr{std::make_unique<RemoveMediaCommand>(mediaId, "Remove " + name)};
 }
 
 Result<CommandPtr> makeSetMediaNotes(Project& project, model::MediaRefId mediaId,

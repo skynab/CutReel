@@ -604,6 +604,174 @@ TEST_CASE("Cross dissolves need a cut and handles either side", "[edit][transiti
     }
 }
 
+TEST_CASE("Deleting a clip takes its transitions with it", "[edit][transition]") {
+    // The reported bug was on sound -- an audio clip with a fade on it, deleted,
+    // and the fade left behind on the track. It is not about sound: a span
+    // straddles a cut rather than sitting on a clip, so nothing about removing
+    // one of its clips makes it go away by itself, and what is left still draws
+    // across the cut and still asks the renderer for frames of something that
+    // has gone.
+    Fixture f;
+    REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.a1), f.clip(0, 50, 500))));
+    REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.a1), f.clip(50, 50, 600))));
+    const model::ClipId first = f.track(f.a1).clips()[0].id;
+    const model::ClipId second = f.track(f.a1).clips()[1].id;
+
+    SECTION("a crossfade goes when either of its clips does") {
+        REQUIRE(f.run(edit::makeAddCrossDissolve(f.project, f.on(f.a1), f.at(50), f.at(10))));
+        REQUIRE(f.track(f.a1).transitions().size() == 1);
+
+        REQUIRE(f.run(edit::makeLift(f.project, f.on(f.a1), second)));
+        CHECK(f.track(f.a1).transitions().empty());
+
+        SECTION("and undo puts both back") {
+            REQUIRE(f.stack.undo(f.project));
+            CHECK(f.track(f.a1).clips().size() == 2);
+            CHECK(f.track(f.a1).transitions().size() == 1);
+        }
+    }
+
+    SECTION("a fade out goes with the one clip it is on") {
+        // Against the end of the second clip, which nothing follows: a fade
+        // rather than a crossfade, and the shape the report described.
+        REQUIRE(f.run(edit::makeAddCrossDissolve(f.project, f.on(f.a1), f.at(100), f.at(10))));
+        REQUIRE(f.track(f.a1).transitions().size() == 1);
+        REQUIRE(f.track(f.a1).transitions().front().isFadeOut());
+
+        REQUIRE(f.run(edit::makeExtract(f.project, f.on(f.a1), second)));
+        CHECK(f.track(f.a1).transitions().empty());
+    }
+
+    SECTION("and a clip cut away by something dropped on top takes its fade too") {
+        // No delete at all: an overwrite that lands over the whole of the first
+        // clip removes it, which is the same hole by another route.
+        REQUIRE(f.run(edit::makeAddCrossDissolve(f.project, f.on(f.a1), f.at(0), f.at(10))));
+        REQUIRE(f.track(f.a1).transitions().size() == 1);
+        REQUIRE(f.track(f.a1).transitions().front().isFadeIn());
+
+        REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.a1), f.clip(0, 50, 700))));
+        CHECK(f.track(f.a1).transitions().empty());
+    }
+
+    SECTION("but a span whose clips are both still there is left alone") {
+        REQUIRE(f.run(edit::makeAddCrossDissolve(f.project, f.on(f.a1), f.at(50), f.at(10))));
+        // An edit somewhere else entirely on the same track.
+        REQUIRE(f.run(edit::makeSetClipEnabled(f.project, f.on(f.a1), first, false)));
+        CHECK(f.track(f.a1).transitions().size() == 1);
+    }
+}
+
+TEST_CASE("Removing media takes the clips that read it", "[edit][media]") {
+    // What the bin's "Remove from project" is underneath. The clips have to go
+    // with the file: a clip resolves to a file through its media reference, and
+    // one left pointing at a reference that is gone draws nothing, decodes
+    // nothing, and cannot even be relinked -- the thing a relink repairs is the
+    // reference that was just deleted.
+    Fixture f;
+    REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.v1), f.clip(0, 50, 500, f.longMedia))));
+    REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.v1), f.clip(50, 50, 0, f.shortMedia))));
+    REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.v2), f.clip(0, 50, 0, f.shortMedia))));
+
+    CHECK(edit::clipsUsingMedia(f.project, f.shortMedia) == 2);
+    CHECK(edit::clipsUsingMedia(f.project, f.longMedia) == 1);
+
+    // A subclip somebody marked on it, which is a note about a file rather than
+    // a second file, and means nothing once the file has gone.
+    model::Subclip note;
+    note.id = f.project.ids().next<model::SubclipTag>();
+    note.source = f.shortMedia;
+    note.range = f.range(0, 20);
+    note.name = "the good bit";
+    f.project.addSubclip(note);
+
+    REQUIRE(f.run(edit::makeRemoveMedia(f.project, f.shortMedia)));
+
+    CHECK(f.project.findMedia(f.shortMedia) == nullptr);
+    CHECK(f.project.subclips().empty());
+    // The clip that read something else is untouched, and the gap the removed
+    // one left is still open: this is a lift, not an extract.
+    CHECK(f.layout(f.v1) == "0-50@500");
+    CHECK(f.track(f.v2).clips().empty());
+
+    SECTION("and one undo puts all of it back") {
+        REQUIRE(f.stack.undo(f.project));
+        CHECK(f.project.findMedia(f.shortMedia) != nullptr);
+        CHECK(f.project.subclips().size() == 1);
+        CHECK(edit::clipsUsingMedia(f.project, f.shortMedia) == 2);
+    }
+
+    SECTION("removing something that is not there is refused") {
+        CHECK_FALSE(f.run(edit::makeRemoveMedia(f.project, f.shortMedia)));
+    }
+}
+
+TEST_CASE("Trimming a selection moves every edge in it", "[edit][multiselect][trim]") {
+    // Dragging the edge of one of four selected clips is a request about the
+    // four. Each is measured against the track as it stands rather than against
+    // what the clip before it in the list did, so the set moves by one delta.
+    Fixture f;
+    REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.v1), f.clip(0, 50, 500))));
+    REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.v1), f.clip(100, 50, 600))));
+    REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.v2), f.clip(0, 50, 700))));
+    const model::ClipId a = f.track(f.v1).clips()[0].id;
+    const model::ClipId b = f.track(f.v1).clips()[1].id;
+    const model::ClipId c = f.track(f.v2).clips()[0].id;
+
+    const std::vector<edit::ClipRef> all{{f.v1, a}, {f.v1, b}, {f.v2, c}};
+
+    SECTION("every out point moves by the same amount") {
+        REQUIRE(
+            f.run(edit::makeTrimClips(f.project, f.sequenceId, all, edit::Edge::Out, f.at(-10))));
+        CHECK(f.layout(f.v1) == "0-40@500 100-140@600");
+        CHECK(f.layout(f.v2) == "0-40@700");
+
+        SECTION("and one undo takes the whole set back") {
+            REQUIRE(f.stack.undo(f.project));
+            CHECK(f.layout(f.v1) == "0-50@500 100-150@600");
+            CHECK(f.layout(f.v2) == "0-50@700");
+        }
+    }
+
+    SECTION("in points too") {
+        REQUIRE(f.run(edit::makeTrimClips(f.project, f.sequenceId, all, edit::Edge::In, f.at(10))));
+        CHECK(f.layout(f.v1) == "10-50@510 110-150@610");
+        CHECK(f.layout(f.v2) == "10-50@710");
+    }
+
+    SECTION("a clip that cannot take it is left alone rather than blocking the rest") {
+        // The second clip's out point cannot move 60 frames right without
+        // running into nothing -- there is nothing after it -- but it *can* run
+        // out of source: give it a source that ends where it does.
+        Fixture g;
+        REQUIRE(g.run(edit::makeOverwrite(g.project, g.on(g.v1), g.clip(0, 50, 500))));
+        model::Clip pinned = g.clip(100, Fixture::kShortMediaFrames, 0, g.shortMedia);
+        REQUIRE(g.run(edit::makeOverwrite(g.project, g.on(g.v1), pinned)));
+        const std::vector<edit::ClipRef> pair{{g.v1, g.track(g.v1).clips()[0].id},
+                                              {g.v1, g.track(g.v1).clips()[1].id}};
+
+        REQUIRE(
+            g.run(edit::makeTrimClips(g.project, g.sequenceId, pair, edit::Edge::Out, g.at(10))));
+        // The first grew; the second stayed, because it has no source past its
+        // out point to grow into.
+        CHECK(g.layout(g.v1) == "0-60@500 100-200@0");
+    }
+
+    SECTION("a set where nothing can move is refused, so the caller can say so") {
+        Fixture g;
+        model::Clip whole = g.clip(0, Fixture::kShortMediaFrames, 0, g.shortMedia);
+        REQUIRE(g.run(edit::makeOverwrite(g.project, g.on(g.v1), whole)));
+        const std::vector<edit::ClipRef> one{{g.v1, g.track(g.v1).clips()[0].id}};
+        CHECK_FALSE(
+            g.run(edit::makeTrimClips(g.project, g.sequenceId, one, edit::Edge::Out, g.at(10))));
+        CHECK(g.lastError.find("none of those clips") != std::string::npos);
+    }
+
+    SECTION("an empty selection is refused") {
+        CHECK_FALSE(
+            f.run(edit::makeTrimClips(f.project, f.sequenceId, {}, edit::Edge::Out, f.at(-10))));
+    }
+}
+
 TEST_CASE("A dissolve can be stretched by its edges", "[edit][transition]") {
     // What dragging a dissolve's edge on the timeline calls. Re-adding one
     // instead would recentre the span on the cut, which is exactly what a drag

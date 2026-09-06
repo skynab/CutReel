@@ -48,11 +48,27 @@ public:
           body_{std::move(body)} {}
 
 protected:
-    void mutate(Sequence& sequence) override { body_(sequence); }
+    void mutate(Sequence& sequence) override;
 
 private:
     Body body_;
 };
+
+/// Drop every transition on the sequence whose clips have gone.
+///
+/// Run after *every* edit rather than at the end of the ones that remove
+/// clips, and that is the whole point: a transition is a span between two
+/// clips, so it does not go away when one of them does, and a dissolve or a
+/// fade left over a clip that has been deleted still draws across the cut and
+/// still asks for frames of something that is not there. Deleting a sound clip
+/// with a fade on it left exactly that.
+///
+/// Eleven operations can remove a clip -- directly, or through `clearRange`
+/// cutting a hole for something being dropped on top -- and remembering this in
+/// each of them is remembering it in eleven places. Here it is remembered in
+/// one. It costs a null check per track for the tracks that carry no spans,
+/// which is nearly all of them.
+void dropOrphanTransitions(Sequence& sequence);
 
 /// A command whose edit is a lambda; see the class above.
 CommandPtr makeCommand(model::SequenceId sequence, std::string description, std::string mergeKey,

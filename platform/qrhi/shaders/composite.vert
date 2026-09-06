@@ -51,6 +51,7 @@ layout(std140, binding = 0) uniform Block {
     vec4 vignette;
     vec4 wipeBox;
     vec4 wipeEdge;
+    vec4 crop;
     vec4 chroma;
     vec4 coefficients;
     // The source's primaries brought into the working space's, as three rows

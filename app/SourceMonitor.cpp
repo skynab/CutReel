@@ -183,6 +183,23 @@ void SourceMonitor::markOut() {
     refresh();
 }
 
+void SourceMonitor::clear() {
+    // An empty sequence rather than a null one: the monitor is still pointed at
+    // it, and a dangling pointer would be a crash where an empty viewer is the
+    // answer. `refresh` already knows what to say when there is no media.
+    sequence_ = model::Sequence{model::SequenceId{1}, "", time::rates::fps25};
+    sequence_.addTrack(model::TrackId{1}, model::TrackKind::Video, "Source");
+    mediaId_ = model::MediaRefId{};
+    in_.reset();
+    out_.reset();
+    position_ = time::RationalTime{0, sequence_.frameRate()};
+    scrubber_->setRange(0, 0);
+    scrubber_->setValue(0);
+    monitor_->setSource(&sequence_, provider_);
+    monitor_->setPosition(position_);
+    refresh();
+}
+
 void SourceMonitor::clearMarks() {
     in_.reset();
     out_.reset();

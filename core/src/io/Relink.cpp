@@ -20,7 +20,23 @@ namespace {
 constexpr int kMaxDepth = 12;
 constexpr int kMaxExamined = 200000;
 
+/// Whether the file this reference names is not there.
+bool isMissing(const model::MediaRef& media) {
+    std::error_code code;
+    return media.path.empty() || !std::filesystem::exists(media.path, code);
+}
+
 }  // namespace
+
+std::vector<model::MediaRefId> missingMedia(const model::Project& project) {
+    std::vector<model::MediaRefId> gone;
+    for (const model::MediaRef& media : project.media()) {
+        if (isMissing(media)) {
+            gone.push_back(media.id);
+        }
+    }
+    return gone;
+}
 
 Result<RelinkReport> findRelinks(const model::Project& project, const std::string& root) {
     std::error_code code;
@@ -31,7 +47,10 @@ Result<RelinkReport> findRelinks(const model::Project& project, const std::strin
     // What is actually missing, keyed by the filename to look for.
     std::multimap<std::string, const model::MediaRef*> wanted;
     for (const model::MediaRef& media : project.media()) {
-        if (media.path.empty() || std::filesystem::exists(media.path, code)) {
+        // A reference with no path at all is missing, but there is no filename
+        // to go looking for -- so it is left out of the search rather than
+        // added to it under an empty key.
+        if (!isMissing(media) || media.path.empty()) {
             continue;
         }
         wanted.emplace(std::filesystem::path{media.path}.filename().string(), &media);

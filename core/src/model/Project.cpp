@@ -1,5 +1,6 @@
 #include "zaro/core/model/Project.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <set>
 #include <vector>
@@ -37,6 +38,17 @@ MediaRefId Project::addMedia(MediaRef ref) {
     const MediaRefId id = ref.id;
     media_.push_back(std::move(ref));
     return id;
+}
+
+bool Project::removeMedia(MediaRefId id) {
+    const auto gone = std::find_if(media_.begin(), media_.end(),
+                                   [id](const MediaRef& ref) { return ref.id == id; });
+    if (gone == media_.end()) {
+        return false;
+    }
+    media_.erase(gone);
+    std::erase_if(subclips_, [id](const Subclip& subclip) { return subclip.source == id; });
+    return true;
 }
 
 Project newProject(const std::string& sequenceName) {

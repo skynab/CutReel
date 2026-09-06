@@ -424,6 +424,15 @@ void PreviewWindow::wireWorkspacePanels() {
             [this] { placeFromSource(edit::PlaceMode::Overwrite); });
     connect(bin_, &app::ProjectBin::edited, this, [this] {
         bars_.scrubber->setRange(0, static_cast<int>(liveSequence()->duration().frames()));
+        // A file can now leave the project while the source viewer is showing
+        // it. Left up, it is a monitor scrubbing through something the project
+        // no longer has -- and every edit offered under it, Insert and Over
+        // included, is refused by an operation that cannot find the media.
+        if (source_->media().isValid() &&
+            document_.project().findMedia(source_->media()) == nullptr) {
+            source_->clear();
+            setSourceShown(false);
+        }
         // Through `afterEdit`, like every other thing that changes the project.
         //
         // This redrew the panels and stopped there, so the one fact it did not
@@ -452,6 +461,10 @@ void PreviewWindow::wireWorkspacePanels() {
             app::warn(this, "Import", QString::fromStdString(reopened.error().toString()));
         }
         bin_->refresh();
+        // Quietly: somebody who has just chosen files in a dialog knows where
+        // they are, and the mark on the row is enough to say if one has gone
+        // since. The set has changed, so the marks have to be recomputed.
+        checkMissingMedia();
         updateTitle();
     });
 }
@@ -647,6 +660,14 @@ void PreviewWindow::startTimers() {
     autosaveTimer_->start();
     restoreWorkspace();
     refresh();
+
+    // The project handed to the constructor never went through `adopt`, which
+    // is where every *later* project is checked -- so a cut opened from the
+    // command line, or by double-clicking it, arrived with its footage missing
+    // and nothing said so. Once round the event loop rather than here, because
+    // the window has not been shown yet and a dialog parented to a window
+    // nobody can see is a program that appears to have hung on start-up.
+    QTimer::singleShot(0, this, [this] { checkMissingMedia(true); });
 }
 
 void PreviewWindow::exportDialog() {
@@ -849,6 +870,51 @@ void PreviewWindow::clearStabilisation() {
     updateTitle();
 }
 
+void PreviewWindow::checkMissingMedia(bool announce) {
+    const std::vector<model::MediaRefId> gone = io::missingMedia(document_.project());
+    bin_->setMissingMedia(gone);
+    if (gone.empty() || !announce) {
+        return;
+    }
+
+    // A dialog rather than a line in the status bar, and only on the way in.
+    // Every clip of a file that is not there draws nothing, decodes nothing and
+    // exports nothing -- the timeline looks entirely normal and the picture is
+    // simply black, which is a puzzle rather than a fault until somebody is
+    // told what it is. The bin marks the rows; this is what points at them.
+    QString said = QString("%1 file%2 the project uses %3 not where it left %4:")
+                       .arg(gone.size())
+                       .arg(gone.size() == 1 ? "" : "s")
+                       .arg(gone.size() == 1 ? "is" : "are")
+                       .arg(gone.size() == 1 ? "it" : "them");
+    // A few names, not all of them: a project whose drive is unmounted is a
+    // list of every file in it, and a dialog nobody can read is a dialog
+    // nobody reads.
+    constexpr std::size_t kNamed = 6;
+    for (std::size_t i = 0; i < gone.size() && i < kNamed; ++i) {
+        const model::MediaRef* ref = document_.project().findMedia(gone[i]);
+        if (ref != nullptr) {
+            said += "\n    " + QString::fromStdString(ref->path);
+        }
+    }
+    if (gone.size() > kNamed) {
+        said += QString("\n    and %1 more").arg(gone.size() - kNamed);
+    }
+    if (app::isQuiet()) {
+        // Said, not asked. Quiet mode exists so a scripted run does not stop on
+        // a sentence, and this one would stop it on the way in -- before the
+        // window has finished opening, which is the worst place for it.
+        app::say(this, "Missing media", said);
+        return;
+    }
+    said += "\n\nThey are marked in the media pane. Look for them now?";
+    const auto answer = QMessageBox::question(this, "Missing media", said,
+                                              QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+    if (answer == QMessageBox::Yes) {
+        relinkDialog();
+    }
+}
+
 void PreviewWindow::relinkDialog() {
     const QString root = QFileDialog::getExistingDirectory(this, "Look for missing media in");
     if (root.isEmpty()) {
@@ -877,6 +943,9 @@ void PreviewWindow::relinkDialog() {
         // should look at before trusting the cut.
         said += QString("\n%1 matched by name only — check they are the right takes.").arg(byName);
     }
+    // Whatever was found is no longer missing, and whatever was not still is.
+    // Without this the bin keeps the marks it was given before the search.
+    checkMissingMedia();
     app::say(this, "Relink", said);
 }
 
@@ -1854,6 +1923,10 @@ void PreviewWindow::adopt(model::Project project, io::LoadedProject loaded, std:
     updateTitle();
     refresh();
     monitor_->update();
+    // Last, and announced: the panels are bound and the marks have somewhere
+    // to land. A project that opens onto a black monitor because its footage
+    // has moved should say so rather than leave it to be worked out.
+    checkMissingMedia(true);
 }
 
 bool PreviewWindow::save() {

@@ -445,12 +445,20 @@ void Hotkeys::fillKeyboard() {
     const Split chosen = split(keymap_.shortcutFor(selected_));
     QHash<QString, KeyboardMap::Binding> bindings;
     int bound = 0;
+    int offMap = 0;
     for (const ui::ActionInfo& action : ui::allActions()) {
         const Split where = split(keymap_.shortcutFor(action.id));
         if (where.key.isEmpty() || where.modifiers != held_) {
             continue;
         }
         ++bound;
+        if (!keyboard_->hasKey(where.key)) {
+            // Bound, and on a key this picture has no cap for. Counted apart so
+            // the tally under the map matches the caps somebody can actually
+            // see, and the difference is stated rather than quietly lost.
+            ++offMap;
+            continue;
+        }
         bindings.insert(where.key, KeyboardMap::Binding{text(action.label),
                                                         tintFor(action.category), text(action.id)});
     }
@@ -463,7 +471,11 @@ void Hotkeys::fillKeyboard() {
                              ? QStringLiteral("unmodified layer")
                              : QString::fromStdString(prefix.substr(0, prefix.size() - 1)) +
                                    QStringLiteral(" layer"));
-    boundLabel_->setText(QString::number(bound) + " bound on this layer");
+    QString tally = QString::number(bound) + " bound on this layer";
+    if (offMap > 0) {
+        tally += QString{", %1 on keys not drawn here"}.arg(offMap);
+    }
+    boundLabel_->setText(tally);
 }
 
 void Hotkeys::fillCategories() {

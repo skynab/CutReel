@@ -357,7 +357,14 @@ private:
     void followPlayhead();
 
     void scrubTo(int x);
-    void beginDrag(const ui::TimelineLayout::Hit& hit, int x, bool ripple);
+    /// Start whatever gesture a press on a clip means.
+    ///
+    /// `alt` is one modifier meaning two things, because it is grabbing two
+    /// different parts of the clip: on an edge it makes the trim a ripple
+    /// trim, and on the body it makes the drag a duplicate. Both are the
+    /// conventions people arrive with, and neither is reachable from the
+    /// other -- an edge is not a body.
+    void beginDrag(const ui::TimelineLayout::Hit& hit, int x, bool alt);
     /// Follow the pointer with the clip being dragged.
     ///
     /// `y` as well as `x`: a clip may be moved to another row of its own kind,
@@ -365,6 +372,16 @@ private:
     void updateDrag(int x, int y);
     /// Make the move the drag has been previewing, on the way up.
     void commitMove();
+    /// Leave the clips where they are and put copies of them where the drag
+    /// ended. What an Alt-drag does; see `duplicating_`.
+    void commitDuplicate();
+    /// Everything the gesture acts on: what is selected, plus anything linked
+    /// to any of it, with duplicates removed.
+    ///
+    /// A drag already carries a link group with it -- that is how sound
+    /// follows picture -- so a duplicate has to as well, or Alt-dragging a
+    /// take would leave a copy of the picture with no sound under it.
+    [[nodiscard]] std::vector<edit::ClipRef> selectionWithPartners() const;
     void updateTrim(int x);
     void finishDrag();
 
@@ -632,6 +649,13 @@ private:
     /// error the pointer never asked for.
     time::RationalTime trimAnchor_{};
     bool rippleTrim_{false};
+    /// Whether this drag leaves the clip behind and moves a copy.
+    ///
+    /// Decided at the press, from Alt, and read at the release: like the move
+    /// itself, nothing is committed on the way through. Held rather than
+    /// re-read from the modifiers on release, so letting go of Alt a moment
+    /// before the button does not turn a duplicate into a move.
+    bool duplicating_{false};
     /// Where a press landed, so a click and a drag can be told apart.
     QPoint pressAt_;
     QRect band_;

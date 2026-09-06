@@ -32,6 +32,18 @@ struct RelinkReport {
     int examined{0};
 };
 
+/// The project's media that is not where the project says it is.
+///
+/// Its own function, and cheap -- one `exists` per file -- because two
+/// different questions need the same answer and must not disagree about it:
+/// the alert shown when a project opens with files it cannot find, and the mark
+/// the bin puts on the rows that are the reason. `findRelinks` asks it too, so
+/// what is offered for relinking is exactly what was reported as broken.
+///
+/// A reference with no path at all counts as missing: it names no file, so
+/// there is nothing there to read.
+[[nodiscard]] std::vector<model::MediaRefId> missingMedia(const model::Project& project);
+
 /// Look for the project's missing media under a folder.
 ///
 /// **Missing only.** A file that is where the project says it is is not

@@ -233,6 +233,13 @@ Transform Clip::transformAt(const time::RationalTime& timelineTime) const {
     animated.anchorX = Curve::valueOr(animation.find(Param::AnchorX), seconds, transform.anchorX);
     animated.anchorY = Curve::valueOr(animation.find(Param::AnchorY), seconds, transform.anchorY);
     animated.opacity = Curve::valueOr(animation.find(Param::Opacity), seconds, transform.opacity);
+    animated.cropLeft =
+        Curve::valueOr(animation.find(Param::CropLeft), seconds, transform.cropLeft);
+    animated.cropRight =
+        Curve::valueOr(animation.find(Param::CropRight), seconds, transform.cropRight);
+    animated.cropTop = Curve::valueOr(animation.find(Param::CropTop), seconds, transform.cropTop);
+    animated.cropBottom =
+        Curve::valueOr(animation.find(Param::CropBottom), seconds, transform.cropBottom);
 
     // The stabiliser's answer, added on top rather than written into the
     // curves above: whatever somebody framed or animated stays theirs, and
@@ -263,6 +270,14 @@ double Clip::parameterValue(Param param) const {
             return transform.anchorY;
         case Param::Opacity:
             return transform.opacity;
+        case Param::CropLeft:
+            return transform.cropLeft;
+        case Param::CropRight:
+            return transform.cropRight;
+        case Param::CropTop:
+            return transform.cropTop;
+        case Param::CropBottom:
+            return transform.cropBottom;
         case Param::GainDb:
             return gainDb;
         case Param::Pan:
@@ -332,6 +347,18 @@ void Clip::setParameterValue(Param param, double value) {
             return;
         case Param::Opacity:
             transform.opacity = value;
+            return;
+        case Param::CropLeft:
+            transform.cropLeft = value;
+            return;
+        case Param::CropRight:
+            transform.cropRight = value;
+            return;
+        case Param::CropTop:
+            transform.cropTop = value;
+            return;
+        case Param::CropBottom:
+            transform.cropBottom = value;
             return;
         case Param::GainDb:
             gainDb = value;

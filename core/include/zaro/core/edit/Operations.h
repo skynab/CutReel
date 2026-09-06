@@ -176,6 +176,27 @@ struct PastedClip {
                                           model::ClipId clip, Edge edge,
                                           const time::RationalTime& delta);
 
+/// Move the same edge of several clips by the same amount, in one step.
+///
+/// **What dragging the edge of a multi-selection means.** Selecting four
+/// titles and pulling one of them longer is a request about the four, not about
+/// the one under the pointer -- and lengthening one of them was the answer that
+/// looked most like a bug: the selection stayed lit, and three of the four
+/// ignored the drag.
+///
+/// **A clip that cannot take the trim is left alone rather than blocking it.**
+/// The same rule `makeTrim` already applies to linked partners, for the same
+/// reason: one shot in a set that has run out of source should not stop the
+/// other five from moving, and refusing the whole gesture would make a
+/// selection something that quietly stops working as soon as one member of it
+/// reaches its end. The set is refused only when *none* of it can move, which
+/// is the case where doing nothing needs saying.
+///
+/// Linked partners follow, exactly as they do for a single trim.
+[[nodiscard]] Result<CommandPtr> makeTrimClips(model::Project& project, model::SequenceId sequence,
+                                               const std::vector<ClipRef>& clips, Edge edge,
+                                               const time::RationalTime& delta);
+
 /// Move one edge and shift everything after it by the same amount, so no gap
 /// opens and the rest of the cut keeps its relative timing.
 [[nodiscard]] Result<CommandPtr> makeRippleTrim(model::Project& project, const EditTarget& target,
@@ -742,6 +763,31 @@ struct TransitionSettings {
 /// file system and belongs on whichever thread the caller chooses rather than
 /// inside a command.
 [[nodiscard]] Result<CommandPtr> makeImportMedia(model::Project& project, model::MediaRef media);
+
+/// How many clips, across every sequence, read this file.
+///
+/// Asked before removing it, so the question "will this change the cut?" is
+/// answered by the model rather than guessed at by a panel. Counted rather than
+/// answered yes or no, because the number is what a warning wants to say.
+[[nodiscard]] int clipsUsingMedia(const model::Project& project, model::MediaRefId media);
+
+/// Take a file out of the project, and with it every clip that reads it.
+///
+/// **The clips go too.** A media reference is what a clip resolves to a file
+/// through; leaving the clips behind would leave a timeline of blocks that draw
+/// nothing, decode nothing and cannot be relinked, because the thing a relink
+/// repairs is the reference that was just deleted. Refusing instead -- "this
+/// file is in use" -- would mean the only way to remove a file somebody
+/// imported by accident is to hunt down every clip of it first, which is the
+/// job this is supposed to do.
+///
+/// So the caller is expected to ask `clipsUsingMedia` first and say what will
+/// happen. One undo step puts all of it back.
+///
+/// Gaps are left where the clips were, rather than closed: this is a lift, not
+/// an extract. Closing them would move every shot after each one, on every
+/// track, and silently reshape a cut in exchange for tidiness nobody asked for.
+[[nodiscard]] Result<CommandPtr> makeRemoveMedia(model::Project& project, model::MediaRefId media);
 
 // --- Structure --------------------------------------------------------------
 

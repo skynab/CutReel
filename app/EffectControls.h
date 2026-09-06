@@ -431,6 +431,13 @@ private:
     QDoubleSpinBox* rotation_{nullptr};
     QDoubleSpinBox* anchorX_{nullptr};
     QDoubleSpinBox* anchorY_{nullptr};
+    /// How much of each edge of the source is cut away, as a percentage of
+    /// that side. Four fields rather than a rectangle, because that is how
+    /// somebody works: one edge at a time, against what is on screen.
+    QDoubleSpinBox* cropLeft_{nullptr};
+    QDoubleSpinBox* cropRight_{nullptr};
+    QDoubleSpinBox* cropTop_{nullptr};
+    QDoubleSpinBox* cropBottom_{nullptr};
     QDoubleSpinBox* opacity_{nullptr};
     QComboBox* blend_{nullptr};
     QDoubleSpinBox* gain_{nullptr};

@@ -56,6 +56,10 @@ json encode(const model::Transform& transform) {
     put("anchorX", transform.anchorX, identity.anchorX);
     put("anchorY", transform.anchorY, identity.anchorY);
     put("opacity", transform.opacity, identity.opacity);
+    put("cropLeft", transform.cropLeft, identity.cropLeft);
+    put("cropRight", transform.cropRight, identity.cropRight);
+    put("cropTop", transform.cropTop, identity.cropTop);
+    put("cropBottom", transform.cropBottom, identity.cropBottom);
     return out;
 }
 

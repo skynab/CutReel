@@ -2,6 +2,7 @@
 
 #include <QFile>
 #include <QImage>
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -43,8 +44,10 @@ constexpr std::array<float, 12> kQuad{
 // and two for the Y'CbCr conversion -- which only composite_yuv.frag reads, but
 // every shader declares, because OpenGL links the stages into one program and
 // will not have two `ubuf`s that disagree. See the note in composite.frag.
-constexpr int kUniformBytes =
-    64 + 16 + 16 + 16 + (5 * 16) + 16 + 32 + (4 * 16) + 16 + (3 * 16) + 16 + 32 + 32 + 48;
+constexpr int kUniformBytes = 64 + 16 + 16 + 16 + (5 * 16) + 16 + 32 + (4 * 16) + 16 + (3 * 16) +
+                              16 + 32 +
+                              // The crop rectangle, in texture coordinates.
+                              16 + 32 + 48;
 constexpr std::size_t kUniformFloats = static_cast<std::size_t>(kUniformBytes) / sizeof(float);
 
 /// Write a grade into the composite shader's uniform block.
@@ -320,6 +323,24 @@ void writeWipe(std::array<float, kUniformFloats>& uniformData, const model::Mask
     uniformData[101] = static_cast<float>(wipe->feather);
     uniformData[102] = wipe->shape == model::MaskShape::Ellipse ? 2.0F : 1.0F;
     uniformData[103] = wipe->inverted ? 1.0F : 0.0F;
+}
+
+/// The part of the source a crop keeps, as texture coordinates: left, right,
+/// top, bottom.
+///
+/// Written on every path that binds these shaders, an uncropped clip included,
+/// for the reason the gamut rows are written even when they are the identity: a
+/// zero-filled block is the rectangle from 0 to 0, and the fragment shader
+/// discards everything outside the rectangle -- so the failure would not be a
+/// missing crop, it would be a picture that never appears.
+void writeCrop(std::array<float, kUniformFloats>& uniformData, const model::Transform& transform) {
+    const auto fraction = [](double percent) {
+        return static_cast<float>(std::clamp(percent, 0.0, 100.0) / 100.0);
+    };
+    uniformData[104] = fraction(transform.cropLeft);
+    uniformData[105] = 1.0F - fraction(transform.cropRight);
+    uniformData[106] = fraction(transform.cropTop);
+    uniformData[107] = 1.0F - fraction(transform.cropBottom);
 }
 
 void writeMask(std::array<float, kUniformFloats>& uniformData, const model::Mask* mask,
@@ -895,6 +916,7 @@ Status GpuCompositor::draw(const render::RgbaImage& source, const model::Transfo
     writeMask(uniformData, mask, state.size);
     writeVignette(uniformData, vignette);
     writeWipe(uniformData, wipe);
+    writeCrop(uniformData, transform);
     writeKeyer(uniformData, keyer);
     writeDisplay(uniformData, 1.0F);
     batch->updateDynamicBuffer(uniforms.get(), 0, kUniformBytes, uniformData.data());
@@ -1275,6 +1297,10 @@ Status GpuCompositor::drawSource(const media::VideoFrame& source, const model::T
         convertData[static_cast<std::size_t>(i)] = identityData[i];
     }
     convertData[16] = 1.0F;  // opacity is applied when compositing, not here
+    // The whole plane. This pass turns Y'CbCr into RGBA at 1:1; the crop is
+    // applied by the composite draw that follows, which is where the geometry
+    // is. Cropping here as well would crop twice.
+    writeCrop(convertData, model::Transform{});
     convertData[17] = parameters.sampleScale;
     convertData[18] = parameters.lumaOffset;
     convertData[19] = parameters.lumaScale;
@@ -1388,6 +1414,7 @@ Status GpuCompositor::drawSource(const media::VideoFrame& source, const model::T
     writeMask(uniformData, mask, state.size);
     writeVignette(uniformData, vignette);
     writeWipe(uniformData, wipe);
+    writeCrop(uniformData, transform);
     writeKeyer(uniformData, keyer);
     writeDisplay(uniformData, 1.0F);
 
@@ -1522,6 +1549,9 @@ Status GpuCompositor::presentInto(::QRhiCommandBuffer* commandBuffer, ::QRhiRend
     // The frame being presented already has every clip's vignette in it.
     writeVignette(uniformData, nullptr);
     writeWipe(uniformData, nullptr);
+    // Nor cropping: what is presented is the finished frame, and every clip in
+    // it was already cropped on its way in.
+    writeCrop(uniformData, model::Transform{});
     // Nor keying: the frame being presented has already had every clip's key
     // applied to it, and a second one would cut holes in the composite.
     writeKeyer(uniformData, nullptr);

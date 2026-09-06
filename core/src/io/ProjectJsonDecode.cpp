@@ -74,6 +74,10 @@ model::Transform decodeTransform(const json& node) {
     out.anchorX = node.value("anchorX", out.anchorX);
     out.anchorY = node.value("anchorY", out.anchorY);
     out.opacity = node.value("opacity", out.opacity);
+    out.cropLeft = node.value("cropLeft", out.cropLeft);
+    out.cropRight = node.value("cropRight", out.cropRight);
+    out.cropTop = node.value("cropTop", out.cropTop);
+    out.cropBottom = node.value("cropBottom", out.cropBottom);
     return out;
 }
 

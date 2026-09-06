@@ -180,6 +180,80 @@ Result<CommandPtr> makeTrim(Project& project, const EditTarget& target, ClipId c
         });
 }
 
+Result<CommandPtr> makeTrimClips(Project& project, model::SequenceId sequenceId,
+                                 const std::vector<ClipRef>& clips, Edge edge,
+                                 const RationalTime& delta) {
+    Sequence* sequence = project.findSequence(sequenceId);
+    if (sequence == nullptr) {
+        return Error{ErrorCode::NotFound, "no such sequence"};
+    }
+    if (clips.empty()) {
+        return Error{ErrorCode::InvalidData, "nothing selected to trim"};
+    }
+    const RationalTime step = atRate(delta, sequence->frameRate());
+    if (step.isZero()) {
+        return Error{ErrorCode::InvalidData, "trim of zero frames"};
+    }
+
+    // Worked out here, against the sequence as it stands, and applied whole.
+    // Each clip is measured against the *unedited* track on purpose: the whole
+    // set moves by one delta, so what matters is whether each clip can take
+    // that delta, not what the clip before it in the list did to its
+    // neighbours.
+    std::vector<std::pair<TrackId, Clip>> replacements;
+    std::vector<ClipRef> seen;
+    const auto alreadyPlanned = [&seen](TrackId track, ClipId clip) {
+        return std::any_of(seen.begin(), seen.end(), [&](const ClipRef& ref) {
+            return ref.track == track && ref.clip == clip;
+        });
+    };
+
+    for (const ClipRef& asked : clips) {
+        // Linked partners come along, the same as they do for one clip: sound
+        // stays with the picture it was trimmed against.
+        for (const auto& [trackId, clipId] : linkedGroup(*sequence, asked.track, asked.clip)) {
+            if (alreadyPlanned(trackId, clipId)) {
+                continue;
+            }
+            const Track* track = sequence->findTrack(trackId);
+            if (track == nullptr || track->isLocked()) {
+                continue;
+            }
+            const Clip* clip = track->find(clipId);
+            if (clip == nullptr) {
+                continue;
+            }
+            auto plan = planTrim(project, *sequence, *track, *clip, edge, step);
+            if (!plan) {
+                // Out of source, into a neighbour, or trimmed away to nothing.
+                // Left where it is; see the header.
+                continue;
+            }
+            seen.push_back(ClipRef{trackId, clipId});
+            replacements.emplace_back(trackId, std::move(plan->result));
+        }
+    }
+
+    if (replacements.empty()) {
+        return Error{ErrorCode::InvalidData, "none of those clips can take that trim"};
+    }
+
+    // One merge key for the set rather than one per clip, so a drag across
+    // twenty frames is one undo step for the whole selection. The edge is in
+    // it because trimming the head and then the tail are two decisions.
+    return makeCommand(sequenceId, edge == Edge::In ? "Trim in" : "Trim out",
+                       std::string{"trimclips:"} + (edge == Edge::In ? "in" : "out"),
+                       [replacements](Sequence& seq) {
+                           for (const auto& [trackId, replacement] : replacements) {
+                               Track* track = seq.findTrack(trackId);
+                               if (track == nullptr || track->find(replacement.id) == nullptr) {
+                                   continue;
+                               }
+                               track->replace(replacement.id, replacement);
+                           }
+                       });
+}
+
 Result<CommandPtr> makeRippleTrim(Project& project, const EditTarget& target, ClipId clipId,
                                   Edge edge, const RationalTime& delta, bool rippleAllTracks) {
     auto located = locate(project, target);

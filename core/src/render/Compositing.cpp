@@ -163,6 +163,25 @@ void drawTransformed(const RgbaImage& source, RgbaImage& destination, const Tran
         return;
     }
 
+    // The part of the source the crop keeps, in source pixels. Percentages of
+    // each side, so the same crop describes the same picture whether the
+    // original or a smaller proxy is being read -- see model::Transform.
+    //
+    // Tested against the sample point rather than applied to the image, because
+    // that is what the shader does: it discards fragments whose texture
+    // coordinate falls outside the same rectangle, and the two are compared
+    // frame for frame.
+    const double keepLeft = source.width() * std::clamp(transform.cropLeft, 0.0, 100.0) / 100.0;
+    const double keepRight =
+        source.width() * (1.0 - (std::clamp(transform.cropRight, 0.0, 100.0) / 100.0));
+    const double keepTop = source.height() * std::clamp(transform.cropTop, 0.0, 100.0) / 100.0;
+    const double keepBottom =
+        source.height() * (1.0 - (std::clamp(transform.cropBottom, 0.0, 100.0) / 100.0));
+    if (keepLeft >= keepRight || keepTop >= keepBottom) {
+        return;  // cropped away to nothing; there is no picture left to draw
+    }
+    const bool cropped = transform.isCropped();
+
     const double radians = transform.rotationDegrees * std::acos(-1.0) / 180.0;
     const double cosine = std::cos(radians);
     const double sine = std::sin(radians);
@@ -190,6 +209,11 @@ void drawTransformed(const RgbaImage& source, RgbaImage& destination, const Tran
 
             const double sourceX = unrotatedX * inverseScaleX + transform.anchorX + sourceCentreX;
             const double sourceY = unrotatedY * inverseScaleY + transform.anchorY + sourceCentreY;
+
+            if (cropped && (sourceX < keepLeft || sourceX >= keepRight || sourceY < keepTop ||
+                            sourceY >= keepBottom)) {
+                continue;  // outside the crop is transparent, like outside the source
+            }
 
             Rgba sample = source.sampleBilinear(static_cast<float>(sourceX - 0.5),
                                                 static_cast<float>(sourceY - 0.5));

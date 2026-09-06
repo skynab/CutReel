@@ -74,6 +74,24 @@ public:
     /// How many media references the project holds, for the status bar.
     [[nodiscard]] int count() const;
 
+    /// Which files are not where the project says they are, so the rows that
+    /// are the reason can say so.
+    ///
+    /// Handed in rather than worked out here, and that is the point: answering
+    /// it means a `stat` per file, and this pane is rebuilt after edits and
+    /// imports. On a card that has been ejected or a share that has gone away,
+    /// a filesystem call in a redraw is a window that stops responding. The
+    /// window asks the question at the moments when the answer can have
+    /// changed -- opening a project, importing, relinking -- and tells the pane.
+    void setMissingMedia(const std::vector<model::MediaRefId>& media);
+
+    /// Take the selected file out of the project, or the selected subclip off
+    /// its file. Public because Delete and the menu are the same action.
+    ///
+    /// Says what removing a file in use would do to the cut, and asks, before
+    /// doing it. Nothing happens if nothing is picked.
+    void removeSelected();
+
     /// The line along the bottom of the pane: how many files, how much they
     /// weigh, and where the proxies stand. Public so the self-test can read it
     /// without scraping a label.
@@ -179,6 +197,10 @@ private:
     /// The outline chip: only what the cut actually uses.
     bool usedOnly_{false};
     bool compact_{false};
+    /// The files the window has told us are not there. Held by raw id because
+    /// that is what a row carries, and because the set is compared against a
+    /// row's id while the rows are being built.
+    QSet<qulonglong> missing_;
     /// Files are hovering over the pane, so it says it will take them.
     bool dropHover_{false};
     /// The border drawn over the list while they hover.

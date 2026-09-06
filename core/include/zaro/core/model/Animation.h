@@ -133,6 +133,13 @@ enum class Param : std::uint8_t {
     AnchorX,
     AnchorY,
     Opacity,
+    /// How much of each edge of the source is cut away, as a percentage of that
+    /// side. Animatable like every other piece of geometry: a crop that opens
+    /// out is a reveal, and one that closes is a wipe somebody drew by hand.
+    CropLeft,
+    CropRight,
+    CropTop,
+    CropBottom,
     GainDb,
     Pan,
     Temperature,

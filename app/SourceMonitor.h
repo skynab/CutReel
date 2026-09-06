@@ -53,6 +53,14 @@ public:
     /// in point useful.
     [[nodiscard]] std::optional<time::TimeRange> markedRange() const;
 
+    /// Show nothing, because there is nothing to show.
+    ///
+    /// Needed since a file can be removed from the project while it is open
+    /// here: what would otherwise be left is a viewer scrubbing through media
+    /// the project no longer has, offering an Insert that every operation
+    /// underneath it will refuse.
+    void clear();
+
     void markIn();
     void markOut();
     void clearMarks();

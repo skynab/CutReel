@@ -16,6 +16,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QMargins>
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
@@ -62,6 +63,26 @@ int widthForRange(const QDoubleSpinBox* spin, double minimum, double maximum, in
 /// What a value field needs around its text once the steppers are gone: the
 /// frame, and enough air that a digit does not touch it.
 constexpr int kFieldPad = 16;
+
+/// How the panel is spaced vertically. See `assemblePanel`, which applies all
+/// three: between the rows of a form, between the groups, and inside a group
+/// box above the first row and below the last.
+///
+/// Tighter than the style's defaults, and only here. A row in this panel is a
+/// label, two small buttons, a slider and a number -- it reads as one line, and
+/// the gap between two of them only has to say they are two. Six pixels of it,
+/// forty times down a column, is a group and a half of somebody's screen.
+constexpr int kRowGap = 3;
+constexpr int kGroupGap = 4;
+constexpr int kGroupPadTop = 6;
+constexpr int kGroupPadBottom = 4;
+/// What the stopwatch and keyframe diamonds carry around their glyph, and the
+/// height a value field is given inside its border. Part of the same decision:
+/// between them these two are the tallest thing in a row, so they are what a
+/// row's height actually is -- the label, the slider and the gap all fit
+/// inside. See `addRow` and `assemblePanel`.
+constexpr int kDiamondPad = 4;
+constexpr int kFieldHeight = 18;
 
 /// Which of the panel's groups a kind of clip has anything to say through.
 ///
@@ -152,11 +173,17 @@ struct GroupSet {
     return set;
 }
 
-/// The four rows an adjustment layer does not have. See `GroupSet::placement`.
+/// The rows an adjustment layer does not have. See `GroupSet::placement`.
+///
+/// Crop is among them for the same reason position is: an adjustment layer has
+/// no picture of its own, so there is nothing of it to cut the edges off. What
+/// it would crop is the correction, and limiting a correction to part of the
+/// frame is what its mask is for.
 constexpr model::Param kPlacementParams[] = {
     model::Param::PositionX, model::Param::PositionY,       model::Param::ScaleX,
     model::Param::ScaleY,    model::Param::RotationDegrees, model::Param::AnchorX,
-    model::Param::AnchorY,
+    model::Param::AnchorY,   model::Param::CropLeft,        model::Param::CropRight,
+    model::Param::CropTop,   model::Param::CropBottom,
 };
 
 /// What a clip says a parameter is at a moment, for the rows the panel shows.
@@ -217,6 +244,14 @@ constexpr model::Param kPlacementParams[] = {
             return transform.anchorY;
         case model::Param::Opacity:
             return transform.opacity;
+        case model::Param::CropLeft:
+            return transform.cropLeft;
+        case model::Param::CropRight:
+            return transform.cropRight;
+        case model::Param::CropTop:
+            return transform.cropTop;
+        case model::Param::CropBottom:
+            return transform.cropBottom;
         default:
             return 0.0;
     }
@@ -326,6 +361,14 @@ void EffectControls::createParameterWidgets() {
     anchorX_ = makeSpin(-100000.0, 100000.0, 1.0, 1, " px");
     anchorY_ = makeSpin(-100000.0, 100000.0, 1.0, 1, " px");
     opacity_ = makeSpin(0.0, 1.0, 0.01, 3);
+    // Percentages of the side each one cuts, which is what makes a crop mean
+    // the same thing to a 4K master and to the proxy standing in for it. One
+    // decimal: a tenth of a percent of a 4K frame is four pixels, which is
+    // finer than anybody crops by hand and fine enough for an animated one.
+    cropLeft_ = makeSpin(0.0, 100.0, 1.0, 1, " %");
+    cropRight_ = makeSpin(0.0, 100.0, 1.0, 1, " %");
+    cropTop_ = makeSpin(0.0, 100.0, 1.0, 1, " %");
+    cropBottom_ = makeSpin(0.0, 100.0, 1.0, 1, " %");
 
     blend_ = new QComboBox(this);
     for (const model::BlendMode mode : {model::BlendMode::Normal, model::BlendMode::Add,
@@ -372,6 +415,15 @@ void EffectControls::buildMotionGroup() {
     addRow(motionForm, "Rotation", model::Param::RotationDegrees, rotation_, kTurnSpan);
     addRow(motionForm, "Anchor X", model::Param::AnchorX, anchorX_, kFrameSpan);
     addRow(motionForm, "Anchor Y", model::Param::AnchorY, anchorY_, kFrameSpan);
+    // Under the geometry that moves the picture and above the opacity that
+    // fades it, because that is the order the three are reached in: crop the
+    // shot to the part worth keeping, place it, then decide how solid it is.
+    // Fitting several pictures into one frame is exactly that sequence, and it
+    // is what these four rows are here for.
+    addRow(motionForm, "Crop left", model::Param::CropLeft, cropLeft_);
+    addRow(motionForm, "Crop right", model::Param::CropRight, cropRight_);
+    addRow(motionForm, "Crop top", model::Param::CropTop, cropTop_);
+    addRow(motionForm, "Crop bottom", model::Param::CropBottom, cropBottom_);
     addRow(motionForm, "Opacity", model::Param::Opacity, opacity_);
     // Blend has no stopwatch: it is a mode rather than a quantity, and there is
     // no meaningful value halfway between Multiply and Screen.
@@ -1603,6 +1655,12 @@ void EffectControls::assemblePanel() {
     auto* inner = new QWidget;
     auto* layout = new QVBoxLayout(inner);
     layout->setContentsMargins(0, 0, 0, 0);
+    // Closer together than the style's default. This panel is a long column of
+    // one-line rows and somebody working in it is comparing them -- a position
+    // against a scale, a crop against what the crop left -- so how many are on
+    // screen at once is most of how usable it is. The saving is per row and per
+    // group, which is where all the space in a stack of forms is.
+    layout->setSpacing(kGroupGap);
     layout->addWidget(enabled_);
     layout->addWidget(trackGroup_);
     layout->addWidget(trackLevelGroup_);
@@ -1656,6 +1714,35 @@ void EffectControls::assemblePanel() {
     // asks for the width of the largest number its *range* can hold, and
     // position's range is ±100000px -- so the layout hands it 121px however
     // small a floor it is given, and the field `addRow` narrowed stays wide.
+    // Applied here rather than at each of the sixteen `new QFormLayout` sites,
+    // for the reason the field width below is: it is one decision about how the
+    // panel is spaced, and seventeen copies of it would be seventeen chances
+    // for the next group to be built a little looser than the rest.
+    for (QFormLayout* form : inner->findChildren<QFormLayout*>()) {
+        form->setVerticalSpacing(kRowGap);
+        // The group box's own padding is already the air around the rows; the
+        // layout adding more inside it is the same margin paid for twice.
+        const QMargins margins = form->contentsMargins();
+        form->setContentsMargins(margins.left(), 0, margins.right(), 0);
+    }
+    // And the group boxes themselves. A widget stylesheet rather than an edit
+    // to the application's, because this is a statement about *this* panel:
+    // every other place a group box appears has a handful of rows in it and
+    // wants the room. `margin-top` is left where the theme puts it -- the title
+    // sits in that margin, and less draws the border through the words.
+    //
+    // And the value fields, which are what a row's height actually is: the
+    // theme gives every text field a 22px floor, which is right for a form
+    // somebody fills in and two pixels of waste on forty rows of an inspector
+    // nobody types into more than one of at a time. Only the height is
+    // overridden -- the padding carries the room a stepper needs, and the mask
+    // and shape rows still have theirs.
+    setStyleSheet(QString("QGroupBox { padding: %1px 8px %2px; }"
+                          "QDoubleSpinBox { min-height: %3px; }")
+                      .arg(kGroupPadTop)
+                      .arg(kGroupPadBottom)
+                      .arg(kFieldHeight));
+
     int widest = 0;
     for (const Row& row : rows_) {
         widest = std::max(widest, row.spin->minimumWidth());
@@ -1943,6 +2030,10 @@ void EffectControls::applyToWidgets() {
         rotation_->setValue(identity.rotationDegrees);
         anchorX_->setValue(identity.anchorX);
         anchorY_->setValue(identity.anchorY);
+        cropLeft_->setValue(identity.cropLeft);
+        cropRight_->setValue(identity.cropRight);
+        cropTop_->setValue(identity.cropTop);
+        cropBottom_->setValue(identity.cropBottom);
         opacity_->setValue(identity.opacity);
         blend_->setCurrentIndex(blend_->findData(static_cast<int>(model::BlendMode::Normal)));
         timeRemap_->setChecked(false);
@@ -2052,6 +2143,10 @@ void EffectControls::applyToWidgets() {
     rotation_->setValue(transform.rotationDegrees);
     anchorX_->setValue(transform.anchorX);
     anchorY_->setValue(transform.anchorY);
+    cropLeft_->setValue(transform.cropLeft);
+    cropRight_->setValue(transform.cropRight);
+    cropTop_->setValue(transform.cropTop);
+    cropBottom_->setValue(transform.cropBottom);
     opacity_->setValue(transform.opacity);
     blend_->setCurrentIndex(blend_->findData(static_cast<int>(clip->blend)));
 
@@ -2389,8 +2484,15 @@ void EffectControls::addRow(QFormLayout* form, const QString& label, model::Para
     keyframe->setObjectName(QString{"keyframe:"} + model::toString(param));
 
     // Square and compact, so two buttons per row do not push the value out of
-    // the panel.
-    const int side = stopwatch->fontMetrics().height() + 8;
+    // the panel -- and so that they do not set how tall the row is.
+    //
+    // They did. With the forms tightened to `kRowGap`, these two were the only
+    // thing left holding a row open: the label, the slider and the field all
+    // sit inside the height a bordered button asks for, so every pixel of
+    // padding here was a pixel on every row of the panel. Four rather than
+    // eight leaves a target still comfortably clickable and gives back most of
+    // a group's worth of screen down a long column.
+    const int side = stopwatch->fontMetrics().height() + kDiamondPad;
     for (QToolButton* button : {stopwatch, keyframe}) {
         button->setFixedSize(side, side);
     }
@@ -3271,6 +3373,10 @@ void EffectControls::resetPane() {
         rotation_->setValue(identity.rotationDegrees);
         anchorX_->setValue(identity.anchorX);
         anchorY_->setValue(identity.anchorY);
+        cropLeft_->setValue(identity.cropLeft);
+        cropRight_->setValue(identity.cropRight);
+        cropTop_->setValue(identity.cropTop);
+        cropBottom_->setValue(identity.cropBottom);
         opacity_->setValue(identity.opacity);
         blend_->setCurrentIndex(blend_->findData(static_cast<int>(model::BlendMode::Normal)));
         updating_ = false;
@@ -3350,6 +3456,18 @@ void EffectControls::pushTransform() {
         }
         if (!isAnimated(model::Param::Opacity)) {
             transform.opacity = opacity_->value();
+        }
+        if (!isAnimated(model::Param::CropLeft)) {
+            transform.cropLeft = cropLeft_->value();
+        }
+        if (!isAnimated(model::Param::CropRight)) {
+            transform.cropRight = cropRight_->value();
+        }
+        if (!isAnimated(model::Param::CropTop)) {
+            transform.cropTop = cropTop_->value();
+        }
+        if (!isAnimated(model::Param::CropBottom)) {
+            transform.cropBottom = cropBottom_->value();
         }
         return edit::makeSetTransform(*project_, {sequenceId_, track}, id, transform);
     });

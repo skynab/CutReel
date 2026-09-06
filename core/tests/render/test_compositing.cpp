@@ -61,6 +61,57 @@ TEST_CASE("A fully transparent source leaves the destination alone", "[render][c
     CHECK(destination.at(0, 0) == background);
 }
 
+TEST_CASE("Crop cuts the edges off and leaves the rest where it was", "[render][composite][crop]") {
+    // What fitting several pictures into one frame is made of: crop says which
+    // part of the shot to keep, and position and scale say where to put it. So
+    // what is cropped away has to become transparent rather than the remainder
+    // being zoomed up to fill the frame -- the two would be indistinguishable
+    // on a full-frame crop and completely different for everything else.
+    RgbaImage destination{10, 10};
+    const RgbaImage source = filled(10, 10, premultiplied(1.0F, 1.0F, 1.0F, 1.0F));
+
+    Transform transform;
+    transform.cropLeft = 30.0;  // percent of the width
+
+    REQUIRE_FALSE(transform.isIdentity());
+    render::drawTransformed(source, destination, transform);
+
+    // The left three columns are gone and the seventh is not.
+    CHECK(destination.at(0, 5).a == Approx(0.0F));
+    CHECK(destination.at(2, 5).a == Approx(0.0F));
+    CHECK(destination.at(4, 5).a == Approx(1.0F));
+    CHECK(destination.at(9, 5).a == Approx(1.0F));
+    // And what is left is where it always was, not spread across the frame.
+    CHECK(destination.at(5, 0).a == Approx(1.0F));
+    CHECK(destination.at(5, 9).a == Approx(1.0F));
+
+    SECTION("each edge cuts its own side") {
+        RgbaImage other{10, 10};
+        Transform sides;
+        sides.cropRight = 30.0;
+        sides.cropTop = 50.0;
+        render::drawTransformed(source, other, sides);
+        CHECK(other.at(0, 9).a == Approx(1.0F));  // bottom left survives
+        CHECK(other.at(9, 9).a == Approx(0.0F));  // right is cut
+        CHECK(other.at(0, 0).a == Approx(0.0F));  // top is cut
+    }
+
+    SECTION("opposing edges that meet leave nothing") {
+        RgbaImage empty{10, 10};
+        Transform closed;
+        closed.cropLeft = 60.0;
+        closed.cropRight = 60.0;
+        render::drawTransformed(source, empty, closed);
+        CHECK(empty.at(5, 5).a == Approx(0.0F));
+        CHECK(empty.at(0, 0).a == Approx(0.0F));
+    }
+
+    SECTION("and no crop at all is still the identity, which takes the fast path") {
+        CHECK(Transform{}.isIdentity());
+        CHECK_FALSE(Transform{}.isCropped());
+    }
+}
+
 TEST_CASE("Blend modes", "[render][composite]") {
     RgbaImage destination = filled(2, 2, premultiplied(0.5F, 0.5F, 0.5F, 1.0F));
     const RgbaImage source = filled(2, 2, premultiplied(0.5F, 0.5F, 0.5F, 1.0F));

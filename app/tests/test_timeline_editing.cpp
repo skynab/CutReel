@@ -36,17 +36,25 @@ using zaro::app::settledGrab;
 // The edit operations themselves are covered headlessly; what this
 // checks is the wiring -- that a drag reaches the right operation with
 // the right arguments, and that undo steps over the whole gesture.
-// A drag acts on the clip under the pointer, not on whichever member of the
-// selection happens to be first.
+// A drag on the edge of a multi-selection trims all of it, and the clip under
+// the pointer is one of them.
 //
-// The regression: pressing an edge anchored the trim to the pressed clip but
-// applied the delta to the primary selection. With a second clip selected ahead
-// of it, the trim went to the wrong clip -- and where the delta made no sense
-// against that clip's edges the operation was refused, so the drag did nothing
-// at all. It surfaced as an intermittent failure in the trim test above,
-// because whether it fired depended on what selection the previous test left
-// behind.
-TEST_CASE("Dragging an edge of a selected clip acts on that clip", "[gui]") {
+// Two things at once, because they are the two halves of one gesture and each
+// one is a bug that has been reported:
+//
+//   * The pressed clip must be trimmed. The regression this test was written
+//     for was a trim anchored to the pressed clip but applied to whichever clip
+//     happened to lead the selection -- so the wrong clip moved, and where the
+//     delta made no sense against that clip's edges the operation was refused
+//     and the drag did nothing at all.
+//   * The rest of the selection must be trimmed with it. Selecting four titles
+//     and pulling one of them longer is a request about the four; stretching
+//     only the one under the pointer left the other three where they were, with
+//     the selection still lit and nothing to say why.
+//
+// The first is still what proves the delta reached the pressed clip: under the
+// old bug it was the one clip that did *not* move.
+TEST_CASE("Dragging an edge of a multi-selection trims all of it", "[gui]") {
     auto& window = zaro::app::testing::gui();
     const zaro::app::testing::Rewind rewind;
     auto* timeline = window.timeline();
@@ -98,26 +106,27 @@ TEST_CASE("Dragging an edge of a selected clip acts on that clip", "[gui]") {
     if (trimmed == nullptr) {
         zaro::app::testing::failf("the clip disappeared\n");
     }
-    const zaro::model::Clip* untouched = seqNow->audioTracks().front().find(other.id);
+    const zaro::model::Clip* partner = seqNow->audioTracks().front().find(other.id);
     const std::int64_t shortened = target.duration().frames() - trimmed->duration().frames();
+    const std::int64_t partnerShortened = other.duration().frames() - partner->duration().frames();
     std::printf("  pressed clip %lld -> %lld, the one leading the selection %lld -> %lld\n",
                 static_cast<long long>(target.duration().frames()),
                 static_cast<long long>(trimmed->duration().frames()),
                 static_cast<long long>(other.duration().frames()),
-                static_cast<long long>(untouched->duration().frames()));
+                static_cast<long long>(partner->duration().frames()));
     if (shortened <= 0) {
         zaro::app::testing::failf(
             "dragging the pressed clip's out edge did not trim it: it is still %lld frames\n",
             static_cast<long long>(trimmed->duration().frames()));
     }
-    // The other half of the same bug: the trim must not have landed on the clip
-    // that merely happened to lead the selection.
-    if (untouched->duration() != other.duration()) {
+    // And the rest of the set came with it, by the same amount. Equal rather
+    // than merely non-zero: one delta was dragged, and two clips that both
+    // shortened by different amounts would be two trims rather than one.
+    if (partnerShortened != shortened) {
         zaro::app::testing::failf(
-            "the trim landed on the wrong clip: the one leading the selection went from %lld to "
-            "%lld frames\n",
-            static_cast<long long>(other.duration().frames()),
-            static_cast<long long>(untouched->duration().frames()));
+            "the rest of the selection did not follow: the pressed clip lost %lld frames and the "
+            "other selected clip lost %lld\n",
+            static_cast<long long>(shortened), static_cast<long long>(partnerShortened));
     }
 }
 

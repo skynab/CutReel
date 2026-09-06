@@ -1,5 +1,6 @@
 #include "ProjectBin.h"
 
+#include <QAction>
 #include <QApplication>
 #include <QButtonGroup>
 #include <QCursor>
@@ -13,6 +14,7 @@
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QInputDialog>
+#include <QKeySequence>
 #include <QLabel>
 #include <QLayout>
 #include <QLineEdit>
@@ -62,18 +64,19 @@ namespace {
 // What a row carries. The item's own text stays the file's name, so type-ahead
 // and accessibility still find rows by the thing they are called; everything
 // the delegate draws beyond that is here.
-constexpr int kRoleMedia = Qt::UserRole;        ///< qulonglong: the media id
-constexpr int kRoleSubclip = Qt::UserRole + 1;  ///< qulonglong: the subclip id, or 0
-constexpr int kRoleHeader = Qt::UserRole + 2;   ///< bool: a folder heading
-constexpr int kRoleMeta = Qt::UserRole + 3;     ///< the second line
-constexpr int kRoleBadge = Qt::UserRole + 4;    ///< the duration, over the thumbnail
-constexpr int kRoleGlyph = Qt::UserRole + 5;    ///< int: which icons::Glyph
-constexpr int kRoleUsed = Qt::UserRole + 6;     ///< bool: the cut uses this
-constexpr int kRoleCount = Qt::UserRole + 7;    ///< a heading's tally
-constexpr int kRoleBin = Qt::UserRole + 8;      ///< which folder this row is under
-constexpr int kRoleFolded = Qt::UserRole + 9;   ///< bool: a shut heading
-constexpr int kRolePath = Qt::UserRole + 10;    ///< the file a preview frame comes from
-constexpr int kRolePoster = Qt::UserRole + 11;  ///< double: seconds into it to show
+constexpr int kRoleMedia = Qt::UserRole;         ///< qulonglong: the media id
+constexpr int kRoleSubclip = Qt::UserRole + 1;   ///< qulonglong: the subclip id, or 0
+constexpr int kRoleHeader = Qt::UserRole + 2;    ///< bool: a folder heading
+constexpr int kRoleMeta = Qt::UserRole + 3;      ///< the second line
+constexpr int kRoleBadge = Qt::UserRole + 4;     ///< the duration, over the thumbnail
+constexpr int kRoleGlyph = Qt::UserRole + 5;     ///< int: which icons::Glyph
+constexpr int kRoleUsed = Qt::UserRole + 6;      ///< bool: the cut uses this
+constexpr int kRoleCount = Qt::UserRole + 7;     ///< a heading's tally
+constexpr int kRoleBin = Qt::UserRole + 8;       ///< which folder this row is under
+constexpr int kRoleFolded = Qt::UserRole + 9;    ///< bool: a shut heading
+constexpr int kRolePath = Qt::UserRole + 10;     ///< the file a preview frame comes from
+constexpr int kRolePoster = Qt::UserRole + 11;   ///< double: seconds into it to show
+constexpr int kRoleMissing = Qt::UserRole + 12;  ///< bool: the file is not there
 
 // The row geometry the design draws, in logical pixels.
 constexpr int kThumbWidth = 64;
@@ -82,6 +85,10 @@ constexpr int kRowHeight = 50;
 constexpr int kCompactRowHeight = 24;
 constexpr int kHeaderHeight = 26;
 constexpr int kGutter = 6;
+
+/// The application's "something is wrong" red, as the meters and the mute
+/// button already spell it. A row whose file is not there is drawn in it.
+const QColor kMissingInk{0xd9, 0x6a, 0x6a};
 
 /// The folder a file came from, which is the only grouping a project actually
 /// has. The design's bins -- Interview, Drone, B-roll -- are how footage
@@ -250,6 +257,10 @@ public:
             textLeft = plate.left() + 20;
         }
 
+        // The marks along the right-hand end, outermost first, each one moving
+        // the text's edge in. A row can carry both -- a file the cut uses *and*
+        // cannot find is exactly the row somebody needs to see -- so they are
+        // laid out in sequence rather than each drawn at a fixed place.
         int textRight = plate.right() - 8;
         if (index.data(kRoleUsed).toBool()) {
             const QRect dot{plate.right() - 11, plate.center().y() - 2, 5, 5};
@@ -257,6 +268,22 @@ public:
             painter->setBrush(theme::accent(500));
             painter->drawEllipse(dot);
             textRight = dot.left() - 6;
+        }
+        // In the application's "something is wrong" red, which the name is set
+        // in too: the word says what is wrong and the colour is what catches
+        // the eye down a list of fifty rows.
+        const bool missing = index.data(kRoleMissing).toBool();
+        if (missing) {
+            QFont mark = option.font;
+            mark.setPointSizeF(8.0);
+            mark.setBold(true);
+            painter->setFont(mark);
+            painter->setPen(kMissingInk);
+            const QString word = QStringLiteral("MISSING");
+            const int wide = QFontMetrics{mark}.horizontalAdvance(word);
+            painter->drawText(QRect{textRight - wide, plate.top(), wide, plate.height()},
+                              Qt::AlignRight | Qt::AlignVCenter, word);
+            textRight -= wide + 8;
         }
 
         const QString meta = index.data(kRoleMeta).toString();
@@ -266,7 +293,7 @@ public:
         QFont name = option.font;
         name.setPointSizeF(9.5);
         painter->setFont(name);
-        painter->setPen(theme::text());
+        painter->setPen(missing ? kMissingInk : theme::text());
         const QFontMetrics nameMetrics{name};
         const QString shownName = nameMetrics.elidedText(index.data(Qt::DisplayRole).toString(),
                                                          Qt::ElideMiddle, text.width());
@@ -607,6 +634,16 @@ ProjectBin::ProjectBin(QWidget* parent) : QWidget{parent} {
     list_->setDragEnabled(true);
     list_->setDragDropMode(QAbstractItemView::DragOnly);
     list_->setDefaultDropAction(Qt::CopyAction);
+
+    // Delete removes the picked row from the project. An action on the list
+    // rather than a key handler, so the shortcut only fires while the list has
+    // the focus -- Delete over the timeline is a different edit entirely, and
+    // a widget-scoped shortcut is how the two are kept from fighting over it.
+    auto* removeRow = new QAction("Remove from project", list_);
+    removeRow->setShortcut(QKeySequence::Delete);
+    removeRow->setShortcutContext(Qt::WidgetWithChildrenShortcut);
+    connect(removeRow, &QAction::triggered, this, [this] { removeSelected(); });
+    list_->addAction(removeRow);
 
     footer_ = new QLabel(this);
     footer_->setObjectName("bin-footer");
@@ -951,6 +988,13 @@ void ProjectBin::overflowMenu() {
     interpret->setEnabled(haveOne);
     QAction* notes = menu.addAction("Notes…");
     notes->setEnabled(haveOne);
+    menu.addSeparator();
+    // Named for what it does to the project rather than "Delete": nothing on
+    // disk is touched, and an item in a menu over somebody's rushes had better
+    // be clear about that.
+    QAction* remove =
+        menu.addAction(chosen.subclip.isValid() ? "Remove subclip" : "Remove from project");
+    remove->setEnabled(haveOne);
 
     QAction* picked = menu.exec(QCursor::pos());
     if (picked == importAction) {
@@ -965,6 +1009,8 @@ void ProjectBin::overflowMenu() {
         interpretMenu();
     } else if (picked == notes) {
         editNotes();
+    } else if (picked == remove) {
+        removeSelected();
     }
 }
 
@@ -1072,7 +1118,17 @@ void ProjectBin::refresh() {
                 item->setData(kRolePoster, posterSecondsFor(ref->info.duration));
             }
             item->setData(kRoleUsed, used.count(ref->id.value()) != 0);
+            const bool absent = missing_.contains(ref->id.value());
+            item->setData(kRoleMissing, absent);
             QString tip = QString::fromStdString(ref->path);
+            if (absent) {
+                // The path first and the explanation after it: what
+                // somebody wants from this tooltip is where the file was
+                // supposed to be.
+                tip +=
+                    "\nThis file is not where the project left it. "
+                    "File ▸ Relink media… will look for it.";
+            }
             if (!ref->notes.empty()) {
                 tip += "\n" + QString::fromStdString(ref->notes);
             }
@@ -1123,6 +1179,85 @@ void ProjectBin::setThumbnailCache(ThumbnailCache* cache) {
     if (list_ != nullptr) {
         list_->viewport()->update();
     }
+}
+
+void ProjectBin::setMissingMedia(const std::vector<model::MediaRefId>& media) {
+    QSet<qulonglong> gone;
+    for (const model::MediaRefId id : media) {
+        gone.insert(id.value());
+    }
+    if (gone == missing_) {
+        return;  // nothing has changed, so nothing needs rebuilding
+    }
+    missing_ = std::move(gone);
+    refresh();
+}
+
+void ProjectBin::removeSelected() {
+    const Selection chosen = selection();
+    if (project_ == nullptr || commands_ == nullptr) {
+        return;
+    }
+
+    // A subclip first: it is the narrower thing under the pointer, and
+    // "remove" on a subclip row plainly means the note rather than the file it
+    // is a note about. Not a command -- a subclip is part of no cut, and
+    // marking one is not undoable either; see Project::addSubclip.
+    if (chosen.subclip.isValid()) {
+        if (project_->removeSubclip(chosen.subclip)) {
+            refresh();
+            emit edited();
+        }
+        return;
+    }
+    if (!chosen.media.isValid()) {
+        return;
+    }
+
+    const model::MediaRef* ref = project_->findMedia(chosen.media);
+    if (ref == nullptr) {
+        return;
+    }
+    const QString name = QString::fromStdString(ref->name.empty() ? ref->path : ref->name);
+
+    // Asked only when it would change the cut. A file nothing uses is a row in
+    // a list, and a dialog in front of tidying one away would make the pane
+    // tedious to keep in order. A file six shots are cut from is a different
+    // question, and the number is the whole of what makes it one.
+    const int inUse = edit::clipsUsingMedia(*project_, chosen.media);
+    if (inUse > 0) {
+        const QString said = QString(
+                                 "%1 is used by %2 clip%3 on the timeline.\n\n"
+                                 "Removing it from the project removes those clips too. "
+                                 "Undo puts it all back.")
+                                 .arg(name)
+                                 .arg(inUse)
+                                 .arg(inUse == 1 ? "" : "s");
+        // Quiet mode says it and goes ahead. The removal was asked for
+        // explicitly and one Ctrl+Z takes it back, so what quiet mode drops
+        // here is the waiting rather than the warning -- which is the whole of
+        // what `app::say` is for.
+        if (app::isQuiet()) {
+            app::say(this, "Remove from project", said);
+        } else {
+            const auto answer =
+                QMessageBox::question(this, "Remove from project", said,
+                                      QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+            if (answer != QMessageBox::Yes) {
+                return;
+            }
+        }
+    }
+
+    auto built = edit::makeRemoveMedia(*project_, chosen.media);
+    if (!built) {
+        app::warn(this, "Remove", QString::fromStdString(built.error().toString()));
+        return;
+    }
+    commands_->execute(*project_, std::move(*built));
+    commands_->breakMerge();
+    refresh();
+    emit edited();
 }
 
 int ProjectBin::count() const {

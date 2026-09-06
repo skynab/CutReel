@@ -87,6 +87,27 @@ public:
     [[nodiscard]] const Transition* findTransition(TransitionId id) const;
 
     void setTransitions(std::vector<Transition> transitions);
+
+    /// Drop every transition whose clips are no longer on this track.
+    ///
+    /// A transition is a span *between* two clips rather than a thing sitting
+    /// on one, so nothing about removing a clip makes the span go away by
+    /// itself -- and a dissolve left behind still draws over the cut and still
+    /// asks the renderer for frames of a clip that is gone. Deleting a shot
+    /// under a fade left exactly that: a fade nobody could select, on nothing.
+    ///
+    /// Called by the track itself from `remove` and `setClips`, which is every
+    /// path a clip can leave a track by. Doing it in the operations instead
+    /// meant remembering it in six places, and the seventh was always the one
+    /// somebody reported.
+    ///
+    /// An invalid id on one side is left alone: that is what a fade in or a
+    /// fade out is, and only the side that names a clip has to still be there.
+    /// A span naming nothing on either side is dropped -- it has no cut to
+    /// straddle and nothing to blend.
+    /// Returns how many were dropped.
+    std::size_t pruneOrphanTransitions();
+
     [[nodiscard]] bool isEmpty() const noexcept { return clips_.empty(); }
 
     /// The clip playing at `t`, or nullptr in a gap. Binary search.

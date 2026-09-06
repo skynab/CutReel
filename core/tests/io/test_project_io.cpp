@@ -46,6 +46,39 @@ TEST_CASE("A project survives a round trip unchanged", "[io]") {
     }
 }
 
+TEST_CASE("A crop survives a round trip, and no crop writes nothing", "[io]") {
+    Fixture f = populated();
+    const model::ClipId id = f.track(f.v1).clips()[0].id;
+
+    SECTION("an uncropped clip costs nothing in the file") {
+        const auto text = io::saveProjectToString(f.project);
+        REQUIRE(text);
+        // Only what differs from the identity is written, which is what keeps
+        // adding a parameter from rewriting every existing project.
+        CHECK(text->find("cropLeft") == std::string::npos);
+    }
+
+    SECTION("and a cropped one comes back exactly") {
+        model::Clip cropped = *f.track(f.v1).find(id);
+        cropped.transform.cropLeft = 12.5;
+        cropped.transform.cropBottom = 40.0;
+        f.track(f.v1).replace(id, cropped);
+
+        const auto text = io::saveProjectToString(f.project);
+        REQUIRE(text);
+        const auto loaded = io::loadProjectFromString(*text);
+        REQUIRE(loaded);
+
+        const model::Clip* back =
+            loaded->project.findSequence(f.sequenceId)->findTrack(f.v1)->find(id);
+        REQUIRE(back != nullptr);
+        CHECK(back->transform.cropLeft == 12.5);
+        CHECK(back->transform.cropRight == 0.0);
+        CHECK(back->transform.cropTop == 0.0);
+        CHECK(back->transform.cropBottom == 40.0);
+    }
+}
+
 TEST_CASE("Rates survive as exact fractions, not decimals", "[io]") {
     Fixture f;
     // Name deliberately free of digits: the assertion below is that no rounded

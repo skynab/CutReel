@@ -5,6 +5,7 @@
 #include <QLinearGradient>
 #include <QMouseEvent>
 #include <QPainter>
+#include <algorithm>
 
 #include "Theme.h"
 
@@ -34,12 +35,13 @@ QString keyFace(const QString& key) {
         {"Up", QString::fromUtf8("↑")},        {"Comma", QStringLiteral(",")},
         {"Period", QStringLiteral(".")},       {"Slash", QStringLiteral("/")},
         {"Backslash", QStringLiteral("\\")},   {"Semicolon", QStringLiteral(";")},
+        {"Home", QStringLiteral("Home")},      {"End", QStringLiteral("End")},
 #ifdef Q_OS_MACOS
         {"Backspace", QString::fromUtf8("⌫")}, {"Tab", QString::fromUtf8("⇥")},
-        {"Return", QString::fromUtf8("↵")},
+        {"Return", QString::fromUtf8("↵")},    {"Delete", QString::fromUtf8("⌦")},
 #else
         {"Backspace", QStringLiteral("Bksp")}, {"Tab", QStringLiteral("Tab")},
-        {"Return", QStringLiteral("Enter")},
+        {"Return", QStringLiteral("Enter")},   {"Delete", QStringLiteral("Del")},
 #endif
     };
     return kFaces.value(key, key);
@@ -86,18 +88,25 @@ KeyboardMap::KeyboardMap(QWidget* parent) : QWidget{parent} {
         return Cap{QString::fromUtf8(face), QString{}, units, false};
     };
 
+    // The nav keys on the right -- Delete, Home, End, and the arrow cluster --
+    // are here because the catalogue binds every one of them: Delete and
+    // Shift+Delete are lift and ripple delete, Home and End are the ends of the
+    // sequence, and Up and Down step the source. A map that left them off would
+    // draw five of the commands people use most as nowhere at all, which is the
+    // one thing this widget exists to stop. Up sits at the end of the Shift row
+    // because that is where it is on the hardware, above Down.
     row({letter("`"), letter("1"), letter("2"), letter("3"), letter("4"), letter("5"), letter("6"),
          letter("7"), letter("8"), letter("9"), letter("0"), letter("-"), letter("="),
-         named("Backspace", 1.8)});
+         named("Backspace", 1.8), named("Delete", 1.0)});
     row({named("Tab", 1.5), letter("Q"), letter("W"), letter("E"), letter("R"), letter("T"),
          letter("Y"), letter("U"), letter("I"), letter("O"), letter("P"), letter("["), letter("]"),
-         named("Backslash", 1.3)});
+         named("Backslash", 1.3), named("Home", 1.0)});
     row({dead(kCapsFace, 1.8), letter("A"), letter("S"), letter("D"), letter("F"), letter("G"),
          letter("H"), letter("J"), letter("K"), letter("L"), named("Semicolon", 1.0), letter("'"),
-         named("Return", 1.9)});
+         named("Return", 1.9), named("End", 1.0)});
     row({mod("Shift", 2.3), letter("Z"), letter("X"), letter("C"), letter("V"), letter("B"),
          letter("N"), letter("M"), named("Comma", 1.0), named("Period", 1.0), named("Slash", 1.0),
-         mod("Shift", 2.3)});
+         mod("Shift", 2.3), named("Up", 1.0)});
     row({dead("fn", 1.0), mod("Ctrl", 1.0), mod("Alt", 1.0), mod("Meta", 1.3), named("Space", 6.0),
          mod("Meta", 1.3), mod("Alt", 1.0), named("Left", 1.0), named("Down", 1.0),
          named("Right", 1.0)});
@@ -112,6 +121,11 @@ void KeyboardMap::setBindings(QHash<QString, Binding> bindings) {
 void KeyboardMap::setHeld(QSet<QString> held) {
     held_ = std::move(held);
     update();
+}
+
+bool KeyboardMap::hasKey(const QString& key) const {
+    return std::any_of(caps_.begin(), caps_.end(),
+                       [&key](const Cap& cap) { return cap.key == key; });
 }
 
 void KeyboardMap::setSelected(const QString& actionId) {

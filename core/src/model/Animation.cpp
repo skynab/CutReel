@@ -194,15 +194,15 @@ double Curve::valueAtSeconds(double seconds) const {
 }
 
 std::span<const Param> allParams() noexcept {
-    static constexpr Param kAll[] = {
-        Param::PositionX,  Param::PositionY,     Param::ScaleX,
-        Param::ScaleY,     Param::Opacity,       Param::RotationDegrees,
-        Param::AnchorX,    Param::AnchorY,       Param::GainDb,
-        Param::Pan,        Param::Temperature,   Param::Tint,
-        Param::Exposure,   Param::Contrast,      Param::Saturation,
-        Param::MaskX,      Param::MaskY,         Param::StabiliseX,
-        Param::StabiliseY, Param::StabiliseZoom, Param::TextReveal,
-        Param::TimeRemap};
+    static constexpr Param kAll[] = {Param::PositionX,  Param::PositionY,  Param::ScaleX,
+                                     Param::ScaleY,     Param::Opacity,    Param::RotationDegrees,
+                                     Param::AnchorX,    Param::AnchorY,    Param::CropLeft,
+                                     Param::CropRight,  Param::CropTop,    Param::CropBottom,
+                                     Param::GainDb,     Param::Pan,        Param::Temperature,
+                                     Param::Tint,       Param::Exposure,   Param::Contrast,
+                                     Param::Saturation, Param::MaskX,      Param::MaskY,
+                                     Param::StabiliseX, Param::StabiliseY, Param::StabiliseZoom,
+                                     Param::TextReveal, Param::TimeRemap};
     return kAll;
 }
 
@@ -224,6 +224,14 @@ const char* toString(Param param) noexcept {
             return "anchorY";
         case Param::Opacity:
             return "opacity";
+        case Param::CropLeft:
+            return "cropLeft";
+        case Param::CropRight:
+            return "cropRight";
+        case Param::CropTop:
+            return "cropTop";
+        case Param::CropBottom:
+            return "cropBottom";
         case Param::GainDb:
             return "gainDb";
         case Param::Pan:

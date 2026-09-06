@@ -55,6 +55,7 @@ layout(std140, binding = 0) uniform Block {
     vec4 vignette;
     vec4 wipeBox;
     vec4 wipeEdge;
+    vec4 crop;
     vec4 chroma;  // chromaScale, midpoint, transferId, semiPlanar
     vec4 coefficients;  // crToR, crToG, cbToG, cbToB
     // The source's primaries brought into the working space's, as three rows
@@ -122,8 +123,11 @@ float curveToLinear(float v, int id)
 
 void main()
 {
-    // Outside the source is transparent, not the clamped edge pixel.
-    if (any(lessThan(texCoord, vec2(0.0))) || any(greaterThan(texCoord, vec2(1.0)))) {
+    // Outside the source is transparent, not the clamped edge pixel -- and so
+    // is outside the crop, which is the same rectangle test. An uncropped clip
+    // carries 0,1,0,1. See composite.frag.
+    if (texCoord.x < ubuf.crop.x || texCoord.x > ubuf.crop.y ||
+        texCoord.y < ubuf.crop.z || texCoord.y > ubuf.crop.w) {
         fragColor = vec4(0.0);
         return;
     }

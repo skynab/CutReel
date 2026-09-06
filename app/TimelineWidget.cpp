@@ -21,7 +21,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <map>
 #include <optional>
+#include <utility>
 
 #include "zaro/core/edit/Operations.h"
 #include "zaro/core/edit/Snapping.h"
@@ -2039,13 +2041,14 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
     } else {
         makePrimary(*hit);
     }
-    // Alt turns a trim into a ripple trim, closing the gap it would leave
-    // instead of opening one.
+    // Alt on an edge turns a trim into a ripple trim, closing the gap it would
+    // leave instead of opening one; Alt on a body makes the drag a duplicate.
+    // Which of the two it means is decided by what was grabbed, in `beginDrag`.
     beginDrag(*hit, x, event->modifiers().testFlag(Qt::AltModifier));
     update();
 }
 
-void TimelineWidget::beginDrag(const ui::TimelineLayout::Hit& hit, int x, bool ripple) {
+void TimelineWidget::beginDrag(const ui::TimelineLayout::Hit& hit, int x, bool alt) {
     const model::Sequence* seq = sequence();
     const model::Track* track = seq->findTrack(hit.track);
     if (track == nullptr) {
@@ -2055,14 +2058,17 @@ void TimelineWidget::beginDrag(const ui::TimelineLayout::Hit& hit, int x, bool r
     if (clip == nullptr) {
         return;
     }
-    rippleTrim_ = ripple;
+    rippleTrim_ = false;
+    duplicating_ = false;
 
     switch (hit.part) {
         case ui::TimelineLayout::Part::InEdge:
+            rippleTrim_ = alt;
             drag_ = Drag::TrimIn;
             trimAnchor_ = clip->start();
             return;
         case ui::TimelineLayout::Part::OutEdge:
+            rippleTrim_ = alt;
             drag_ = Drag::TrimOut;
             trimAnchor_ = clip->endExclusive();
             return;
@@ -2072,6 +2078,13 @@ void TimelineWidget::beginDrag(const ui::TimelineLayout::Hit& hit, int x, bool r
             // leap to put its start under the cursor.
             grabOffset_ = layout_.timeForX(x, seq->frameRate()) - clip->start();
             drag_ = Drag::MoveClip;
+            duplicating_ = alt;
+            if (duplicating_) {
+                // The one thing on screen that says this drag will leave the
+                // clip behind. Everything else about it looks like a move, and
+                // it has to: the ghost is where the copy will land.
+                setCursor(Qt::DragCopyCursor);
+            }
             return;
     }
 }
@@ -2203,8 +2216,24 @@ void TimelineWidget::updateTrim(int x) {
 
     const edit::EditTarget target{sequenceId_, selectedTrack_};
     const edit::Edge edge = trimmingIn ? edit::Edge::In : edit::Edge::Out;
-    auto built = rippleTrim_ ? edit::makeRippleTrim(*project_, target, selected_, edge, delta)
-                             : edit::makeTrim(*project_, target, selected_, edge, delta);
+
+    // A set is trimmed as a set. Dragging the edge of one of four selected
+    // titles is a request about the four -- the selection is lit, and the
+    // gesture was aimed at it -- and stretching only the one under the pointer
+    // left the other three where they were with nothing to say why.
+    //
+    // A ripple trim stays a single-clip gesture. Rippling closes the gap
+    // behind the edge by shifting everything after it, and several clips
+    // rippling at once is not one shift: each would move the ground the next
+    // is measured against, and there is no order that is the right one. Alt on
+    // an edge therefore still means "this clip, and close the gap".
+    const bool wholeSelection = selection_.size() > 1 && !rippleTrim_;
+
+    auto built =
+        wholeSelection
+            ? edit::makeTrimClips(*project_, sequenceId_, selection_, edge, delta)
+            : (rippleTrim_ ? edit::makeRippleTrim(*project_, target, selected_, edge, delta)
+                           : edit::makeTrim(*project_, target, selected_, edge, delta));
     if (!built) {
         // Refused -- out of source, or into a neighbour. Leave the clip alone;
         // the pointer can keep moving and the trim resumes when it becomes
@@ -2636,6 +2665,130 @@ void TimelineWidget::updateDrag(int x, int y) {
     update();
 }
 
+std::vector<edit::ClipRef> TimelineWidget::selectionWithPartners() const {
+    std::vector<edit::ClipRef> all;
+    const model::Sequence* seq = sequence();
+    if (seq == nullptr) {
+        return all;
+    }
+    const auto alreadyThere = [&all](model::TrackId track, model::ClipId clip) {
+        return std::any_of(all.begin(), all.end(), [&](const edit::ClipRef& ref) {
+            return ref.track == track && ref.clip == clip;
+        });
+    };
+
+    for (const edit::ClipRef& picked : selection_) {
+        const model::Track* from = seq->findTrack(picked.track);
+        const model::Clip* clip = from != nullptr ? from->find(picked.clip) : nullptr;
+        if (clip == nullptr) {
+            continue;
+        }
+        if (!alreadyThere(picked.track, picked.clip)) {
+            all.push_back(picked);
+        }
+        if (!clip->link.isValid()) {
+            continue;
+        }
+        // Its link group, across every track. Locked rows are skipped, the
+        // same way an edit skips them: a partner that cannot be written is not
+        // a reason to refuse the rest.
+        for (const model::TrackKind kind : {model::TrackKind::Video, model::TrackKind::Audio}) {
+            for (const model::Track& track :
+                 (kind == model::TrackKind::Video ? seq->videoTracks() : seq->audioTracks())) {
+                if (track.isLocked()) {
+                    continue;
+                }
+                for (const model::Clip& candidate : track.clips()) {
+                    if (candidate.link == clip->link && !alreadyThere(track.id(), candidate.id)) {
+                        all.push_back(edit::ClipRef{track.id(), candidate.id});
+                    }
+                }
+            }
+        }
+    }
+    return all;
+}
+
+void TimelineWidget::commitDuplicate() {
+    const MovePreview preview = movePreview_;
+    movePreview_ = {};
+    if (!preview.active || project_ == nullptr || commands_ == nullptr) {
+        return;
+    }
+    model::Sequence* seq = project_->findSequence(sequenceId_);
+    if (seq == nullptr) {
+        return;
+    }
+    const model::Track* origin = seq->findTrack(selectedTrack_);
+    const model::Clip* dragged = origin != nullptr ? origin->find(selected_) : nullptr;
+    if (dragged == nullptr) {
+        return;
+    }
+    // A duplicate that lands exactly where the original is would overwrite it,
+    // which is a way of deleting a clip by copying it. Alt-clicking without
+    // moving is a click, and a click does nothing.
+    if (preview.track == selectedTrack_ && preview.delta.frames() == 0) {
+        return;
+    }
+
+    // Fresh ids for everything, and links remapped rather than reused: the
+    // copied picture and its copied sound are linked to each other, not to the
+    // pair they came from -- which would make one link group of four clips
+    // that all move together. The same rule paste follows.
+    std::map<std::uint64_t, model::LinkId> relinked;
+    std::vector<edit::PastedClip> placing;
+    for (const edit::ClipRef& ref : selectionWithPartners()) {
+        const model::Track* track = seq->findTrack(ref.track);
+        const model::Clip* clip = track != nullptr ? track->find(ref.clip) : nullptr;
+        if (clip == nullptr) {
+            continue;
+        }
+        model::Clip fresh = *clip;
+        fresh.id = project_->ids().next<model::ClipTag>();
+        if (clip->link.isValid()) {
+            auto found = relinked.find(clip->link.value());
+            if (found == relinked.end()) {
+                found = relinked.emplace(clip->link.value(), project_->ids().next<model::LinkTag>())
+                            .first;
+            }
+            fresh.link = found->second;
+        }
+        const time::RationalTime at = clip->start() + preview.delta;
+        if (at.frames() < 0) {
+            continue;
+        }
+        fresh.timelineRange = time::TimeRange{at, clip->duration()};
+        // Only the clip actually under the pointer may change rows. The others
+        // are carried along by the same shift in time and stay where they are,
+        // which is what a drag does to a set and to a link group alike.
+        const model::TrackId landing =
+            ref.clip == selected_ && ref.track == selectedTrack_ ? preview.track : ref.track;
+        placing.push_back(edit::PastedClip{landing, std::move(fresh)});
+    }
+    if (placing.empty()) {
+        return;
+    }
+
+    auto built = edit::makePasteClips(*project_, sequenceId_, placing);
+    if (!built) {
+        return;  // nowhere legal to put the copy; leave the timeline alone
+    }
+    commands_->execute(*project_, std::move(*built));
+
+    // The copy becomes the selection, which is what every editor does after a
+    // duplicate and what makes a run of them work: Alt-drag, Alt-drag again,
+    // and the second one copies the copy rather than the original.
+    selection_.clear();
+    for (const edit::PastedClip& placed : placing) {
+        selection_.push_back(edit::ClipRef{placed.track, placed.clip.id});
+    }
+    // The primary, the track and the link group all come from the front of the
+    // set; `announceSelection` is the one place that reads them off it.
+    announceSelection();
+    emit edited();
+    update();
+}
+
 void TimelineWidget::commitMove() {
     const MovePreview preview = movePreview_;
     movePreview_ = {};
@@ -2695,9 +2848,13 @@ void TimelineWidget::commitMove() {
 
 void TimelineWidget::finishDrag() {
     if (drag_ == Drag::MoveClip) {
-        // The move happens here, at the end of the gesture, rather than on
-        // every step of it.
-        commitMove();
+        // The edit happens here, at the end of the gesture, rather than on
+        // every step of it -- and which edit it is was decided at the press.
+        if (duplicating_) {
+            commitDuplicate();
+        } else {
+            commitMove();
+        }
     }
     movePreview_ = {};
     if (drag_ == Drag::Pan && tool_ == Tool::Hand) {
@@ -2713,6 +2870,12 @@ void TimelineWidget::finishDrag() {
     resizeTrack_ = model::TrackId{};
     drag_ = Drag::None;
     rippleTrim_ = false;
+    if (duplicating_) {
+        duplicating_ = false;
+        // The copy cursor belonged to the gesture. `applyCursor` picks the
+        // right one again from whatever the pointer is over now.
+        applyCursor(nullptr);
+    }
     // The guide belongs to the gesture that made it. Left up, it becomes a
     // line on the timeline that means nothing.
     snapMark_ = {};

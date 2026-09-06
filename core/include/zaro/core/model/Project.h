@@ -174,6 +174,16 @@ public:
     [[nodiscard]] const Sequence* findSequence(SequenceId id) const;
 
     MediaRefId addMedia(MediaRef ref);
+    /// Take a file out of the bin, with any subclips somebody marked on it.
+    ///
+    /// The subclips go with it because a subclip is a note about where the good
+    /// part of a *file* is, and a note about a file the project no longer has
+    /// is a row in the bin pointing at nothing. Clips on a sequence are not
+    /// touched here -- that is an edit, and edits go through a command; see
+    /// `edit::makeRemoveMedia`, which is what a caller should be using.
+    ///
+    /// Returns whether there was such a reference.
+    bool removeMedia(MediaRefId id);
     SequenceId addSequence(Sequence sequence);
 
     [[nodiscard]] IdGenerator& ids() noexcept { return ids_; }

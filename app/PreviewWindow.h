@@ -770,6 +770,21 @@ private:
 
     void relinkDialog();
 
+    /// Look for media the project cannot find, mark it in the bin, and -- when
+    /// `announce` -- say so.
+    ///
+    /// Called where the answer can have changed: opening a project, importing,
+    /// relinking. Not on every edit, and not from the bin's own redraw: the
+    /// question costs a `stat` per file, and a card that has been ejected or a
+    /// share that has gone away turns that into seconds of a window that does
+    /// not respond.
+    ///
+    /// `announce` is what separates opening a project from the housekeeping
+    /// afterwards. A cut whose footage has gone is worth interrupting for
+    /// once, at the moment it is discovered; saying it again after every
+    /// import would be nagging about something already on screen.
+    void checkMissingMedia(bool announce = false);
+
     void consolidateDialog();
 
     void saveTemplateDialog();

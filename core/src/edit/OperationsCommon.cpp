@@ -37,6 +37,19 @@ std::optional<TimeRange> availableSource(const Project& project, const Clip& cli
 
 }  // namespace
 
+void dropOrphanTransitions(Sequence& sequence) {
+    for (const model::TrackKind kind : {model::TrackKind::Video, model::TrackKind::Audio}) {
+        for (Track& track : sequence.tracksMutable(kind)) {
+            static_cast<void>(track.pruneOrphanTransitions());
+        }
+    }
+}
+
+void LambdaCommand::mutate(Sequence& sequence) {
+    body_(sequence);
+    dropOrphanTransitions(sequence);
+}
+
 CommandPtr makeCommand(model::SequenceId sequence, std::string description, std::string mergeKey,
                        LambdaCommand::Body body) {
     return std::make_unique<LambdaCommand>(sequence, std::move(description), std::move(mergeKey),

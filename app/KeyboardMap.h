@@ -53,6 +53,14 @@ public:
     void setHeld(QSet<QString> held);
     void setSelected(const QString& actionId);
 
+    /// Whether there is a cap for this key at all.
+    ///
+    /// **Because a keymap can name a key this picture does not draw.** Somebody
+    /// who binds a command to F5 or the numeric pad has bound it perfectly
+    /// well, and the map simply has no cap to light up. Asking first lets the
+    /// manager say so, rather than counting a binding the picture cannot show.
+    [[nodiscard]] bool hasKey(const QString& key) const;
+
     /// A key with something on it was clicked.
     void setOnPick(std::function<void(const QString& actionId)> handler) {
         onPick_ = std::move(handler);

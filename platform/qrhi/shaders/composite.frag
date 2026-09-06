@@ -73,6 +73,10 @@ layout(std140, binding = 0) uniform Block {
     // got to.
     vec4 wipeBox;     // xy: half size, zw: centre
     vec4 wipeEdge;    // x: corner radius, y: feather, z: shape, w: inverted
+    // The part of the source the crop keeps, in texture coordinates:
+    // x: left, y: right, z: top, w: bottom. Must agree with the bounds
+    // render::drawTransformed tests each sample point against.
+    vec4 crop;
     // Read by composite_yuv.frag alone, and declared here because the block is
     // one shared declaration -- see the note above.
     vec4 chroma;
@@ -454,8 +458,12 @@ void main()
 {
     // Outside the source is transparent, not the clamped edge pixel. Clamping
     // would smear the border outwards along anything scaled or rotated, and it
-    // is what the CPU reference does too.
-    if (any(lessThan(texCoord, vec2(0.0))) || any(greaterThan(texCoord, vec2(1.0)))) {
+    // is what the CPU reference does too. Outside the *crop* is transparent for
+    // the same reason -- neither is picture -- so one test does both: an
+    // uncropped clip carries 0,1,0,1 here, which is the plain 0..1 bounds check
+    // this used to be.
+    if (texCoord.x < ubuf.crop.x || texCoord.x > ubuf.crop.y ||
+        texCoord.y < ubuf.crop.z || texCoord.y > ubuf.crop.w) {
         fragColor = vec4(0.0);
         return;
     }
