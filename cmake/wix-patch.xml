@@ -11,7 +11,7 @@
 
   Everything below hangs off #PRODUCT and #PRODUCTFEATURE, the two fragment ids
   CPack documents as stable. The alternative is patching a generated component
-  such as CM_CP_bin.zaro_preview.exe, whose spelling depends on how CPack
+  such as CM_CP_bin.cutreel.exe, whose spelling depends on how CPack
   mangles a path into a WiX identifier, and a guess that is wrong there fails
   at link time rather than doing something visible.
 
@@ -52,7 +52,7 @@
         <Shortcut Id="CutReelDesktopLink"
                   Name="CutReel"
                   Description="A non-linear video editor"
-                  Target="[INSTALL_ROOT]bin\zaro-preview.exe"
+                  Target="[INSTALL_ROOT]bin\cutreel.exe"
                   WorkingDirectory="INSTALL_ROOT"/>
         <!-- A component needs a key path, and a shortcut cannot be one. No
              RemoveFolder here on purpose: the shortcut goes when the component
@@ -91,20 +91,20 @@
                        Value="CutReel project"
                        Type="string"/>
         <!-- ",1" is an *index* into the executable's icon groups in id order,
-             not a resource id: the second one, which app/zaro-preview.rc.in
+             not a resource id: the second one, which app/cutreel.rc.in
              defines as id 2, the document mark. Index 0 is the application
              mark, and pointing a document at it is how a project file ends up
              looking like the program that opens it. -->
         <RegistryValue Root="HKLM"
                        Key="Software\Classes\CutReel.Project\DefaultIcon"
-                       Value="[INSTALL_ROOT]bin\zaro-preview.exe,1"
+                       Value="[INSTALL_ROOT]bin\cutreel.exe,1"
                        Type="string"/>
         <!-- %1 reaches the program as argv[1], which is the project path it
              wants. Quoted, because somebody's project lives in a folder with a
              space in it. -->
         <RegistryValue Root="HKLM"
                        Key="Software\Classes\CutReel.Project\shell\open\command"
-                       Value="&quot;[INSTALL_ROOT]bin\zaro-preview.exe&quot; &quot;%1&quot;"
+                       Value="&quot;[INSTALL_ROOT]bin\cutreel.exe&quot; &quot;%1&quot;"
                        Type="string"/>
       </Component>
     </DirectoryRef>

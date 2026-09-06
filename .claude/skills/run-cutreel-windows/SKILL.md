@@ -1,6 +1,6 @@
 ---
 name: run-cutreel-windows
-description: Run, screenshot or visually check CutReel (zaro-preview) ON WINDOWS. Covers priming the MSVC build shell, the build/windows-release tree, launching the .exe, and capturing the live window with PowerShell. Use only on Windows -- on macOS use run-cutreel-macos instead, whose .app bundle path and offscreen harness do not work here.
+description: Run, screenshot or visually check CutReel (the `cutreel` binary) ON WINDOWS. Covers priming the MSVC build shell, the build/windows-release tree, launching the .exe, and capturing the live window with PowerShell. Use only on Windows -- on macOS use run-cutreel-macos instead, whose .app bundle path and offscreen harness do not work here.
 ---
 
 # Running CutReel on Windows
@@ -36,16 +36,16 @@ it. Use CMake 3.31.6 from `devtools`, **not** CMake 4.x — 4.x drops
 The build tree is `build/windows-release` (RelWithDebInfo). There is no
 `build/debug` on this box. Warnings are errors, so a quiet build passed.
 
-Useful targets: `zaro-preview`, `zaro_core_tests`, `zaro_app_tests`.
+Useful targets: `cutreel`, `zaro_core_tests`, `zaro_app_tests`.
 
 ### LNK1168: close the app first
 
 ```
-LINK : fatal error LNK1168: cannot open bin\zaro-preview.exe for writing
+LINK : fatal error LNK1168: cannot open bin\cutreel.exe for writing
 ```
 
-means a `zaro-preview.exe` is still running and Windows has the file locked.
-Check with `tasklist //FI "IMAGENAME eq zaro-preview.exe"`. **Ask before killing
+means a `cutreel.exe` is still running and Windows has the file locked.
+Check with `tasklist //FI "IMAGENAME eq cutreel.exe"`. **Ask before killing
 it** — it may be the user's own session with unsaved work. Every static library
 and both test binaries still build while it is locked, which is enough to
 confirm a change compiles and links; only the final exe link is blocked.
@@ -53,10 +53,10 @@ confirm a change compiles and links; only the final exe link is blocked.
 ## Launch the app
 
 ```bash
-cd build/windows-release/bin && cmd //c start "" zaro-preview.exe <project.cutreel> --quiet
+cd build/windows-release/bin && cmd //c start "" cutreel.exe <project.cutreel> --quiet
 ```
 
-- The binary is `build/windows-release/bin/zaro-preview.exe`. There is no
+- The binary is `build/windows-release/bin/cutreel.exe`. There is no
   `.app` bundle on Windows — that is the macOS skill.
 - `start ""` detaches, so the Bash call returns instead of blocking the turn.
 - A project path is optional; with none it opens an untitled empty project.
@@ -92,7 +92,7 @@ dialog — screenshot before assuming a click landed.
 
 **`QT_QPA_PLATFORM=offscreen` does not work here.** Only
 `platforms/qwindows.dll` is staged in `build/windows-release/bin`, so with that
-variable set `zaro-preview` and any `zaro_shot` harness die silently — no
+variable set `cutreel` and any `zaro_shot` harness die silently — no
 output, no exit message. Drop the variable. If you want the macOS skill's
 one-panel harness, render to a `QPixmap` from a widget that was never shown;
 that works under the normal windows plugin.
@@ -117,9 +117,9 @@ app nor `--selftest` says why.
 
 ```bash
 # right
-./build/windows-release/bin/zaro-preview.exe "$SCRATCH/demo.cutreel" --quiet
+./build/windows-release/bin/cutreel.exe "$SCRATCH/demo.cutreel" --quiet
 # wrong -- no media resolves, and nothing tells you
-cd build/windows-release/bin && ./zaro-preview.exe "$SCRATCH/demo.cutreel" --quiet
+cd build/windows-release/bin && ./cutreel.exe "$SCRATCH/demo.cutreel" --quiet
 ```
 
 `--selftest` reports the symptom, not the cause:
@@ -140,7 +140,7 @@ Anything that decodes fails the same silent way. `AudioGraph` in particular
 treats a clip it cannot read as silence rather than an error, so a project
 whose media is missing plays perfectly timed nothing.
 
-`zaro-preview --selftest --capture <png>` writes two files: the monitor's
+`cutreel --selftest --capture <png>` writes two files: the monitor's
 `grabFramebuffer` at `<png>` and the whole window at `<png>.window.png`.
 
 ## This machine's audio device flatters the playback code

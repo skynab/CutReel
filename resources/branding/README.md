@@ -9,9 +9,9 @@ during the build, so a change here is a change to a committed file.
 
 | File | Used by |
 | --- | --- |
-| `CutReel-{16,32,48,64,128,256,512}.png` | The window and taskbar icon, compiled into `zaro-preview` as Qt resources under `:/branding` (see `app/CMakeLists.txt`) |
-| `CutReel.ico` | The Windows executable's icon, through `app/zaro-preview.rc.in` -- and so also the desktop and Start Menu shortcuts, which take theirs from the target |
-| `CutReel-Document.ico` | The icon Explorer draws on a `.cutreel` project file. Compiled into the executable as a second icon resource by `app/zaro-preview.rc.in`, because a document file cannot carry one of its own; the association `cmake/wix-patch.xml` registers points at it by index |
+| `CutReel-{16,32,48,64,128,256,512}.png` | The window and taskbar icon, compiled into `cutreel` as Qt resources under `:/branding` (see `app/CMakeLists.txt`) |
+| `CutReel.ico` | The Windows executable's icon, through `app/cutreel.rc.in` -- and so also the desktop and Start Menu shortcuts, which take theirs from the target |
+| `CutReel-Document.ico` | The icon Explorer draws on a `.cutreel` project file. Compiled into the executable as a second icon resource by `app/cutreel.rc.in`, because a document file cannot carry one of its own; the association `cmake/wix-patch.xml` registers points at it by index |
 | `CutReel.icns` | The macOS bundle icon (`MACOSX_BUNDLE_ICON_FILE`) |
 | `CutReel-Installer.ico` | Two things: the icon on the bootstrapper `.exe` the release ships (`cmake/bundle.wxs.in`), which is the one people see before installing, and the MSI's entry in Add/Remove Programs (`CPACK_WIX_PRODUCT_ICON`) |
 | `CutReel-Installer-64.png` | The logo on the bootstrapper's one page |

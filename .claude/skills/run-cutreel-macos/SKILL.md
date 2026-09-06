@@ -1,6 +1,6 @@
 ---
 name: run-cutreel-macos
-description: Run, screenshot or visually check CutReel (zaro-preview) ON MACOS. Covers the .app bundle launch path and the offscreen QPixmap harness. Use only on macOS -- on Windows use run-cutreel-windows instead, which is a different build tree, a different binary path, and a screenshot route that does not work here.
+description: Run, screenshot or visually check CutReel (the `cutreel` binary) ON MACOS. Covers the .app bundle launch path and the offscreen QPixmap harness. Use only on macOS -- on Windows use run-cutreel-windows instead, which is a different build tree, a different binary path, and a screenshot route that does not work here.
 ---
 
 # Running CutReel on macOS
@@ -10,7 +10,7 @@ the offscreen harness do not exist or do not work on Windows. On a Windows box
 use the `run-cutreel-windows` skill instead -- `QT_QPA_PLATFORM=offscreen` dies
 silently there, and the binary is a plain `.exe` in a different tree.
 
-`zaro-preview` is a Qt6 desktop GUI. Two ways to see it; pick by what you need.
+`cutreel` is a Qt6 desktop GUI. Two ways to see it; pick by what you need.
 
 ## Build first
 
@@ -63,10 +63,10 @@ Notes that cost time to discover:
 ## Launch the real app
 
 ```bash
-./build/debug/bin/zaro-preview.app/Contents/MacOS/zaro-preview <project.cutreel> --quiet
+./build/debug/bin/cutreel.app/Contents/MacOS/cutreel <project.cutreel> --quiet
 ```
 
-- **The binary is inside the `.app` bundle.** `build/debug/bin/zaro-preview` is a
+- **The binary is inside the `.app` bundle.** `build/debug/bin/cutreel` is a
   stale leftover that will not have your changes — using it is the easiest way to
   waste ten minutes here.
 - A project path is optional. With no arguments it opens an untitled, empty

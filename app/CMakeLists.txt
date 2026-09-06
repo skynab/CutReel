@@ -2,7 +2,7 @@ find_package(Qt6 REQUIRED COMPONENTS Widgets)
 
 qt_standard_project_setup()
 
-# The window and its panels, as a library: zaro-preview links it behind its
+# The window and its panels, as a library: cutreel links it behind its
 # main(), and the GUI tests in app/tests link it in front of Catch2's. A test
 # cannot drive a window that only exists inside an executable.
 add_library(zaro_app_ui STATIC
@@ -131,9 +131,9 @@ set_target_properties(zaro_app_ui PROPERTIES AUTOMOC ON)
 # shape. See resources/branding/README.md for what every file is for.
 set(ZARO_BRANDING_DIR "${CMAKE_SOURCE_DIR}/resources/branding")
 
-add_executable(zaro-preview main.cpp)
-target_link_libraries(zaro-preview PRIVATE zaro_app_ui zaro::warnings)
-set_target_properties(zaro-preview PROPERTIES AUTOMOC ON)
+add_executable(cutreel main.cpp)
+target_link_libraries(cutreel PRIVATE zaro_app_ui zaro::warnings)
+set_target_properties(cutreel PROPERTIES AUTOMOC ON)
 
 # The window icon, on every platform. Compiled in rather than loaded from a
 # file beside the binary, which is a file that goes missing the first time
@@ -143,7 +143,7 @@ set_target_properties(zaro-preview PROPERTIES AUTOMOC ON)
 # library is only registered if something drags its initialiser in, and a
 # library nobody references by name from main is exactly the case where the
 # linker drops it. On the executable there is nothing to drop.
-qt_add_resources(zaro-preview "branding"
+qt_add_resources(cutreel "branding"
     PREFIX "/branding"
     BASE "${ZARO_BRANDING_DIR}"
     FILES
@@ -162,26 +162,26 @@ qt_add_resources(zaro-preview "branding"
 # The document icon rides along in the same binary. A .cutreel file is not an
 # executable and cannot carry an icon of its own, so the association the MSI
 # writes points Explorer back at an icon resource here -- see
-# app/zaro-preview.rc.in for the id/index contract that association depends on,
+# app/cutreel.rc.in for the id/index contract that association depends on,
 # and cmake/wix-patch.xml for the association itself. Kept in the executable
 # rather than installed as a loose .ico beside it: a file a user can delete or
 # move is a file that turns every project on their disk blank.
 if(WIN32)
     set(ZARO_ICON_ICO "${ZARO_BRANDING_DIR}/CutReel.ico")
     set(ZARO_DOCUMENT_ICO "${ZARO_BRANDING_DIR}/CutReel-Document.ico")
-    configure_file("${CMAKE_CURRENT_SOURCE_DIR}/zaro-preview.rc.in"
-                   "${CMAKE_CURRENT_BINARY_DIR}/zaro-preview.rc" @ONLY)
-    target_sources(zaro-preview PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/zaro-preview.rc")
+    configure_file("${CMAKE_CURRENT_SOURCE_DIR}/cutreel.rc.in"
+                   "${CMAKE_CURRENT_BINARY_DIR}/cutreel.rc" @ONLY)
+    target_sources(cutreel PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/cutreel.rc")
 endif()
 
 # The bundle icon. The file has to be inside Contents/Resources and the plist
 # key names it without a path, so both halves are set here; naming one without
 # the other is a bundle that shows the generic application icon.
 if(APPLE)
-    target_sources(zaro-preview PRIVATE "${ZARO_BRANDING_DIR}/CutReel.icns")
+    target_sources(cutreel PRIVATE "${ZARO_BRANDING_DIR}/CutReel.icns")
     set_source_files_properties("${ZARO_BRANDING_DIR}/CutReel.icns"
         PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
-    set_target_properties(zaro-preview PROPERTIES MACOSX_BUNDLE_ICON_FILE "CutReel.icns")
+    set_target_properties(cutreel PROPERTIES MACOSX_BUNDLE_ICON_FILE "CutReel.icns")
 endif()
 
 
@@ -189,12 +189,12 @@ endif()
 # A bundle on macOS and a windowed executable on Windows, because that is what
 # the deployment tools below expect to find and what a double-click on either
 # platform expects to launch. On Linux it is a plain binary either way.
-set_target_properties(zaro-preview PROPERTIES
+set_target_properties(cutreel PROPERTIES
     MACOSX_BUNDLE ON
     WIN32_EXECUTABLE ON)
 
 include(GNUInstallDirs)
-install(TARGETS zaro-preview
+install(TARGETS cutreel
     RUNTIME_DEPENDENCY_SET zaro_runtime_deps
     BUNDLE  DESTINATION .                            COMPONENT runtime
     RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"    COMPONENT runtime)
@@ -203,7 +203,7 @@ install(TARGETS zaro-preview
 # to carry them. windeployqt and macdeployqt know which ones; nothing else does.
 if(WIN32 OR APPLE)
     qt_generate_deploy_app_script(
-        TARGET zaro-preview
+        TARGET cutreel
         OUTPUT_SCRIPT zaro_deploy_script
         NO_UNSUPPORTED_PLATFORM_ERROR)
     install(SCRIPT "${zaro_deploy_script}" COMPONENT runtime)
@@ -216,7 +216,7 @@ endif()
 # because no dependency walk can see them. Qt opens a platform plugin by name at
 # startup; nothing links it, so nothing points at it.
 if(UNIX AND NOT APPLE)
-    set_target_properties(zaro-preview PROPERTIES INSTALL_RPATH "${ZARO_PRIVATE_RPATH}")
+    set_target_properties(cutreel PROPERTIES INSTALL_RPATH "${ZARO_PRIVATE_RPATH}")
 
     # xcb is what a desktop session wants and offscreen is what a render farm,
     # a container and an ssh session want -- zaro-render selects the second for
@@ -238,7 +238,7 @@ if(UNIX AND NOT APPLE)
     endforeach()
     if(NOT zaro_qt_plugins)
         message(WARNING
-            "No Qt platform plugins found to install; the packaged zaro-preview "
+            "No Qt platform plugins found to install; the packaged cutreel "
             "will not start on a machine without a Qt of its own.")
     else()
         install(IMPORTED_RUNTIME_ARTIFACTS ${zaro_qt_plugins}
@@ -266,50 +266,27 @@ if(UNIX AND NOT APPLE)
         DESTINATION "${CMAKE_INSTALL_BINDIR}"
         COMPONENT runtime)
 
-    # --- Being installable ------------------------------------------------------
-    # Three things a .deb has to carry that a tarball does not, because a tarball
+    # --- Desktop integration ----------------------------------------------------
+    # Two things a .deb has to carry that a tarball does not, because a tarball
     # is a directory somebody unpacks and looks inside, and an installed package
-    # is a name somebody types and an icon somebody clicks.
+    # is a name somebody types and an icon somebody clicks. The name itself is
+    # not one of them any more -- the executable is called cutreel, the same as
+    # the package, so `apt install ./cutreel...` is followed by `cutreel` and
+    # that is the end of it.
     #
-    # The name first. The package is called cutreel, so `apt install ./cutreel...`
-    # is followed by somebody typing `cutreel`, and until this symlink existed the
-    # answer was "command not found": the executable is zaro-preview, which is not
-    # a name the package, the icon, the documentation or the website ever says.
-    # A symlink rather than a rename of the target -- the seven command-line tools
-    # are all zaro-*, the Windows shortcut and the macOS bundle point at
-    # zaro-preview, and the build tree is what every test and script here runs
-    # from. One extra name in bin/ is cheaper than that rename in all four places.
-    #
-    # Relative, and resolved at install time against the staging directory CPack
-    # packages from, so the link inside the .deb is `cutreel -> zaro-preview` and
-    # not a path pointing into a build machine's home directory. Nothing about it
-    # depends on which of the two files the loader starts from: /proc/self/exe
-    # resolves the symlink, so $ORIGIN and the qt.conf lookup both land in
-    # /usr/bin either way.
-    #
-    # Removed before it is made, because file(CREATE_LINK) fails on a path that
-    # already exists and a second `cmake --install` into the same tree -- which
-    # is every rebuild of the package -- would otherwise stop there.
-    install(CODE "
-        set(zaro_link \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/cutreel\")
-        file(REMOVE \"\${zaro_link}\")
-        file(CREATE_LINK \"zaro-preview\" \"\${zaro_link}\" SYMBOLIC)
-        message(STATUS \"Symlinking: \${zaro_link} -> zaro-preview\")
-    " COMPONENT runtime)
-
-    # Then the launcher entry, which is what puts CutReel in the applications
-    # menu and in a search for "video". Without it an installed package is
-    # reachable only from a terminal, which for a video editor is most of the way
-    # to not being installed at all.
+    # The first is the launcher entry, which is what puts CutReel in the
+    # applications menu and in a search for "video". Without it an installed
+    # package is reachable only from a terminal, which for a video editor is
+    # most of the way to not being installed at all.
     install(FILES "${CMAKE_SOURCE_DIR}/resources/linux/cutreel.desktop"
         DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/applications"
         COMPONENT runtime)
 
-    # And the icon the entry names, in every size the branding directory has, in
-    # the hicolor theme -- the one fallback every desktop reads. Named cutreel.png
-    # rather than CutReel-48.png because an Icon= line names a theme entry, and a
-    # theme entry is the file's basename: the size comes from the directory it is
-    # in, not from the name.
+    # The second is the icon that entry names, in every size the branding
+    # directory has, in the hicolor theme -- the one fallback every desktop
+    # reads. Named cutreel.png rather than CutReel-48.png because an Icon= line
+    # names a theme entry, and a theme entry is the file's basename: the size
+    # comes from the directory it is in, not from the name.
     foreach(zaro_icon_size 16 32 48 64 128 256 512)
         install(FILES "${ZARO_BRANDING_DIR}/CutReel-${zaro_icon_size}.png"
             DESTINATION

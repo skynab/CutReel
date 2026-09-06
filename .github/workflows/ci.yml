@@ -266,7 +266,7 @@ jobs:
       # this makes them available from every run rather than only from a tag.
       # Windows and Linux are self-contained -- Qt, FFmpeg and SDL travel with
       # both, plus the MSVC runtime on Windows. macOS is not, for the reason
-      # recorded in cmake/Packaging.cmake: only zaro-preview.app carries its
+      # recorded in cmake/Packaging.cmake: only cutreel.app carries its
       # Qt, and the command-line tools in bin/ expect the libraries they were
       # built against to be on the machine.
       - name: Package
@@ -349,33 +349,31 @@ jobs:
 
       # And the claim installing it makes is that `cutreel` is then a command
       # and CutReel is then in the applications menu. Neither is something the
-      # build can check -- both are files whose absence is invisible until
-      # somebody has installed the package and typed the name -- which is how a
-      # release shipped with the executable installed under a name the package
+      # build can check -- both are properties of an installed tree, invisible
+      # until somebody has installed the package and typed the name -- which is
+      # how a release shipped with the executable under a name the package
       # never mentions. So it is installed here, for real, and asked.
       - name: Check the .deb installs and is launchable
         if: runner.os == 'Linux' && matrix.artifact != ''
         shell: bash
         run: |
           sudo apt-get install -y ./dist/cutreel_*.deb
-          # Resolved through PATH, the way a user's shell resolves it, and
-          # pointing at the executable rather than dangling.
+          # Resolved through PATH, the way a user's shell resolves it.
           command -v cutreel
-          test -x "$(command -v cutreel)"
-          test -x /usr/bin/zaro-preview
+          test -x /usr/bin/cutreel
           # The launcher entry and the icon it names.
           test -f /usr/share/applications/cutreel.desktop
           test -f /usr/share/icons/hicolor/256x256/apps/cutreel.png
           if command -v desktop-file-validate >/dev/null; then
             desktop-file-validate /usr/share/applications/cutreel.desktop
           fi
-          # Started under the name the desktop entry uses, with no display, far
-          # enough to prove the symlink reaches a binary that loads its Qt and
-          # its platform plugin. --selftest needs a project; --quiet with no
-          # arguments exits 2 by design, after QApplication and the platform
-          # plugin -- the two things that fail on an incomplete package -- have
-          # both been through. `|| code=$?` rather than a bare call: this shell
-          # runs under -e, which would take the expected 2 for a failure.
+          # Started the way a user starts it, with no display, far enough to
+          # prove the installed binary loads its Qt and its platform plugin.
+          # --selftest needs a project of its own; --quiet with no arguments
+          # exits 2 by design, after QApplication and the platform plugin --
+          # the two things that fail on an incomplete package -- have both been
+          # through. `|| code=$?` rather than a bare call: this shell runs
+          # under -e, which would take the expected 2 for a failure.
           code=0
           QT_QPA_PLATFORM=offscreen cutreel --quiet || code=$?
           test "$code" -eq 2

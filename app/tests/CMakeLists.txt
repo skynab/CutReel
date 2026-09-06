@@ -1,6 +1,6 @@
 find_package(Qt6 REQUIRED COMPONENTS Widgets)
 # The GUI tests drive a real window against a real GPU, so they need Widgets
-# and the panels the window is built from -- the same sources zaro-preview
+# and the panels the window is built from -- the same sources cutreel
 # links, less its main().
 add_executable(zaro_app_tests
     GuiFixture.cpp

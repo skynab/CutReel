@@ -1,4 +1,4 @@
-// zaro-preview: the application entry point.
+// cutreel: the application entry point.
 //
 // The window itself is PreviewWindow, in PreviewWindow.h. What is left here is
 // what a main is for: read the arguments, load the project, show the window,
@@ -85,10 +85,15 @@ int main(int argc, char** argv) {
 
     // Which launcher entry this process belongs to. On X11 Qt writes it into
     // WM_CLASS and on Wayland it is reported as the app id, and both are how a
-    // desktop matches a window on screen to an installed .desktop file. Without
-    // it the answer comes from the executable's own name, zaro-preview, which
-    // no installed file is called -- so the taskbar showed a generic icon and a
-    // name nobody recognises beside a window titled CutReel.
+    // desktop matches a window on screen to an installed .desktop file -- which
+    // is what makes the taskbar show CutReel's icon and name rather than a
+    // generic square.
+    //
+    // Stated rather than left to the default, which is the executable's own
+    // name. That happens to be the same word today, so this line changes
+    // nothing; it is here so that the day the binary is renamed again, the
+    // entry it belongs to is something somebody had to edit on purpose rather
+    // than a coincidence that quietly stopped holding.
     //
     // The name of resources/linux/cutreel.desktop, minus the extension, as the
     // specification requires. Ignored on Windows and macOS, which identify an
@@ -134,7 +139,7 @@ int main(int argc, char** argv) {
         arguments.removeAt(at);
     }
     if (arguments.size() < 2) {
-        std::puts("usage: zaro-preview <project.cutreel> [--selftest]");
+        std::puts("usage: cutreel <project.cutreel> [--selftest]");
         std::puts("");
         std::puts("  space        play / pause        J K L   shuttle");
         std::puts("  left/right   step one frame      home/end  start / end");
@@ -232,7 +237,7 @@ int main(int argc, char** argv) {
         // std::thread destroyed while still joinable calls std::terminate.
         // No joining, no waiting: that is the point.
         QApplication::processEvents();
-        std::printf("zaro-preview quit selftest: exiting with background work in flight\n");
+        std::printf("cutreel quit selftest: exiting with background work in flight\n");
         return 0;
     }
 
@@ -243,8 +248,8 @@ int main(int argc, char** argv) {
         // no ctest entry and no CI job, and the first failure returned out of
         // main with the other fifty-nine sections never reached.
         std::fprintf(stderr,
-                     "zaro-preview: --selftest-edit is now the zaro_app_tests target.\n"
-                     "               ctest -R zaro_app_tests\n");
+                     "cutreel: --selftest-edit is now the zaro_app_tests target.\n"
+                     "          ctest -R zaro_app_tests\n");
         return 2;
     }
 
@@ -288,12 +293,11 @@ int main(int argc, char** argv) {
     }
 
     if (!window.monitor()->lastError().isEmpty()) {
-        std::fprintf(stderr, "zaro-preview: %s\n",
-                     window.monitor()->lastError().toUtf8().constData());
+        std::fprintf(stderr, "cutreel: %s\n", window.monitor()->lastError().toUtf8().constData());
         return 1;
     }
     if (grabbed.isNull()) {
-        std::fprintf(stderr, "zaro-preview: the monitor produced no image\n");
+        std::fprintf(stderr, "cutreel: the monitor produced no image\n");
         return 1;
     }
 
@@ -301,7 +305,7 @@ int main(int argc, char** argv) {
     // nothing, which is the failure this is really looking for.
     const double litFraction = bestLit;
 
-    std::printf("zaro-preview selftest\n");
+    std::printf("cutreel selftest\n");
     std::printf("  %lld frames rendered through the widget\n",
                 static_cast<long long>(window.monitor()->framesRendered()));
     std::printf("  grabbed %dx%d, %.1f%% of it lit\n", grabbed.width(), grabbed.height(),

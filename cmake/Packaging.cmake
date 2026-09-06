@@ -24,13 +24,13 @@
 # SDL from the vcpkg DLLs installed in cmake/WindowsRuntimeDeps.cmake, and the
 # MSVC runtime from InstallRequiredSystemLibraries below.
 #
-# Linux ships one file too: a .deb that puts the tree under /usr, adds a
-# launcher entry and an icon, and answers to `cutreel` as well as to
-# zaro-preview. Everything it carries is in lib/cutreel, found through the
-# relative RPATH set in tools/ and app/. The tarball that used to sit beside it
-# is gone; see the generator below for why.
+# Linux ships one file too: a .deb that puts the tree under /usr and adds a
+# launcher entry and an icon, so that installing it gives you both a `cutreel`
+# command and CutReel in the applications menu. Everything it carries is in
+# lib/cutreel, found through the relative RPATH set in tools/ and app/. The
+# tarball that used to sit beside it is gone; see the generator below for why.
 #
-# Known limitation: macOS. Only zaro-preview.app is made self-contained there,
+# Known limitation: macOS. Only cutreel.app is made self-contained there,
 # so the command-line tools in bin/ still expect a machine carrying the same
 # Homebrew dependencies the archive was built against. The same treatment Linux
 # gets below would work, with @loader_path in place of $ORIGIN.
@@ -99,7 +99,7 @@ if(WIN32)
     # than at one of the seven command-line tools beside it.
     set(CPACK_WIX_PROGRAM_MENU_FOLDER "CutReel")
     set(CPACK_WIX_ROOT_FEATURE_TITLE "CutReel")
-    set(CPACK_PACKAGE_EXECUTABLES "zaro-preview" "CutReel")
+    set(CPACK_PACKAGE_EXECUTABLES "cutreel" "CutReel")
 
     # A desktop shortcut and the .cutreel file association, neither of which CPack
     # can express as a variable. See the file for what it does and why it is
@@ -112,7 +112,7 @@ if(WIN32)
     #
     # The shortcuts are absent from this list on purpose. A non-advertised
     # shortcut takes its icon from whatever it points at, so both of ours show
-    # the icon compiled into zaro-preview.exe -- see app/CMakeLists.txt -- and
+    # the icon compiled into cutreel.exe -- see app/CMakeLists.txt -- and
     # naming one here as well would be a second copy to keep in step.
     #
     # The two bitmaps are the WixUI stock sizes, 493x58 and 493x312. Anything
@@ -153,13 +153,13 @@ elseif(APPLE)
     set(CPACK_GENERATOR TGZ)
 else()
     # One file, and it is the .deb. There was a tarball beside it -- unpack it
-    # anywhere, run bin/zaro-preview -- and it was a second Linux package to
+    # anywhere, run bin/cutreel -- and it was a second Linux package to
     # build, upload, test and answer questions about, for the same tree the .deb
     # already installs. The .deb is the one that puts CutReel in the
-    # applications menu, gives it a `cutreel` command, and can be removed again
-    # with `apt remove`; the tarball could do none of those, so shipping both
-    # meant offering a download that is worse in every way except that it needs
-    # no root, and then answering for it.
+    # applications menu, puts `cutreel` on PATH, and can be removed again with
+    # `apt remove`; the tarball could do none of those, so shipping both meant
+    # offering a download that is worse in every way except that it needs no
+    # root, and then answering for it.
     #
     # Nothing about the tarball's contents is gone: the install rules are the
     # same ones, and `cmake --install build/release --prefix somewhere` still

@@ -1,4 +1,4 @@
-# Capture the live zaro-preview window to a PNG.
+# Capture the live cutreel window to a PNG.
 #
 # The program monitor is a QRhiWidget on a D3D swapchain and will come out
 # black -- that is expected, see SKILL.md. Everything else in the window
@@ -8,7 +8,7 @@
 
 param(
     [string]$Out = "$env:TEMP\cutreel.png",
-    [string]$ProcessName = "zaro-preview"
+    [string]$ProcessName = "cutreel"
 )
 
 $ErrorActionPreference = "Stop"

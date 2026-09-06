@@ -9,7 +9,7 @@
 // executable itself, so the application mark has to be the lowest id -- that
 // is what a shortcut, the taskbar and Add/Remove Programs all display. The
 // document icon follows it, and the MSI names it by *index* rather than by id:
-// "zaro-preview.exe,1" is the second icon group in id order, which is id 2
+// "cutreel.exe,1" is the second icon group in id order, which is id 2
 // below. See cmake/wix-patch.xml. Inserting an icon between these two would
 // silently repoint that association, so append rather than insert.
 1 ICON "@ZARO_ICON_ICO@"
