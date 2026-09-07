@@ -247,6 +247,47 @@ if(UNIX AND NOT APPLE)
                     COMPONENT runtime)
     endif()
 
+    # How the xcb plugin gets an OpenGL context, which in Qt 6 is a plugin of
+    # its own rather than part of the platform plugin. Nothing links these
+    # either, and leaving them out does not stop the application starting: it
+    # starts, finds no way to make a context, and every QRhiWidget in it stays
+    # blank. That is the whole monitor and the whole timeline preview, and it
+    # is reported as
+    #
+    #   QXcbIntegration: Cannot create platform OpenGL context, neither GLX
+    #   nor EGL are enabled
+    #   QRhiGles2: Failed to create context
+    #   QRhiWidget: No QRhi
+    #
+    # which names no missing file, and is what shipped. Both are installed
+    # because which one is usable is the machine's decision, not ours: GLX is
+    # the one X11 with a traditional driver offers, EGL the one an
+    # EGL-first stack or XWayland-with-EGL offers, and Qt picks between them
+    # at startup.
+    set(zaro_qt_gl_plugins "")
+    foreach(plugin Qt6::QXcbGlxIntegrationPlugin Qt6::QXcbEglIntegrationPlugin)
+        if(TARGET ${plugin})
+            list(APPEND zaro_qt_gl_plugins ${plugin})
+        endif()
+    endforeach()
+    if(zaro_qt_gl_plugins)
+        install(IMPORTED_RUNTIME_ARTIFACTS ${zaro_qt_gl_plugins}
+            RUNTIME_DEPENDENCY_SET zaro_runtime_deps
+            LIBRARY DESTINATION "${ZARO_PRIVATE_LIBDIR}/plugins/xcbglintegrations"
+                    COMPONENT runtime)
+    elseif(TARGET Qt6::QXcbIntegrationPlugin)
+        # Fatal rather than a warning, and only in the combination that is
+        # certainly broken: shipping the xcb plugin with no way for it to
+        # reach a GPU. A warning is what this was, in effect, and a warning in
+        # a green build log is how a package that cannot draw gets released.
+        message(FATAL_ERROR
+            "Qt supplies the xcb platform plugin but neither of its OpenGL "
+            "integration plugins (QXcbGlxIntegrationPlugin, "
+            "QXcbEglIntegrationPlugin). A package built from this Qt would "
+            "start and then draw nothing. Install a Qt built with GLX or EGL "
+            "support for xcb.")
+    endif()
+
     # Image formats, for anything the interface draws that is not a PNG -- PNG
     # is built into Qt Gui and needs no plugin.
     foreach(plugin Qt6::QJpegPlugin Qt6::QSvgPlugin)

@@ -87,10 +87,15 @@ jobs:
             libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
             libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 \
             libvulkan-dev mesa-vulkan-drivers \
-            patchelf
+            patchelf xvfb libgl1-mesa-dri
           # patchelf is for packaging, not building: it is what gives the
           # bundled libraries an RPATH so they can find each other once they
           # are in lib/cutreel. See cmake/InstallBundledRpath.cmake.in.
+          #
+          # xvfb and the software GL driver are for the render check on the
+          # installed package, below. The GUI job installs the same pair for
+          # the same reason: a QRhiWidget needs a display and a GL that
+          # llvmpipe can stand behind.
 
       # Windows has no system package manager for the libraries we link, so they
       # come from the vcpkg manifest instead.
@@ -430,6 +435,13 @@ jobs:
       - name: Check the .deb installs and is launchable
         if: runner.os == 'Linux' && matrix.artifact != ''
         shell: bash
+        env:
+          # What the GUI job sets for the same reason: no GPU on a runner, so
+          # GL has to come from llvmpipe, and the RHI backend is named rather
+          # than probed.
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          QSG_RHI_BACKEND: opengl
+          QT_QPA_PLATFORM: xcb
         run: |
           sudo apt-get install -y ./dist/cutreel_*.deb
           # Resolved through PATH, the way a user's shell resolves it.
@@ -469,6 +481,27 @@ jobs:
           code=0
           QT_QPA_PLATFORM=offscreen cutreel --quiet || code=$?
           test "$code" -eq 2
+
+          # And then the thing all of this is for: does the installed package
+          # put a picture on the screen. Everything above can pass on a package
+          # whose application starts, opens a window and draws nothing --
+          # which is what shipped when the xcb plugin's OpenGL integration was
+          # left out of it, because that is a plugin nothing links, loaded by
+          # name, and its absence is a warning on stderr rather than a failure
+          # to start. --selftest renders the project and returns non-zero
+          # unless a frame came back with something lit in it.
+          #
+          # On a real display, deliberately: QT_QPA_PLATFORM=offscreen has no
+          # QRhi, so it would pass without ever touching the code path this
+          # exists to test. Xvfb with llvmpipe behind it is the same recipe the
+          # GUI job uses, and xcb is named rather than left to Qt so that the
+          # plugin under test is the one that gets used.
+          zaro-cut /tmp/smoke.cutreel testdata/media/ladder_prores.mov
+          xvfb-run -a --server-args="-screen 0 1280x800x24" \
+            cutreel /tmp/smoke.cutreel --selftest --capture /tmp/smoke.png
+          # --selftest prints what it measured, but an exit code can be zero
+          # from a build that wrote no file, so the picture is checked too.
+          test -s /tmp/smoke.png
           sudo apt-get remove -y cutreel
 
       - name: Upload the archive
