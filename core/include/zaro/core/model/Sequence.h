@@ -1,8 +1,12 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
+#include "zaro/core/media/ColorInfo.h"
+#include "zaro/core/model/Caption.h"
+#include "zaro/core/model/Marker.h"
 #include "zaro/core/model/Track.h"
 #include "zaro/core/time/Rational.h"
 
@@ -22,7 +26,33 @@ public:
     [[nodiscard]] const std::string& name() const noexcept { return name_; }
     void setName(std::string value) { name_ = std::move(value); }
 
+    /// What this sequence is delivered as.
+    ///
+    /// The counterpart to `MediaRef::transferOverride`: that says what came in,
+    /// this says what goes out. It is a property of the sequence rather than of
+    /// the export, because it is also what the curve editor and the scopes are
+    /// drawn against -- those measure the display signal (ADR-010), and if the
+    /// deliverable's curve and the one they assume disagreed, a grade would be
+    /// judged against a picture nobody is going to see.
+    struct Output {
+        media::TransferFunction transfer{media::TransferFunction::BT709};
+
+        /// Where the highlight rolloff starts, in linear light. 1 or more means
+        /// no rolloff: the encoder clips, which is what this program did before
+        /// there was a choice.
+        double highlightKnee{1.0};
+
+        friend bool operator==(const Output&, const Output&) = default;
+    };
+
+    [[nodiscard]] const Output& output() const noexcept { return output_; }
+    void setOutput(const Output& value) { output_ = value; }
+
     [[nodiscard]] const time::Rational& frameRate() const noexcept { return frameRate_; }
+    /// Only meaningful while the sequence is empty: every clip's timeline range
+    /// is expressed at this rate, so changing it under a cut would retime the
+    /// whole thing. `edit::makeConformSequence` is where that rule is enforced.
+    void setFrameRate(time::Rational value) { frameRate_ = std::move(value); }
     [[nodiscard]] const time::Rational& audioSampleRate() const noexcept {
         return audioSampleRate_;
     }
@@ -43,7 +73,36 @@ public:
     [[nodiscard]] const std::vector<Track>& videoTracks() const noexcept { return videoTracks_; }
     [[nodiscard]] const std::vector<Track>& audioTracks() const noexcept { return audioTracks_; }
 
+    [[nodiscard]] const std::vector<Marker>& markers() const noexcept { return markers_; }
+    void setMarkers(std::vector<Marker> markers);
+
+    /// The marker covering `t`, if any.
+    [[nodiscard]] const Marker* markerAt(const time::RationalTime& t) const;
+    /// The nearest marker strictly after `t`, for jumping forward.
+    [[nodiscard]] const Marker* markerAfter(const time::RationalTime& t) const;
+    /// The nearest marker strictly before `t`.
+    [[nodiscard]] const Marker* markerBefore(const time::RationalTime& t) const;
+
     [[nodiscard]] Track* findTrack(TrackId id);
+    /// Whether anything on this track should be heard or seen.
+    ///
+    /// Solo is a property of the sequence: a track is audible if it is not muted
+    /// and either nothing is soloed or it is one of the soloed ones. Asking a
+    /// track on its own gives the wrong answer for every track in a sequence
+    /// where something else is soloed, which is why this lives here.
+    [[nodiscard]] const CaptionTrack& captions() const noexcept { return captions_; }
+    [[nodiscard]] CaptionTrack& captions() noexcept { return captions_; }
+
+    [[nodiscard]] bool isAudible(const Track& track) const;
+    /// Whether any track of `kind` is soloed.
+    ///
+    /// Scoped to one kind, because picture and sound are two independent
+    /// solo groups. Soloing a video track means "show me only this shot"; it
+    /// cannot also mean "and silence the whole mix", and asking across both
+    /// lists made it mean exactly that -- an export with a video track left
+    /// soloed came out silent, with the picture perfectly fine.
+    [[nodiscard]] bool hasSolo(TrackKind kind) const;
+
     [[nodiscard]] const Track* findTrack(TrackId id) const;
 
     TrackId addTrack(TrackId id, TrackKind kind, std::string name);
@@ -68,8 +127,27 @@ private:
     std::int32_t width_{1920};
     std::int32_t height_{1080};
     time::RationalTime startTime_{};
+    std::vector<Marker> markers_;
     std::vector<Track> videoTracks_;
     std::vector<Track> audioTracks_;
+    CaptionTrack captions_;
+    Output output_;
 };
+
+/// The transform to draw a clip with, following whatever it is pinned to.
+///
+/// The host's transform is composed with the clip's own: the clip's position is
+/// scaled and rotated by the host's, so a title sitting in the corner of a shot
+/// stays in the corner when the shot is scaled or turned. Opacity is not
+/// inherited -- see `Clip::pinnedTo`.
+///
+/// Chains are followed, with a depth limit: a pin cycle cannot be made through
+/// the edit operations, but a project file can arrive with one and must not
+/// take the renderer down.
+[[nodiscard]] Transform pinnedTransformAt(const Sequence& sequence, const Clip& clip,
+                                          const time::RationalTime& at);
+
+/// The clip with this id, on whichever track it is on.
+[[nodiscard]] const Clip* findClip(const Sequence& sequence, ClipId id);
 
 }  // namespace zaro::model

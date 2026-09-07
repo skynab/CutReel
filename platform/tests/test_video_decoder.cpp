@@ -1,4 +1,5 @@
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <memory>
 #include <string>
@@ -7,6 +8,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "zaro/platform/ffmpeg/FFmpegMedia.h"
+#include "zaro/platform/ffmpeg/FFmpegRender.h"
 
 #include "Fixtures.h"
 
@@ -356,4 +358,46 @@ TEST_CASE("Decode throughput", "[.benchmark][media][decode]") {
                        << (decoder->usingHardware() ? "hardware" : "software") << ")");
     CHECK(decoded == 150);
     CHECK(realtime > 1.0);
+}
+
+TEST_CASE("Two clips at one instant each keep their own decoded frame", "[media][decode]") {
+    // What the compositor does on every frame of a two-track timeline: ask for
+    // one track's picture, then the other's, then come back to the first when
+    // the monitor repaints. Asking a decoder for a time it has already passed
+    // costs a seek and a decode forward from the keyframe before it, so a memo
+    // that only remembers the track that drew last is no memo at all once a
+    // second track exists -- every repaint paid for two seeks.
+    ZARO_REQUIRE_FIXTURE("ladder_h264.mp4");
+
+    model::Project project;
+    const auto addMedia = [&project] {
+        model::MediaRef ref;
+        ref.id = project.ids().next<model::MediaRefTag>();
+        ref.path = fixture("ladder_h264.mp4");
+        auto probed = platform::ffmpeg::probe(ref.path);
+        REQUIRE(probed);
+        ref.info = *probed;
+        return project.addMedia(ref);
+    };
+    const model::MediaRefId lower = addMedia();
+    const model::MediaRefId upper = addMedia();
+
+    auto source = platform::ffmpeg::ProjectMediaSource::open(project);
+    REQUIRE(source);
+
+    const time::RationalTime at{7, time::rates::fps25};
+    auto first = (*source)->sourceFrameFor(lower, at);
+    REQUIRE(first);
+    const media::VideoFrame* held = *first;
+    auto second = (*source)->sourceFrameFor(upper, at);
+    REQUIRE(second);
+    // Each media gets a slot of its own, so the second read cannot have
+    // overwritten the first.
+    CHECK(*second != held);
+
+    auto again = (*source)->sourceFrameFor(lower, at);
+    REQUIRE(again);
+    CHECK(*again == held);
+    CHECK(ladderLuma(**again) == expectedLadderLuma(7));
+    CHECK(ladderLuma(**second) == expectedLadderLuma(7));
 }

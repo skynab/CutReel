@@ -1,5 +1,10 @@
 #include "zaro/core/model/Project.h"
 
+#include <algorithm>
+#include <cstdint>
+#include <set>
+#include <vector>
+
 #include "zaro/core/Check.h"
 
 namespace zaro::model {
@@ -35,6 +40,61 @@ MediaRefId Project::addMedia(MediaRef ref) {
     return id;
 }
 
+bool Project::removeMedia(MediaRefId id) {
+    const auto gone = std::find_if(media_.begin(), media_.end(),
+                                   [id](const MediaRef& ref) { return ref.id == id; });
+    if (gone == media_.end()) {
+        return false;
+    }
+    media_.erase(gone);
+    std::erase_if(subclips_, [id](const Subclip& subclip) { return subclip.source == id; });
+    return true;
+}
+
+Project newProject(const std::string& sequenceName) {
+    Project project;
+    Sequence sequence{project.ids().next<SequenceTag>(), sequenceName, time::rates::fps25};
+    sequence.setSize(1920, 1080);
+    // One of each. A timeline with no tracks has nowhere to drop anything, and
+    // the first thing anybody does is drop something.
+    //
+    // Named for what goes on them rather than for where they sit: the timeline
+    // already draws the position as a badge, so calling the track "V1" as well
+    // spends the header on saying the same thing twice.
+    sequence.addTrack(project.ids().next<TrackTag>(), TrackKind::Video, "Main");
+    sequence.addTrack(project.ids().next<TrackTag>(), TrackKind::Audio, "Dialogue");
+    const SequenceId id = project.addSequence(std::move(sequence));
+    project.setActiveSequence(id);
+    return project;
+}
+
+const Subclip* Project::findSubclip(SubclipId id) const {
+    for (const Subclip& subclip : subclips_) {
+        if (subclip.id == id) {
+            return &subclip;
+        }
+    }
+    return nullptr;
+}
+
+SubclipId Project::addSubclip(Subclip subclip) {
+    ZARO_CHECK(subclip.id.isValid(), "adding a subclip with no id");
+    ZARO_CHECK(findSubclip(subclip.id) == nullptr, "adding a subclip id that already exists");
+    const SubclipId id = subclip.id;
+    subclips_.push_back(std::move(subclip));
+    return id;
+}
+
+bool Project::removeSubclip(SubclipId id) {
+    for (auto it = subclips_.begin(); it != subclips_.end(); ++it) {
+        if (it->id == id) {
+            subclips_.erase(it);
+            return true;
+        }
+    }
+    return false;
+}
+
 SequenceId Project::addSequence(Sequence sequence) {
     ZARO_CHECK(sequence.id().isValid(), "adding a sequence with no id");
     ZARO_CHECK(findSequence(sequence.id()) == nullptr, "adding a sequence id that already exists");
@@ -44,6 +104,45 @@ SequenceId Project::addSequence(Sequence sequence) {
         activeSequence_ = id;
     }
     return id;
+}
+
+bool Project::nestingWouldCycle(SequenceId outer, SequenceId inner) const {
+    if (!outer.isValid() || !inner.isValid()) {
+        return false;
+    }
+    if (outer == inner) {
+        return true;
+    }
+
+    // Walk what `inner` already contains. If `outer` is anywhere in there,
+    // putting `inner` inside it closes the loop.
+    std::vector<SequenceId> pending{inner};
+    std::set<std::uint64_t> seen;
+    while (!pending.empty()) {
+        const SequenceId current = pending.back();
+        pending.pop_back();
+        if (!seen.insert(current.value()).second) {
+            continue;  // already walked; a diamond is not a cycle
+        }
+        const Sequence* sequence = findSequence(current);
+        if (sequence == nullptr) {
+            continue;
+        }
+        for (const auto* list : {&sequence->videoTracks(), &sequence->audioTracks()}) {
+            for (const Track& track : *list) {
+                for (const Clip& clip : track.clips()) {
+                    if (!clip.nested.isValid()) {
+                        continue;
+                    }
+                    if (clip.nested == outer) {
+                        return true;
+                    }
+                    pending.push_back(clip.nested);
+                }
+            }
+        }
+    }
+    return false;
 }
 
 }  // namespace zaro::model

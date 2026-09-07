@@ -1,0 +1,1702 @@
+// Time: retimes, transitions, and the edits that move the picture.
+//
+// Driven through the real window against the real compositor. See GuiFixture.h
+// for what is shared and why.
+
+#include <QCheckBox>
+#include <QComboBox>
+#include <QContextMenuEvent>
+#include <QDoubleSpinBox>
+#include <QGroupBox>
+#include <QKeyEvent>
+#include <QLabel>
+#include <QMenu>
+#include <QPushButton>
+#include <QTimer>
+#include <cmath>
+#include <cstdint>
+#include <utility>
+
+#include <catch2/catch_test_macros.hpp>
+
+#include "zaro/core/edit/Operations.h"
+
+#include "../FrameGrab.h"
+#include "GuiFixture.h"
+
+// The suite was written inside main(), which had this at file scope; the
+// bodies still say `model::` and `Status` unqualified.
+using namespace zaro;
+
+using zaro::app::dragOnTimeline;
+using zaro::app::settledGrab;
+
+// meanGray is named here rather than aliased inside each test, which is how it
+// arrived: the suite was one main() sharing local lambdas, and the conversion
+// left every test opening with a reference bound to this function. MSVC's
+// constexpr evaluator crashes on a call made through such a reference when the
+// result initialises a const double -- an internal compiler error, not a
+// diagnostic -- so `const double bright = meanGray(image);` took the whole
+// build down. Calling the function by its own name is what every other
+// compiler was doing anyway.
+using zaro::app::testing::meanGray;
+
+// Time remapping and freeze frames, through the real panel.
+//
+// A freeze is the one retime whose effect is visible in a single frame:
+// a frame that was black shows the lit one instead. That makes it
+// measurable here in a way a speed ramp is not, and it exercises the
+// same curve a ramp would use.
+TEST_CASE("Time remapping and freeze frames", "[gui]") {
+    auto& window = zaro::app::testing::gui();
+    const zaro::app::testing::Rewind rewind;
+    // Looked up per test rather than held by the fixture: a test that adds a
+    // track or a sequence reallocates the vectors these point into.
+    [[maybe_unused]] auto* timeline = window.timeline();
+    [[maybe_unused]] const auto& sequence = *window.sequence();
+    [[maybe_unused]] const auto& videoTrack = sequence.videoTracks().front();
+    [[maybe_unused]] const auto original = videoTrack.clips().front();
+    [[maybe_unused]] const auto row = timeline->rowFor(videoTrack.id());
+    REQUIRE(row.has_value());
+    [[maybe_unused]] const int y = row->top + row->height / 2;
+
+    const auto grayAt = [&](std::int64_t frame) {
+        window.setPosition(zaro::time::RationalTime{frame, sequence.frameRate()});
+        return meanGray(settledGrab(window.monitor()));
+    };
+
+    std::int64_t litFrame = -1;
+    double lit = 0.0;
+    std::int64_t darkFrame = -1;
+    double darkest = 1e9;
+    for (std::int64_t frame = 8; frame < 60; ++frame) {
+        const double gray = grayAt(frame);
+        if (gray > lit) {
+            lit = gray;
+            litFrame = frame;
+        }
+        if (gray < darkest) {
+            darkest = gray;
+            darkFrame = frame;
+        }
+    }
+    if (litFrame < 0 || darkFrame < 0 || !(lit > darkest * 4.0 + 10.0)) {
+        zaro::app::testing::failf("no lit and dark pair to freeze between\n");
+    }
+
+    const auto remapTrackId =
+        window.project().findSequence(sequence.id())->videoTracks().front().id();
+    const auto remapClipId =
+        window.project().findSequence(sequence.id())->findTrack(remapTrackId)->clips().front().id;
+    timeline->selectOnly(remapTrackId, remapClipId);
+    window.effects()->setSelection(remapTrackId, remapClipId);
+    window.setPosition(zaro::time::RationalTime{litFrame, sequence.frameRate()});
+    QApplication::processEvents();
+
+    auto* freezeButton = window.effects()->findChild<QPushButton*>("freeze-frame");
+    auto* remapBox = window.effects()->findChild<QCheckBox*>("time-remap");
+    if (freezeButton == nullptr || remapBox == nullptr) {
+        zaro::app::testing::failf("the time remap controls are not in the panel\n");
+    }
+    freezeButton->click();
+    QApplication::processEvents();
+
+    if (!remapBox->isChecked()) {
+        zaro::app::testing::failf("freezing did not turn time remapping on\n");
+    }
+    // The frame that was black now shows the lit one.
+    const double frozen = grayAt(darkFrame);
+    std::printf(
+        "  freeze frame: %.1f lit, %.1f dark, %.1f after freezing on the lit "
+        "frame\n",
+        lit, darkest, frozen);
+    if (!(frozen > lit * 0.8)) {
+        zaro::app::testing::failf("the freeze did not reach the picture\n");
+    }
+
+    // And switching it off puts the clip back on its own frames.
+    remapBox->setChecked(false);
+    QApplication::processEvents();
+    const double thawed = grayAt(darkFrame);
+    if (!(thawed < lit * 0.5)) {
+        zaro::app::testing::failf("removing the remap did not restore the clip\n");
+    }
+
+    while (window.commands().canUndo()) {
+        window.commands().undo(window.project());
+    }
+    window.monitor()->update();
+    QApplication::processEvents();
+}
+
+// Responsive timing, through the real panel and a real trim.
+//
+// A title that fades up and away, trimmed shorter: without the
+// protection the exit is simply cut off, and the point of the feature
+// is that the last frame goes dark either way.
+TEST_CASE("Responsive timing survives a trim", "[gui]") {
+    auto& window = zaro::app::testing::gui();
+    const zaro::app::testing::Rewind rewind;
+    // Looked up per test rather than held by the fixture: a test that adds a
+    // track or a sequence reallocates the vectors these point into.
+    [[maybe_unused]] auto* timeline = window.timeline();
+    [[maybe_unused]] const auto& sequence = *window.sequence();
+    [[maybe_unused]] const auto& videoTrack = sequence.videoTracks().front();
+    [[maybe_unused]] const auto original = videoTrack.clips().front();
+    [[maybe_unused]] const auto row = timeline->rowFor(videoTrack.id());
+    REQUIRE(row.has_value());
+    [[maybe_unused]] const int y = row->top + row->height / 2;
+
+    const auto respSequenceId = window.project().activeSequence();
+    const auto* respSequence = window.project().findSequence(respSequenceId);
+    const auto respRate = respSequence->frameRate();
+    const auto respTrackId = respSequence->videoTracks().back().id();
+    constexpr int kAuthored = 48;
+    constexpr int kTrimmed = 24;
+
+    zaro::model::Graphic card;
+    card.kind = zaro::model::GraphicKind::Rectangle;
+    card.width = 200.0;
+    card.height = 150.0;
+    card.red = 1.0;
+    card.green = 1.0;
+    card.blue = 1.0;
+    auto added = zaro::edit::makeAddGraphic(
+        window.project(), {respSequenceId, respTrackId}, card,
+        zaro::time::TimeRange{zaro::time::RationalTime{0, respRate},
+                              zaro::time::RationalTime{kAuthored, respRate}});
+    if (!added) {
+        zaro::app::testing::failf("%s\n", added.error().toString().c_str());
+    }
+    window.commands().execute(window.project(), std::move(*added));
+    zaro::model::ClipId cardId;
+    for (const auto& candidate :
+         window.project().findSequence(respSequenceId)->findTrack(respTrackId)->clips()) {
+        if (candidate.graphic.kind == zaro::model::GraphicKind::Rectangle &&
+            candidate.graphic.width == 200.0) {
+            cardId = candidate.id;
+        }
+    }
+    if (!cardId.isValid()) {
+        zaro::app::testing::failf("the card was not added\n");
+    }
+
+    // Up over twelve frames, hold, away over the last twelve.
+    zaro::model::Curve fade;
+    for (const auto& [frame, value] :
+         {std::pair{0, 0.0}, std::pair{12, 1.0}, std::pair{36, 1.0}, std::pair{kAuthored, 0.0}}) {
+        fade.set(zaro::model::Keyframe{zaro::time::RationalTime{frame, respRate},
+                                       value,
+                                       zaro::model::Interpolation::Linear,
+                                       {},
+                                       {}});
+    }
+    auto animated = zaro::edit::makeSetCurve(window.project(), {respSequenceId, respTrackId},
+                                             cardId, zaro::model::Param::Opacity, fade);
+    if (!animated) {
+        zaro::app::testing::failf("%s\n", animated.error().toString().c_str());
+    }
+    window.commands().execute(window.project(), std::move(*animated));
+
+    timeline->selectOnly(respTrackId, cardId);
+    window.effects()->setSelection(respTrackId, cardId);
+    QApplication::processEvents();
+    auto* introBox = window.effects()->findChild<QDoubleSpinBox*>("responsive-intro");
+    auto* outroBox = window.effects()->findChild<QDoubleSpinBox*>("responsive-outro");
+    if (introBox == nullptr || outroBox == nullptr) {
+        zaro::app::testing::failf("the responsive controls are not in the panel\n");
+    }
+    const double half = 12.0 / respRate.toDouble();
+    introBox->setValue(half);
+    outroBox->setValue(half);
+    QApplication::processEvents();
+    const auto* protectedCard =
+        window.project().findSequence(respSequenceId)->findTrack(respTrackId)->find(cardId);
+    if (!protectedCard->responsive.isSet() ||
+        protectedCard->responsive.authored.frames() != kAuthored) {
+        zaro::app::testing::failf("the panel did not set the responsive timing\n");
+    }
+
+    // Trim the tail, the way a trim tool does.
+    auto cut = zaro::edit::makeTrim(window.project(), {respSequenceId, respTrackId}, cardId,
+                                    zaro::edit::Edge::Out,
+                                    zaro::time::RationalTime{kTrimmed - kAuthored, respRate});
+    if (!cut) {
+        zaro::app::testing::failf("%s\n", cut.error().toString().c_str());
+    }
+    window.commands().execute(window.project(), std::move(*cut));
+
+    const auto* trimmedCard =
+        window.project().findSequence(respSequenceId)->findTrack(respTrackId)->find(cardId);
+    const auto endFrame = trimmedCard->endExclusive() - zaro::time::RationalTime{1, respRate};
+    const double lastOpacity = trimmedCard->transformAt(endFrame).opacity;
+    const double midOpacity =
+        trimmedCard->transformAt(trimmedCard->start() + zaro::time::RationalTime{12, respRate})
+            .opacity;
+    std::printf("  responsive timing: %.2f opacity mid-clip, %.2f on the last frame\n", midOpacity,
+                lastOpacity);
+    if (!(midOpacity > 0.9)) {
+        zaro::app::testing::failf("the protected intro did not finish\n");
+    }
+    if (!(lastOpacity < 0.2)) {
+        zaro::app::testing::failf("the exit did not follow the trim\n");
+    }
+
+    // And on the picture: the last frame of a title that has faded out
+    // is darker than the middle of it.
+    window.setPosition(trimmedCard->start() + zaro::time::RationalTime{12, respRate});
+    window.renderCache().clear();
+    const double litMiddle = meanGray(settledGrab(window.monitor()));
+    window.setPosition(endFrame);
+    window.renderCache().clear();
+    const double litEnd = meanGray(settledGrab(window.monitor()));
+    if (!(litEnd < litMiddle)) {
+        zaro::app::testing::failf("the faded-out last frame is not darker (%.1f vs %.1f)\n", litEnd,
+                                  litMiddle);
+    }
+
+    while (window.commands().canUndo()) {
+        window.commands().undo(window.project());
+    }
+    window.renderCache().clear();
+    window.monitor()->update();
+    QApplication::processEvents();
+}
+
+// Wipes and slides, through the real timeline and the real compositor.
+//
+// Between two generated clips rather than the footage: this fixture is
+// black except on its flash frames, and a wipe between two black shots
+// is a measurement of nothing. A white rectangle and a grey one have a
+// boundary somebody can point at, which is exactly what a wipe is for.
+TEST_CASE("Wipes and slides, through the real compositor", "[gui]") {
+    auto& window = zaro::app::testing::gui();
+    const zaro::app::testing::Rewind rewind;
+    // Looked up per test rather than held by the fixture: a test that adds a
+    // track or a sequence reallocates the vectors these point into.
+    [[maybe_unused]] auto* timeline = window.timeline();
+    [[maybe_unused]] const auto& sequence = *window.sequence();
+    [[maybe_unused]] const auto& videoTrack = sequence.videoTracks().front();
+    [[maybe_unused]] const auto original = videoTrack.clips().front();
+    [[maybe_unused]] const auto row = timeline->rowFor(videoTrack.id());
+    REQUIRE(row.has_value());
+    [[maybe_unused]] const int y = row->top + row->height / 2;
+
+    const auto wipeSequenceId = window.project().activeSequence();
+    const auto& wipeTracks = window.project().findSequence(wipeSequenceId)->videoTracks();
+    const auto wipeTrackId = wipeTracks.size() > 1 ? wipeTracks[1].id() : wipeTracks.front().id();
+    const auto wipeRate = window.project().findSequence(wipeSequenceId)->frameRate();
+
+    zaro::model::Graphic panel;
+    panel.kind = zaro::model::GraphicKind::Rectangle;
+    panel.width = 4000.0;
+    panel.height = 4000.0;
+    panel.red = 1.0;
+    panel.green = 1.0;
+    panel.blue = 1.0;
+    auto added =
+        zaro::edit::makeAddGraphic(window.project(), {wipeSequenceId, wipeTrackId}, panel,
+                                   zaro::time::TimeRange{zaro::time::RationalTime{0, wipeRate},
+                                                         zaro::time::RationalTime{80, wipeRate}});
+    if (!added) {
+        zaro::app::testing::failf("%s\n", added.error().toString().c_str());
+    }
+    window.commands().execute(window.project(), std::move(*added));
+
+    const auto cutAt = zaro::time::RationalTime{40, wipeRate};
+    auto razored = zaro::edit::makeRazor(window.project(), {wipeSequenceId, wipeTrackId}, cutAt);
+    if (!razored) {
+        zaro::app::testing::failf("%s\n", razored.error().toString().c_str());
+    }
+    window.commands().execute(window.project(), std::move(*razored));
+
+    // The second piece pulled well down, so the two shots differ.
+    // The piece that starts at the cut, not the last clip on the
+    // track -- the fixture's own clip is still there beyond the panel.
+    const zaro::model::Clip* tail =
+        window.project().findSequence(wipeSequenceId)->findTrack(wipeTrackId)->clipAt(cutAt);
+    if (tail == nullptr) {
+        zaro::app::testing::failf("the razor left nothing at the cut\n");
+    }
+    const auto tailId = tail->id;
+    zaro::model::ColorCorrection dark;
+    dark.exposure = -4.0;
+    auto graded = zaro::edit::makeSetColorCorrection(window.project(),
+                                                     {wipeSequenceId, wipeTrackId}, tailId, dark);
+    if (!graded) {
+        zaro::app::testing::failf("%s\n", graded.error().toString().c_str());
+    }
+    window.commands().execute(window.project(), std::move(*graded));
+
+    auto dissolve =
+        zaro::edit::makeAddCrossDissolve(window.project(), {wipeSequenceId, wipeTrackId}, cutAt,
+                                         zaro::time::RationalTime{20, wipeRate});
+    if (!dissolve) {
+        zaro::app::testing::failf("%s\n", dissolve.error().toString().c_str());
+    }
+    window.commands().execute(window.project(), std::move(*dissolve));
+
+    const auto span = window.project()
+                          .findSequence(wipeSequenceId)
+                          ->findTrack(wipeTrackId)
+                          ->transitions()
+                          .front()
+                          .range;
+    const auto middle =
+        span.start() + zaro::time::RationalTime{span.duration().frames() / 2, span.start().rate()};
+
+    // What this test is about is the picture, not the route to it. The kind is
+    // set through the operation, which is what every core test does and what
+    // the panel does one layer up -- the timeline used to carry a method for
+    // this that nothing but these two lines ever called.
+    const auto transitionId = window.project()
+                                  .findSequence(wipeSequenceId)
+                                  ->findTrack(wipeTrackId)
+                                  ->transitions()
+                                  .front()
+                                  .id;
+    const auto beKind = [&](zaro::model::TransitionKind kind) {
+        auto built = zaro::edit::makeSetTransitionKind(
+            window.project(), {wipeSequenceId, wipeTrackId}, transitionId, kind,
+            zaro::model::TransitionDirection::Right);
+        if (!built) {
+            zaro::app::testing::failf("%s\n", built.error().toString().c_str());
+        }
+        window.commands().execute(window.project(), std::move(*built));
+        window.commands().breakMerge();
+    };
+
+    timeline->selectOnly(
+        wipeTrackId,
+        window.project().findSequence(wipeSequenceId)->findTrack(wipeTrackId)->clips().front().id);
+    window.setPosition(middle);
+    window.renderCache().clear();
+    const QImage blended = settledGrab(window.monitor());
+    const double dissolveLeft = meanGray(blended.copy(0, 0, blended.width() / 2, blended.height()));
+    const double dissolveRight =
+        meanGray(blended.copy(blended.width() / 2, 0, blended.width() / 2, blended.height()));
+
+    beKind(zaro::model::TransitionKind::Wipe);
+    window.renderCache().clear();
+    const QImage wiped = settledGrab(window.monitor());
+    const double wipeLeft = meanGray(wiped.copy(0, 0, wiped.width() / 2, wiped.height()));
+    const double wipeRight =
+        meanGray(wiped.copy(wiped.width() / 2, 0, wiped.width() / 2, wiped.height()));
+
+    std::printf("  wipe: dissolve halves %.1f/%.1f, wipe halves %.1f/%.1f\n", dissolveLeft,
+                dissolveRight, wipeLeft, wipeRight);
+    // A dissolve blends both halves the same way; a wipe puts one shot
+    // on each side of a line.
+    if (std::fabs(dissolveLeft - dissolveRight) > 10.0) {
+        zaro::app::testing::failf("a dissolve did not blend evenly across the frame\n");
+    }
+    if (!(wipeRight > wipeLeft + 30.0)) {
+        zaro::app::testing::failf("the wipe did not put the two shots either side\n");
+    }
+
+    beKind(zaro::model::TransitionKind::Slide);
+    window.renderCache().clear();
+    static_cast<void>(settledGrab(window.monitor()));
+    if (!window.monitor()->lastError().isEmpty()) {
+        zaro::app::testing::failf("rendering a slide reported %s\n",
+                                  window.monitor()->lastError().toUtf8().constData());
+    }
+
+    while (window.commands().canUndo()) {
+        window.commands().undo(window.project());
+    }
+    window.renderCache().clear();
+    window.monitor()->update();
+    QApplication::processEvents();
+}
+
+// The right-click route into scene detection.
+//
+// The detection itself is covered above and headlessly in core/tests; what
+// this covers is the wiring, which is the part the menu adds: that a
+// right-click over a clip offers the item, that picking it asks the window
+// rather than doing nothing, and that the clip under the pointer is the one
+// it ends up aimed at.
+//
+// The menu is modal -- `exec` does not return until it closes -- so the
+// inspection is queued before the event is sent and runs from inside the
+// menu's own event loop. Without that this test would hang rather than fail.
+TEST_CASE("Right-clicking a clip offers to detect its cuts", "[gui]") {
+    auto& window = zaro::app::testing::gui();
+    const zaro::app::testing::Rewind rewind;
+    auto* timeline = window.timeline();
+    const auto& sequence = *window.sequence();
+    const auto& videoTrack = sequence.videoTracks().front();
+    const auto videoClip = videoTrack.clips().front().id;
+    const auto videoRow = timeline->rowFor(videoTrack.id());
+    REQUIRE(videoRow.has_value());
+
+    // Well clear of the track headers, which own the left 150 pixels and have
+    // a right-click menu of their own -- and far enough into the clip that the
+    // hit is its body rather than a trim handle.
+    const auto pointAt = [](const std::optional<zaro::ui::TimelineLayout::Row>& row) {
+        return QPoint(200, row->top + row->height / 2);
+    };
+
+    // What the menu did, filled in from inside its event loop.
+    struct Seen {
+        bool opened{false};
+        bool offered{false};
+        bool enabled{false};
+    };
+
+    // Open the menu, look at it, and pick the item if it is there.
+    const auto rightClick = [&](const QPoint& at, bool choose) {
+        Seen seen;
+        QTimer::singleShot(0, [&] {
+            auto* menu = qobject_cast<QMenu*>(QApplication::activePopupWidget());
+            if (menu == nullptr) {
+                return;
+            }
+            seen.opened = true;
+            for (QAction* action : menu->actions()) {
+                if (action->text() != QStringLiteral("Detect Cuts in This Clip")) {
+                    continue;
+                }
+                seen.offered = true;
+                seen.enabled = action->isEnabled();
+                if (choose && action->isEnabled()) {
+                    // Highlighted and then chosen with the keyboard, which is
+                    // the path a person's pick takes. Calling `trigger` instead
+                    // fires the action without going through the menu, so
+                    // `exec` never learns what was picked and returns nothing.
+                    menu->setActiveAction(action);
+                    QKeyEvent pick(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+                    QCoreApplication::sendEvent(menu, &pick);
+                }
+            }
+            if (menu->isVisible()) {
+                menu->close();
+            }
+        });
+        QContextMenuEvent event(QContextMenuEvent::Mouse, at, timeline->mapToGlobal(at));
+        QCoreApplication::sendEvent(timeline, &event);
+        QApplication::processEvents();
+        return seen;
+    };
+
+    // Something else selected first, so that the selection landing on the
+    // right clip is this menu's doing and not what was already true.
+    timeline->selectOnly({}, {});
+    QApplication::processEvents();
+
+    std::int32_t asked = 0;
+    const auto asking = QObject::connect(
+        timeline, &zaro::app::TimelineWidget::detectScenesRequested, [&asked] { ++asked; });
+    // Read from the signal rather than from a getter, because the signal is
+    // what the rest of the window selects on: an accessor could agree with the
+    // widget's own field while nothing downstream had been told.
+    zaro::model::ClipId announced;
+    const auto selecting = QObject::connect(
+        timeline, &zaro::app::TimelineWidget::selectionChanged,
+        [&announced](zaro::model::TrackId, zaro::model::ClipId clip) { announced = clip; });
+
+    const Seen video = rightClick(pointAt(videoRow), true);
+    QObject::disconnect(asking);
+    QObject::disconnect(selecting);
+
+    if (!video.opened) {
+        zaro::app::testing::failf("right-clicking a clip opened no menu\n");
+    }
+    if (!video.offered) {
+        zaro::app::testing::failf("the clip menu did not offer to detect cuts\n");
+    }
+    if (!video.enabled) {
+        zaro::app::testing::failf("detect cuts was offered but greyed out on an unlocked track\n");
+    }
+    if (asked != 1) {
+        zaro::app::testing::failf("picking detect cuts asked for it %d times, wanted 1\n", asked);
+    }
+    if (announced != videoClip) {
+        zaro::app::testing::failf("the right-clicked clip did not become the selected one\n");
+    }
+
+    // Sound has no picture to analyse, so the item is absent rather than
+    // offered and refused.
+    if (!sequence.audioTracks().empty() && !sequence.audioTracks().front().clips().empty()) {
+        const auto audioRow = timeline->rowFor(sequence.audioTracks().front().id());
+        REQUIRE(audioRow.has_value());
+        const Seen audio = rightClick(pointAt(audioRow), false);
+        if (audio.offered) {
+            zaro::app::testing::failf("the audio clip menu offered to detect cuts in it\n");
+        }
+    }
+
+    std::printf("  clip menu: detect cuts offered on picture, absent on sound\n");
+}
+
+// Scene edit detection, over the real footage.
+//
+// This fixture is one continuous take with white flashes in it, which
+// makes it exactly the case the detector has to get right: a flash is
+// not a cut. The assertion is that it finds *nothing*, and it can fail
+// -- with the flash guard removed the same clip comes back in pieces.
+TEST_CASE("Scene edit detection over the real footage", "[gui]") {
+    auto& window = zaro::app::testing::gui();
+    const zaro::app::testing::Rewind rewind;
+    // Looked up per test rather than held by the fixture: a test that adds a
+    // track or a sequence reallocates the vectors these point into.
+    [[maybe_unused]] auto* timeline = window.timeline();
+    [[maybe_unused]] const auto& sequence = *window.sequence();
+    [[maybe_unused]] const auto& videoTrack = sequence.videoTracks().front();
+    [[maybe_unused]] const auto original = videoTrack.clips().front();
+    [[maybe_unused]] const auto row = timeline->rowFor(videoTrack.id());
+    REQUIRE(row.has_value());
+    [[maybe_unused]] const int y = row->top + row->height / 2;
+
+    const auto sceneSequenceId = window.project().activeSequence();
+    const auto sceneTrackId =
+        window.project().findSequence(sceneSequenceId)->videoTracks().front().id();
+    const auto* sceneTrack =
+        window.project().findSequence(sceneSequenceId)->findTrack(sceneTrackId);
+    if (sceneTrack->clips().empty()) {
+        zaro::app::testing::failf("nothing on the track to analyse\n");
+    }
+    const auto sceneClipId = sceneTrack->clips().front().id;
+    const std::size_t clipsBefore = sceneTrack->clips().size();
+
+    timeline->selectOnly(sceneTrackId, sceneClipId);
+    window.effects()->setSelection(sceneTrackId, sceneClipId);
+    QApplication::processEvents();
+
+    const std::int32_t found = window.detectScenes();
+    const std::size_t clipsAfter =
+        window.project().findSequence(sceneSequenceId)->findTrack(sceneTrackId)->clips().size();
+    std::printf(
+        "  scene detection: %d cuts in a continuous take, %zu clips before and "
+        "%zu after\n",
+        found, clipsBefore, clipsAfter);
+    if (found != 0 || clipsAfter != clipsBefore) {
+        zaro::app::testing::failf("a take with flashes in it was cut into pieces\n");
+    }
+
+    while (window.commands().canUndo()) {
+        window.commands().undo(window.project());
+    }
+}
+
+// Text-based editing: delete words, and the picture goes with them.
+TEST_CASE("Text-based editing takes the picture with it", "[gui]") {
+    auto& window = zaro::app::testing::gui();
+    const zaro::app::testing::Rewind rewind;
+    // Looked up per test rather than held by the fixture: a test that adds a
+    // track or a sequence reallocates the vectors these point into.
+    [[maybe_unused]] auto* timeline = window.timeline();
+    [[maybe_unused]] const auto& sequence = *window.sequence();
+    [[maybe_unused]] const auto& videoTrack = sequence.videoTracks().front();
+    [[maybe_unused]] const auto original = videoTrack.clips().front();
+    [[maybe_unused]] const auto row = timeline->rowFor(videoTrack.id());
+    REQUIRE(row.has_value());
+    [[maybe_unused]] const int y = row->top + row->height / 2;
+
+    const auto textSequenceId = window.project().activeSequence();
+    const auto textRate = window.project().findSequence(textSequenceId)->frameRate();
+    const auto textTrack =
+        window.project().findSequence(textSequenceId)->videoTracks().front().id();
+
+    // A transcript over whatever is on the timeline, with a filler word
+    // in one line of it.
+    zaro::model::CaptionTrack said;
+    const struct Line {
+        std::int64_t from;
+        std::int64_t frames;
+        const char* text;
+    } lines[] = {
+        {0, 20, "so here we are"}, {20, 20, "um the number is nine"}, {40, 20, "and that is that"}};
+    for (const Line& line : lines) {
+        zaro::model::Caption caption;
+        caption.range = zaro::time::TimeRange{zaro::time::RationalTime{line.from, textRate},
+                                              zaro::time::RationalTime{line.frames, textRate}};
+        caption.text = line.text;
+        said.add(caption);
+    }
+    auto captioned = zaro::edit::makeSetCaptions(window.project(), textSequenceId, said);
+    if (!captioned) {
+        zaro::app::testing::failf("%s\n", captioned.error().toString().c_str());
+    }
+    window.commands().execute(window.project(), std::move(*captioned));
+
+    auto* transcript = window.showTranscript();
+    if (transcript == nullptr || transcript->lineCount() != 3) {
+        zaro::app::testing::failf("the transcript shows %d lines, not three\n",
+                                  transcript == nullptr ? -1 : transcript->lineCount());
+    }
+
+    // "Select filler" finds the line with "um" in it, and not the one
+    // with "number": a substring test would take both, and cutting a
+    // line because it mentions a number is the kind of mistake nobody
+    // would forgive a transcript tool.
+    const int filler = transcript->selectContaining({"um", "uh"});
+    if (filler != 1) {
+        zaro::app::testing::failf("filler selection matched %d lines, not one\n", filler);
+    }
+
+    const auto* beforeTrack = window.project().findSequence(textSequenceId)->findTrack(textTrack);
+    const auto lengthBefore = beforeTrack->clips().back().endExclusive();
+
+    auto gone = transcript->deleteSelected();
+    if (!gone || *gone != 1) {
+        zaro::app::testing::failf("deleting the filler line removed %d lines\n", gone ? *gone : -1);
+    }
+    const auto* afterTrack = window.project().findSequence(textSequenceId)->findTrack(textTrack);
+    const auto lengthAfter = afterTrack->clips().back().endExclusive();
+    std::printf("  text editing: %lld frames became %lld, %d lines left\n",
+                static_cast<long long>(lengthBefore.frames()),
+                static_cast<long long>(lengthAfter.frames()), transcript->lineCount());
+
+    if (lengthAfter != lengthBefore - zaro::time::RationalTime{20, textRate}) {
+        zaro::app::testing::failf("the picture did not shorten with the words\n");
+    }
+    if (transcript->lineCount() != 2) {
+        zaro::app::testing::failf("the transcript still shows %d lines\n", transcript->lineCount());
+    }
+    // And what followed moved up: the last line now starts where the
+    // deleted one did.
+    const auto& left = window.project().findSequence(textSequenceId)->captions().captions();
+    if (left.size() != 2 || left.back().range.start().frames() != 20) {
+        zaro::app::testing::failf("the remaining transcript did not move up\n");
+    }
+    // One undo puts the words and the picture back together.
+    window.commands().undo(window.project());
+    transcript->refresh();
+    const auto* undoneTrack = window.project().findSequence(textSequenceId)->findTrack(textTrack);
+    if (undoneTrack->clips().back().endExclusive() != lengthBefore ||
+        transcript->lineCount() != 3) {
+        zaro::app::testing::failf("undo did not put both back\n");
+    }
+
+    while (window.commands().canUndo()) {
+        window.commands().undo(window.project());
+    }
+    transcript->refresh();
+    QApplication::processEvents();
+}
+
+// Fitting music to a length, on a track with a known beat.
+TEST_CASE("Fitting music to a length", "[gui]") {
+    auto& window = zaro::app::testing::gui();
+    const zaro::app::testing::Rewind rewind;
+    // Looked up per test rather than held by the fixture: a test that adds a
+    // track or a sequence reallocates the vectors these point into.
+    [[maybe_unused]] auto* timeline = window.timeline();
+    [[maybe_unused]] const auto& sequence = *window.sequence();
+    [[maybe_unused]] const auto& videoTrack = sequence.videoTracks().front();
+    [[maybe_unused]] const auto original = videoTrack.clips().front();
+    [[maybe_unused]] const auto row = timeline->rowFor(videoTrack.id());
+    REQUIRE(row.has_value());
+    [[maybe_unused]] const int y = row->top + row->height / 2;
+
+    auto probedClick =
+        zaro::platform::ffmpeg::probe(zaro::app::testing::mediaFixture("click_track.wav"));
+    if (!probedClick) {
+        zaro::app::testing::failf("%s (run testdata/generate.sh)\n",
+                                  probedClick.error().toString().c_str());
+    }
+    zaro::model::MediaRef music;
+    music.path = zaro::app::testing::mediaFixture("click_track.wav");
+    music.name = "click track";
+    music.info = *probedClick;
+    auto broughtIn = zaro::edit::makeImportMedia(window.project(), music);
+    if (!broughtIn) {
+        zaro::app::testing::failf("%s\n", broughtIn.error().toString().c_str());
+    }
+    window.commands().execute(window.project(), std::move(*broughtIn));
+    const auto musicId = window.project().media().back().id;
+    if (Status reopened = window.reopenMedia(); !reopened) {
+        zaro::app::testing::failf("%s\n", reopened.error().toString().c_str());
+    }
+
+    const auto musicSequenceId = window.project().activeSequence();
+    const auto* musicSequence = window.project().findSequence(musicSequenceId);
+    const auto musicRate = musicSequence->frameRate();
+    const auto musicTrack = musicSequence->audioTracks().front().id();
+    auto laid = zaro::edit::makePlaceFromSource(
+        window.project(), {musicSequenceId, musicTrack}, musicId,
+        zaro::time::TimeRange{zaro::time::RationalTime{0, musicRate},
+                              zaro::time::RationalTime{
+                                  static_cast<std::int64_t>(12 * musicRate.toDouble()), musicRate}},
+        zaro::time::RationalTime{0, musicRate}, zaro::edit::PlaceMode::Overwrite);
+    if (!laid) {
+        zaro::app::testing::failf("%s\n", laid.error().toString().c_str());
+    }
+    window.commands().execute(window.project(), std::move(*laid));
+    zaro::model::ClipId musicClip;
+    for (const auto& candidate :
+         window.project().findSequence(musicSequenceId)->findTrack(musicTrack)->clips()) {
+        if (candidate.source == musicId) {
+            musicClip = candidate.id;
+        }
+    }
+    if (!musicClip.isValid()) {
+        zaro::app::testing::failf("the music was not placed\n");
+    }
+
+    timeline->selectOnly(musicTrack, musicClip);
+    window.effects()->setSelection(musicTrack, musicClip);
+    QApplication::processEvents();
+
+    constexpr double kWanted = 7.0;
+    auto plan = window.remixSelectedTo(kWanted);
+    if (!plan) {
+        zaro::app::testing::failf("%s\n", plan.error().toString().c_str());
+    }
+    std::printf("  fit music: cut %d beats at %.2fs, %.2fs long\n", plan->beatsRemoved, plan->cutAt,
+                plan->seconds);
+    // Within a beat of what was asked for: landing exactly would mean
+    // cutting off the beat.
+    if (std::fabs(plan->seconds - kWanted) > 0.5) {
+        zaro::app::testing::failf("the remix is %.2fs, not %.2fs\n", plan->seconds, kWanted);
+    }
+    // The cut lands on a click, not between them.
+    const double intoBeat = std::fmod(plan->cutAt + 0.005, 0.5);
+    if (std::min(intoBeat, 0.5 - intoBeat) > 0.05) {
+        zaro::app::testing::failf("the cut at %.3fs is not on a beat\n", plan->cutAt);
+    }
+
+    // Two clips now, with the join crossfaded rather than butted.
+    const auto* remixed = window.project().findSequence(musicSequenceId)->findTrack(musicTrack);
+    int pieces = 0;
+    bool hasFade = false;
+    double covered = 0.0;
+    for (const auto& piece : remixed->clips()) {
+        if (piece.source != musicId) {
+            continue;
+        }
+        ++pieces;
+        covered = std::max(covered, piece.endExclusive().toSecondsDouble());
+        hasFade = hasFade || piece.animation.find(zaro::model::Param::GainDb) != nullptr;
+    }
+    if (pieces != 2) {
+        zaro::app::testing::failf("the remix made %d pieces, not two\n", pieces);
+    }
+    if (!hasFade) {
+        zaro::app::testing::failf("the join has no fade on it\n");
+    }
+    if (std::fabs(covered - plan->seconds) > 0.2) {
+        zaro::app::testing::failf("the timeline holds %.2fs, not %.2fs\n", covered, plan->seconds);
+    }
+    // Asking for more than there is says so rather than looping.
+    if (auto longer = window.remixSelectedTo(30.0); longer) {
+        zaro::app::testing::failf("making the music longer was allowed\n");
+    }
+
+    while (window.commands().canUndo()) {
+        window.commands().undo(window.project());
+    }
+    if (Status reopened = window.reopenMedia(); !reopened) {
+        zaro::app::testing::failf("%s\n", reopened.error().toString().c_str());
+    }
+    QApplication::processEvents();
+}
+
+// Auto-reframe, on a sequence whose shape does not match the footage.
+TEST_CASE("Auto-reframe for a different shape", "[gui]") {
+    auto& window = zaro::app::testing::gui();
+    const zaro::app::testing::Rewind rewind;
+    // Looked up per test rather than held by the fixture: a test that adds a
+    // track or a sequence reallocates the vectors these point into.
+    [[maybe_unused]] auto* timeline = window.timeline();
+    [[maybe_unused]] const auto& sequence = *window.sequence();
+    [[maybe_unused]] const auto& videoTrack = sequence.videoTracks().front();
+    [[maybe_unused]] const auto original = videoTrack.clips().front();
+    [[maybe_unused]] const auto row = timeline->rowFor(videoTrack.id());
+    REQUIRE(row.has_value());
+    [[maybe_unused]] const int y = row->top + row->height / 2;
+
+    const auto originalSequenceId = window.project().activeSequence();
+    // A tall sequence, which is what reframing is for: 320x240 footage
+    // in a 240x320 frame has to be scaled and then aimed.
+    zaro::model::Sequence tall{window.project().ids().next<zaro::model::SequenceTag>(), "Vertical",
+                               zaro::time::rates::fps25};
+    tall.setSize(240, 320);
+    const auto tallId = tall.id();
+    const auto tallTrack = window.project().ids().next<zaro::model::TrackTag>();
+    tall.addTrack(tallTrack, zaro::model::TrackKind::Video, "V1");
+    window.project().addSequence(std::move(tall));
+    window.rebindSequence();
+
+    const auto& shakyMedia = window.project().media().front();
+    auto placed = zaro::edit::makePlaceFromSource(
+        window.project(), {tallId, tallTrack}, shakyMedia.id,
+        zaro::time::TimeRange{zaro::time::RationalTime{0, zaro::time::rates::fps25},
+                              zaro::time::RationalTime{10, zaro::time::rates::fps25}},
+        zaro::time::RationalTime{0, zaro::time::rates::fps25}, zaro::edit::PlaceMode::Overwrite);
+    if (!placed) {
+        zaro::app::testing::failf("%s\n", placed.error().toString().c_str());
+    }
+    window.commands().execute(window.project(), std::move(*placed));
+    const auto tallClip =
+        window.project().findSequence(tallId)->findTrack(tallTrack)->clips().front().id;
+
+    window.setActiveSequence(tallId);
+    timeline->selectOnly(tallTrack, tallClip);
+    window.effects()->setSelection(tallTrack, tallClip);
+    QApplication::processEvents();
+
+    auto* reframeButton = window.effects()->findChild<QPushButton*>("auto-reframe");
+    if (reframeButton == nullptr || !reframeButton->isEnabled()) {
+        zaro::app::testing::failf("there is no usable auto-reframe button\n");
+    }
+
+    auto framed = window.reframeClip();
+    if (!framed) {
+        zaro::app::testing::failf("%s\n", framed.error().toString().c_str());
+    }
+    const auto* recomposed =
+        window.project().findSequence(tallId)->findTrack(tallTrack)->find(tallClip);
+    std::printf("  auto-reframe: %d frames, scaled to %.0f%%\n", framed->measured,
+                framed->scale * 100.0);
+
+    // Scaled to cover: 320x240 into a 240x320 frame needs 320/240.
+    if (std::fabs(recomposed->transform.scaleX - (320.0 / 240.0)) > 0.01) {
+        zaro::app::testing::failf("the scale does not fill the frame (%.3f)\n",
+                                  recomposed->transform.scaleX);
+    }
+    if (recomposed->animation.find(zaro::model::Param::PositionX) == nullptr) {
+        zaro::app::testing::failf("reframing wrote no position keyframes\n");
+    }
+    // And the frame is full: with the picture scaled to cover, no pixel
+    // of the output is left transparent.
+    window.setPosition(zaro::time::RationalTime{4, zaro::time::rates::fps25});
+    window.renderCache().clear();
+    zaro::render::RenderGraph graph{window.frameSource()};
+    graph.setProject(&window.project());
+    zaro::render::RgbaImage out;
+    if (Status drawn =
+            graph.compositeInto(*window.project().findSequence(tallId),
+                                zaro::time::RationalTime{4, zaro::time::rates::fps25}, out);
+        !drawn) {
+        zaro::app::testing::failf("%s\n", drawn.error().toString().c_str());
+    }
+    int empty = 0;
+    for (std::int32_t downTheFrame = 0; downTheFrame < out.height(); ++downTheFrame) {
+        for (std::int32_t acrossIt = 0; acrossIt < out.width(); ++acrossIt) {
+            empty += out.at(acrossIt, downTheFrame).a < 0.5F ? 1 : 0;
+        }
+    }
+    if (empty > 0) {
+        zaro::app::testing::failf("%d pixels of the reframed picture are empty\n", empty);
+    }
+
+    // Refused where somebody has already composed the shot by hand.
+    auto again = zaro::edit::makeReframe(window.project(), {tallId, tallTrack}, tallClip,
+                                         zaro::model::Curve{}, zaro::model::Curve{}, 1.0);
+    if (again) {
+        zaro::app::testing::failf("reframing over an animated clip was allowed\n");
+    }
+
+    while (window.commands().canUndo()) {
+        window.commands().undo(window.project());
+    }
+    window.setActiveSequence(originalSequenceId);
+    window.renderCache().clear();
+    QApplication::processEvents();
+}
+
+// Stretching a dissolve by dragging its edge.
+//
+// The span's length is the length of the fade, so being able to pull it is the
+// whole control: a dissolve that could only ever be the second it was created
+// at is a dissolve nobody can shape. This drives the real widget, so it covers
+// the hit test as well as the edit -- and the hit test is the part that had to
+// be got right, because a dissolve is drawn on top of the two clips it joins
+// and a clip-first test would start a trim every time.
+TEST_CASE("A dissolve can be stretched by dragging its edge", "[gui]") {
+    auto& window = zaro::app::testing::gui();
+    const zaro::app::testing::Rewind rewind;
+    auto* timeline = window.timeline();
+    const auto& sequence = *window.sequence();
+    const auto& videoTrack = sequence.videoTracks().front();
+    const auto trackId = videoTrack.id();
+    const auto rate = sequence.frameRate();
+    const auto row = timeline->rowFor(trackId);
+    REQUIRE(row.has_value());
+    const int y = row->top + row->height / 2;
+
+    // A cut with material either side of it, which is what a dissolve needs.
+    const auto first = videoTrack.clips().front();
+    const auto cutAt = first.start() + zaro::time::RationalTime{
+                                           first.duration().rescaledTo(rate).frames() / 2, rate};
+    auto razored = zaro::edit::makeRazor(window.project(), {sequence.id(), trackId}, cutAt);
+    if (!razored) {
+        zaro::app::testing::failf("%s\n", razored.error().toString().c_str());
+    }
+    window.commands().execute(window.project(), std::move(*razored));
+
+    auto dissolve = zaro::edit::makeAddCrossDissolve(window.project(), {sequence.id(), trackId},
+                                                     cutAt, zaro::time::RationalTime{10, rate});
+    if (!dissolve) {
+        zaro::app::testing::failf("%s\n", dissolve.error().toString().c_str());
+    }
+    window.commands().execute(window.project(), std::move(*dissolve));
+    window.commands().breakMerge();
+    QApplication::processEvents();
+
+    const auto spanOf = [&] {
+        const auto& list =
+            window.project().findSequence(sequence.id())->findTrack(trackId)->transitions();
+        REQUIRE(!list.empty());
+        return list.front().range;
+    };
+    const auto before = spanOf();
+
+    // Snapping off: the cut and the playhead are both right there, and a guide
+    // latching the edge onto one of them would measure the drag rather than
+    // the code under test.
+    const bool snapWas = timeline->snapEnabled();
+    timeline->setSnapEnabled(false);
+
+    const int endX = static_cast<int>(timeline->layout().xForTime(before.endExclusive()));
+    const int wantedX = static_cast<int>(
+        timeline->layout().xForTime(before.endExclusive() + zaro::time::RationalTime{8, rate}));
+    const std::size_t stepsBefore = window.commands().position();
+    dragOnTimeline(timeline, endX, wantedX, y);
+    QApplication::processEvents();
+
+    const auto after = spanOf();
+    if (after.duration() <= before.duration()) {
+        zaro::app::testing::failf("dragging the end left the dissolve %lld frames, was %lld\n",
+                                  static_cast<long long>(after.duration().frames()),
+                                  static_cast<long long>(before.duration().frames()));
+    }
+    // The start does not move: dragging one edge stretches, it does not
+    // recentre the span on the cut the way re-adding one would.
+    if (after.start() != before.start()) {
+        zaro::app::testing::failf("dragging the end moved the start too\n");
+    }
+    // The clips are untouched -- a transition is still not an overlap, and a
+    // drag that reached the trim path instead would have moved a clip edge.
+    const auto& clipsNow =
+        window.project().findSequence(sequence.id())->findTrack(trackId)->clips();
+    const zaro::model::Clip* outgoing = nullptr;
+    for (const auto& clip : clipsNow) {
+        if (clip.endExclusive() == cutAt) {
+            outgoing = &clip;
+        }
+    }
+    if (outgoing == nullptr) {
+        zaro::app::testing::failf("the cut moved: the drag trimmed a clip instead\n");
+    }
+    // And the whole gesture is one undo step, not one per mouse move.
+    if (window.commands().position() != stepsBefore + 1) {
+        zaro::app::testing::failf("the drag made %zu undo steps, not one\n",
+                                  window.commands().position() - stepsBefore);
+    }
+    std::printf("  stretched dissolve: %lld -> %lld frames, one step\n",
+                static_cast<long long>(before.duration().frames()),
+                static_cast<long long>(after.duration().frames()));
+
+    timeline->setSnapEnabled(snapWas);
+    while (window.commands().canUndo()) {
+        window.commands().undo(window.project());
+    }
+    QApplication::processEvents();
+}
+
+// Picking a dissolve, and taking it off again.
+//
+// A transition was drawable and stretchable but not *selectable*: pressing the
+// middle of one fell through to the clip underneath, so there was nothing for a
+// panel of its properties to be about -- and no way at all to remove one, since
+// the operation existed with nothing in the program calling it.
+//
+// Driven through the widget, because the part that had to be got right is the
+// order of the hit tests: the span is drawn over the cut it straddles, so a
+// clip-first test swallows every press, and an edge-last test would select
+// instead of stretching.
+TEST_CASE("A transition can be picked and removed", "[gui]") {
+    auto& window = zaro::app::testing::gui();
+    const zaro::app::testing::Rewind rewind;
+    auto* timeline = window.timeline();
+    const auto& sequence = *window.sequence();
+    const auto sequenceId = sequence.id();
+    const auto& videoTrack = sequence.videoTracks().front();
+    const auto trackId = videoTrack.id();
+    const auto rate = sequence.frameRate();
+    const auto row = timeline->rowFor(trackId);
+    REQUIRE(row.has_value());
+    const int y = row->top + row->height / 2;
+
+    const auto first = videoTrack.clips().front();
+    const auto cutAt = first.start() + zaro::time::RationalTime{
+                                           first.duration().rescaledTo(rate).frames() / 2, rate};
+    auto razored = zaro::edit::makeRazor(window.project(), {sequenceId, trackId}, cutAt);
+    if (!razored) {
+        zaro::app::testing::failf("%s\n", razored.error().toString().c_str());
+    }
+    window.commands().execute(window.project(), std::move(*razored));
+
+    // Wide enough that its middle is nowhere near either grab zone: the two
+    // are five pixels each, and a span only twelve pixels across would make
+    // this a test of arithmetic rather than of the order of the tests.
+    auto dissolve = zaro::edit::makeAddCrossDissolve(window.project(), {sequenceId, trackId}, cutAt,
+                                                     zaro::time::RationalTime{30, rate});
+    if (!dissolve) {
+        zaro::app::testing::failf("%s\n", dissolve.error().toString().c_str());
+    }
+    window.commands().execute(window.project(), std::move(*dissolve));
+    window.commands().breakMerge();
+    QApplication::processEvents();
+
+    const auto* track = window.project().findSequence(sequenceId)->findTrack(trackId);
+    REQUIRE(!track->transitions().empty());
+    const auto span = track->transitions().front().range;
+    const auto transitionId = track->transitions().front().id;
+    const std::size_t clipsBefore = track->clips().size();
+
+    const int startX = static_cast<int>(timeline->layout().xForTime(span.start()));
+    const int endX = static_cast<int>(timeline->layout().xForTime(span.endExclusive()));
+    const int middleX = (startX + endX) / 2;
+    if (endX - startX < 24) {
+        zaro::app::testing::failf("the span is only %d pixels wide; zoom in first\n",
+                                  endX - startX);
+    }
+
+    // A clip picked first, so what follows shows the selection *moving* rather
+    // than arriving from nothing.
+    timeline->selectOnly(trackId, track->clips().front().id);
+    QApplication::processEvents();
+    REQUIRE(!timeline->selection().empty());
+
+    // The edges still grab, and that is checked before anything is picked:
+    // this is the half a body-first test would break, and it breaks silently --
+    // the press would select and the drag would do nothing, which reads as the
+    // timeline having stopped responding.
+    dragOnTimeline(timeline, endX, endX, y);
+    QApplication::processEvents();
+    if (timeline->selectedTransition().isValid()) {
+        zaro::app::testing::failf("pressing the edge picked the span instead of grabbing it\n");
+    }
+
+    dragOnTimeline(timeline, middleX, middleX, y);
+    QApplication::processEvents();
+
+    if (timeline->selectedTransition() != transitionId) {
+        zaro::app::testing::failf("pressing the middle of the span did not pick it\n");
+    }
+    if (timeline->selectedTransitionTrack() != trackId) {
+        zaro::app::testing::failf("the span was picked on the wrong track\n");
+    }
+    // The three selections are exclusive: a panel showing a clip's parameters
+    // and a transition's at once would have two things called the selection.
+    if (!timeline->selection().empty()) {
+        zaro::app::testing::failf("picking the span left %zu clips selected\n",
+                                  timeline->selection().size());
+    }
+
+    // And the highlight reaches the screen. Measured by letting the selection
+    // go rather than by taking a baseline before picking it: the pick also
+    // cleared the clip selection, so a before-and-after would be measuring
+    // that clip's ring coming off as much as this span's outline going on.
+    {
+        const QImage lit = timeline->grab().toImage();
+        timeline->selectTransition({}, {});
+        QApplication::processEvents();
+        const QImage plain = timeline->grab().toImage();
+        // grab() returns device pixels, so on a scaled display the image is
+        // larger than the coordinates the events used.
+        const auto dpr = static_cast<int>(lit.devicePixelRatio());
+        const QRect box(QPoint(startX, row->top), QPoint(endX, row->top + row->height));
+        std::int64_t changed = 0;
+        for (int py = 0; py < lit.height() && py / dpr < timeline->height(); ++py) {
+            for (int px = 0; px < lit.width() && px / dpr < timeline->width(); ++px) {
+                if (lit.pixel(px, py) != plain.pixel(px, py) && box.contains(px / dpr, py / dpr)) {
+                    ++changed;
+                }
+            }
+        }
+        std::printf("  picked outline: %lld pixels over the span\n",
+                    static_cast<long long>(changed));
+        if (changed == 0) {
+            zaro::app::testing::failf("picking the span drew nothing over it\n");
+        }
+        dragOnTimeline(timeline, middleX, middleX, y);
+        QApplication::processEvents();
+        REQUIRE(timeline->selectedTransition() == transitionId);
+    }
+
+    // And a clip takes the selection back.
+    timeline->selectOnly(trackId, track->clips().front().id);
+    QApplication::processEvents();
+    if (timeline->selectedTransition().isValid()) {
+        zaro::app::testing::failf("picking a clip left the span selected\n");
+    }
+
+    // Delete takes it off, and takes nothing else with it. Removing a
+    // transition is not a ripple: the span straddles the cut rather than
+    // overlapping it, so the two clips stay exactly where they were.
+    dragOnTimeline(timeline, middleX, middleX, y);
+    QApplication::processEvents();
+    REQUIRE(timeline->selectedTransition() == transitionId);
+    const std::size_t stepsBefore = window.commands().position();
+    QKeyEvent del(QEvent::KeyPress, Qt::Key_Delete, Qt::NoModifier);
+    QCoreApplication::sendEvent(timeline, &del);
+    QApplication::processEvents();
+
+    const auto* after = window.project().findSequence(sequenceId)->findTrack(trackId);
+    if (!after->transitions().empty()) {
+        zaro::app::testing::failf("Delete left %zu transitions on the track\n",
+                                  after->transitions().size());
+    }
+    if (after->clips().size() != clipsBefore) {
+        zaro::app::testing::failf("removing the span took %zu clips with it\n",
+                                  clipsBefore - after->clips().size());
+    }
+    if (after->clipAt(cutAt) == nullptr || after->clipAt(cutAt)->start() != cutAt) {
+        zaro::app::testing::failf("removing the span moved the cut: it rippled\n");
+    }
+    if (timeline->selectedTransition().isValid()) {
+        zaro::app::testing::failf("the selection still points at a transition that is gone\n");
+    }
+    if (window.commands().position() != stepsBefore + 1) {
+        zaro::app::testing::failf("removing the span made %zu undo steps, not one\n",
+                                  window.commands().position() - stepsBefore);
+    }
+    std::printf("  picked a %d-pixel span, removed it, %zu clips untouched\n", endX - startX,
+                clipsBefore);
+
+    while (window.commands().canUndo()) {
+        window.commands().undo(window.project());
+    }
+    QApplication::processEvents();
+}
+
+// The Transition tab: choosing what a cut does.
+//
+// The discriminating half is the picture. A wipe and a dissolve are both a
+// blend across the same span, and the model has rendered both since Phase 6o --
+// what did not exist was any way to ask for one. So this drives the real combo
+// and then measures the frame: at the midpoint a dissolve blends both halves of
+// the frame the same way, while a wipe puts one shot on each side of the line.
+// Make the picker write nothing and the two halves read the same and it fails.
+TEST_CASE("The Transition tab chooses what a cut does", "[gui]") {
+    auto& window = zaro::app::testing::gui();
+    const zaro::app::testing::Rewind rewind;
+    auto* timeline = window.timeline();
+    auto* effects = window.effects();
+    const auto& sequence = *window.sequence();
+    const auto sequenceId = sequence.id();
+    const auto& videoTrack = sequence.videoTracks().front();
+    const auto trackId = videoTrack.id();
+    const auto rate = sequence.frameRate();
+
+    // A cut with two shots that differ, so a wipe has something to show on
+    // each side of its edge. The tail is pulled well down.
+    const auto first = videoTrack.clips().front();
+    const auto cutAt = first.start() + zaro::time::RationalTime{
+                                           first.duration().rescaledTo(rate).frames() / 2, rate};
+    auto razored = zaro::edit::makeRazor(window.project(), {sequenceId, trackId}, cutAt);
+    if (!razored) {
+        zaro::app::testing::failf("%s\n", razored.error().toString().c_str());
+    }
+    window.commands().execute(window.project(), std::move(*razored));
+
+    const zaro::model::Clip* tail =
+        window.project().findSequence(sequenceId)->findTrack(trackId)->clipAt(cutAt);
+    REQUIRE(tail != nullptr);
+    zaro::model::ColorCorrection dark;
+    dark.exposure = -4.0;
+    auto graded =
+        zaro::edit::makeSetColorCorrection(window.project(), {sequenceId, trackId}, tail->id, dark);
+    if (!graded) {
+        zaro::app::testing::failf("%s\n", graded.error().toString().c_str());
+    }
+    window.commands().execute(window.project(), std::move(*graded));
+
+    auto dissolve = zaro::edit::makeAddCrossDissolve(window.project(), {sequenceId, trackId}, cutAt,
+                                                     zaro::time::RationalTime{20, rate});
+    if (!dissolve) {
+        zaro::app::testing::failf("%s\n", dissolve.error().toString().c_str());
+    }
+    window.commands().execute(window.project(), std::move(*dissolve));
+    window.commands().breakMerge();
+    QApplication::processEvents();
+
+    const auto spanOf = [&] {
+        const auto& list =
+            window.project().findSequence(sequenceId)->findTrack(trackId)->transitions();
+        REQUIRE(!list.empty());
+        return list.front();
+    };
+    const auto transitionId = spanOf().id;
+
+    // Picking it puts the tab up. A clip selection first, so this shows the
+    // page arriving rather than having been there all along.
+    timeline->selectOnly(
+        trackId, window.project().findSequence(sequenceId)->findTrack(trackId)->clips()[0].id);
+    QApplication::processEvents();
+    timeline->selectTransition(trackId, transitionId);
+    QApplication::processEvents();
+
+    if (effects->pane() != zaro::app::EffectControls::Pane::Transition) {
+        zaro::app::testing::failf("picking a transition did not put its page up\n");
+    }
+    auto* tab = effects->findChild<QPushButton*>("inspector-tab-transition");
+    auto* kind = effects->findChild<QComboBox*>("transition-kind");
+    auto* direction = effects->findChild<QComboBox*>("transition-direction");
+    auto* duration = effects->findChild<QDoubleSpinBox*>("transition-duration");
+    auto* alignment = effects->findChild<QComboBox*>("transition-alignment");
+    if (tab == nullptr || kind == nullptr || direction == nullptr || duration == nullptr ||
+        alignment == nullptr) {
+        zaro::app::testing::failf("the transition controls are not in the panel\n");
+    }
+    if (!tab->isEnabled()) {
+        zaro::app::testing::failf("the Transition tab is disabled with one selected\n");
+    }
+    // The other three describe a clip, and there is not one.
+    for (const char* name :
+         {"inspector-tab-inspector", "inspector-tab-audio", "inspector-tab-info"}) {
+        auto* other = effects->findChild<QPushButton*>(name);
+        REQUIRE(other != nullptr);
+        if (other->isEnabled()) {
+            zaro::app::testing::failf("%s is enabled with a transition selected\n", name);
+        }
+    }
+    // And all four still fit. The strip has no scrollbar and nothing shrinks
+    // it, so a fourth tab that does not fit is not a tight fit -- it is a tab
+    // sitting off the end of the panel, which is how the value fields were
+    // losing their suffixes before the panel's width was worked out rather
+    // than guessed.
+    for (const char* name : {"inspector-tab-inspector", "inspector-tab-audio", "inspector-tab-info",
+                             "inspector-tab-transition"}) {
+        auto* pill = effects->findChild<QPushButton*>(name);
+        REQUIRE(pill != nullptr);
+        const int right = pill->mapTo(effects, QPoint{pill->width(), 0}).x();
+        INFO("tab " << name << " ends at " << right << " in a panel " << effects->width()
+                    << " wide");
+        CHECK(right <= effects->width());
+    }
+    auto* softness = effects->findChild<QDoubleSpinBox*>("transition-softness");
+    auto* pacing = effects->findChild<QComboBox*>("transition-easing");
+    if (softness == nullptr || pacing == nullptr) {
+        zaro::app::testing::failf("the softness and pacing controls are not in the panel\n");
+    }
+    // A dissolve has nowhere to travel, so the direction row is not drawn --
+    // and no edge to soften either.
+    if (direction->isVisible()) {
+        zaro::app::testing::failf("a dissolve is offering a direction to travel in\n");
+    }
+    if (softness->isVisible()) {
+        zaro::app::testing::failf("a dissolve is offering an edge to soften\n");
+    }
+    // Pacing is not like those two: it belongs to every kind, because it is a
+    // property of the blend rather than of the shape it makes.
+    if (!pacing->isVisible()) {
+        zaro::app::testing::failf("a dissolve is not offering a pacing\n");
+    }
+    if (std::abs(duration->value() - spanOf().range.duration().toSecondsDouble()) > 0.005) {
+        zaro::app::testing::failf("the duration field says %.3f, the span is %.3f\n",
+                                  duration->value(), spanOf().range.duration().toSecondsDouble());
+    }
+
+    const auto span = spanOf().range;
+    const auto middle =
+        span.start() + zaro::time::RationalTime{span.duration().frames() / 2, span.start().rate()};
+    window.setPosition(middle);
+    const QImage dissolved = settledGrab(window.monitor());
+
+    // Pacing reaches the picture, measured at the midpoint against the two
+    // curves that differ there. "Slow at both ends" is the one that cannot be
+    // measured here: it is symmetric, so it passes through the middle at
+    // exactly the place a constant rate does. A quarter of the way in would
+    // separate it, but this fixture is black except on its flash frames and a
+    // blend between two black shots measures nothing -- the same trap the
+    // wipes were caught by, and the reason that test settled on the midpoint.
+    {
+        pacing->setCurrentIndex(
+            pacing->findData(static_cast<int>(zaro::model::TransitionEasing::In)));
+        QApplication::processEvents();
+        if (spanOf().easing != zaro::model::TransitionEasing::In) {
+            zaro::app::testing::failf("choosing a pacing did not reach the model\n");
+        }
+        const double slowStart = meanGray(settledGrab(window.monitor()));
+        pacing->setCurrentIndex(
+            pacing->findData(static_cast<int>(zaro::model::TransitionEasing::Out)));
+        QApplication::processEvents();
+        const double slowFinish = meanGray(settledGrab(window.monitor()));
+        std::printf("  at the midpoint: %.1f slow to start, %.1f slow to finish\n", slowStart,
+                    slowFinish);
+        // The incoming shot is the graded-down one. Slow to start holds it
+        // back and leaves the frame bright; slow to finish is already most of
+        // the way into it and leaves the frame dark.
+        if (!(slowStart > slowFinish + 5.0)) {
+            zaro::app::testing::failf(
+                "the two curves put the same picture on screen: %.1f against %.1f\n", slowStart,
+                slowFinish);
+        }
+        pacing->setCurrentIndex(
+            pacing->findData(static_cast<int>(zaro::model::TransitionEasing::Linear)));
+        QApplication::processEvents();
+    }
+
+    // Now ask for a wipe, through the control somebody would use.
+    kind->setCurrentIndex(kind->findData(static_cast<int>(zaro::model::TransitionKind::Wipe)));
+    QApplication::processEvents();
+    if (spanOf().kind != zaro::model::TransitionKind::Wipe) {
+        zaro::app::testing::failf("choosing a wipe did not reach the model\n");
+    }
+    // And the direction row arrives with it, because a wipe has one -- and so
+    // does softness, which is narrower still: a slide travels but has no edge.
+    if (!direction->isVisible()) {
+        zaro::app::testing::failf("a wipe is not offering a direction to travel in\n");
+    }
+    if (!softness->isVisible()) {
+        zaro::app::testing::failf("a wipe is not offering an edge to soften\n");
+    }
+    softness->setValue(0.5);
+    QApplication::processEvents();
+    if (std::abs(spanOf().softness - 0.5) > 0.001) {
+        zaro::app::testing::failf("softening the edge did not reach the model: %.3f\n",
+                                  spanOf().softness);
+    }
+    // Choosing a direction after a softness keeps it: the four are one write,
+    // so a page that read only the field that moved would clear the other
+    // three every time any of them changed.
+    direction->setCurrentIndex(
+        direction->findData(static_cast<int>(zaro::model::TransitionDirection::Down)));
+    QApplication::processEvents();
+    if (std::abs(spanOf().softness - 0.5) > 0.001) {
+        zaro::app::testing::failf("choosing a direction threw the softness away\n");
+    }
+    // Back to a hard edge travelling right, so the halves measured below are
+    // the wipe's own split rather than its ramp.
+    softness->setValue(0.0);
+    direction->setCurrentIndex(
+        direction->findData(static_cast<int>(zaro::model::TransitionDirection::Right)));
+    QApplication::processEvents();
+    // The header names the kind, and it is the panel's own job to re-read it:
+    // `edited` goes to the monitor and the timeline, and only an edit made
+    // somewhere else comes back round as a refresh. It sat over a wipe saying
+    // "Cross dissolve", which is a header describing the last thing rather
+    // than the thing.
+    {
+        auto* name = effects->findChild<QLabel*>("inspector-identity-name");
+        REQUIRE(name != nullptr);
+        if (!name->text().contains("Wipe")) {
+            zaro::app::testing::failf("the header says \"%s\" over a wipe\n",
+                                      name->text().toUtf8().constData());
+        }
+    }
+    direction->setCurrentIndex(
+        direction->findData(static_cast<int>(zaro::model::TransitionDirection::Right)));
+    QApplication::processEvents();
+    const QImage wiped = settledGrab(window.monitor());
+
+    // The measurement: halves of the frame, at the midpoint of the span.
+    const auto halves = [](const QImage& frame) {
+        const QImage left = frame.copy(0, 0, frame.width() / 2, frame.height());
+        const QImage right =
+            frame.copy(frame.width() / 2, 0, frame.width() - frame.width() / 2, frame.height());
+        return std::pair{meanGray(left), meanGray(right)};
+    };
+    const auto [dissolveLeft, dissolveRight] = halves(dissolved);
+    const auto [wipeLeft, wipeRight] = halves(wiped);
+    std::printf("  midpoint: dissolve %.1f / %.1f, wipe %.1f / %.1f\n", dissolveLeft, dissolveRight,
+                wipeLeft, wipeRight);
+    // A dissolve treats both halves alike; a wipe does not. Compared against
+    // each other rather than against absolute numbers, which are a property of
+    // the fixture and of whichever GPU is drawing it.
+    const double dissolveGap = std::abs(dissolveLeft - dissolveRight);
+    const double wipeGap = std::abs(wipeLeft - wipeRight);
+    if (!(wipeGap > dissolveGap * 3.0 + 5.0)) {
+        zaro::app::testing::failf(
+            "the wipe did not split the frame: %.1f between its halves against %.1f for the "
+            "dissolve\n",
+            wipeGap, dissolveGap);
+    }
+
+    // The two kinds that open from the centre. What each offers is asked of
+    // the model, so this is also the check that the panel and the shape agree:
+    // an iris has an edge and no direction, a zoom has neither.
+    {
+        kind->setCurrentIndex(kind->findData(static_cast<int>(zaro::model::TransitionKind::Iris)));
+        QApplication::processEvents();
+        if (spanOf().kind != zaro::model::TransitionKind::Iris) {
+            zaro::app::testing::failf("choosing an iris did not reach the model\n");
+        }
+        if (direction->isVisible()) {
+            zaro::app::testing::failf("an iris is offering a direction to travel in\n");
+        }
+        if (!softness->isVisible()) {
+            zaro::app::testing::failf("an iris is not offering an edge to soften\n");
+        }
+
+        kind->setCurrentIndex(kind->findData(static_cast<int>(zaro::model::TransitionKind::Zoom)));
+        QApplication::processEvents();
+        if (direction->isVisible() || softness->isVisible()) {
+            zaro::app::testing::failf("a zoom is offering a direction or an edge\n");
+        }
+
+        // And a zoom reaches the picture through the GPU compositor, which is
+        // the half the headless tests cannot see: the scale it asks for is two
+        // lines in each render path, and a shape field nothing reads renders
+        // as a cut.
+        //
+        // Measured as the same small box under two kinds rather than as the
+        // centre against a corner of one. The monitor letterboxes -- its
+        // corners are the bars either side of the picture, not the picture --
+        // so a corner sample reads black whatever the transition is doing.
+        const auto centreMean = [&] {
+            const QImage shot = settledGrab(window.monitor());
+            return meanGray(shot.copy((shot.width() * 7) / 16, (shot.height() * 7) / 16,
+                                      shot.width() / 8, shot.height() / 8));
+        };
+        const double zoomCentre = centreMean();
+        kind->setCurrentIndex(
+            kind->findData(static_cast<int>(zaro::model::TransitionKind::CrossDissolve)));
+        QApplication::processEvents();
+        const double dissolveCentre = centreMean();
+        std::printf("  in the middle of the frame: %.1f zooming, %.1f dissolving\n", zoomCentre,
+                    dissolveCentre);
+        // Half way through, a zoom shows the incoming shot alone in the middle
+        // of the frame; a dissolve shows it half mixed with the brighter
+        // outgoing one. The incoming shot is the graded-down one, so the zoom
+        // reads darker there. A zoom that reached nothing would read the same
+        // as the dissolve.
+        if (!(dissolveCentre > zoomCentre + 5.0)) {
+            zaro::app::testing::failf(
+                "the zoom did not grow the incoming shot in the centre: %.1f against %.1f "
+                "dissolving\n",
+                zoomCentre, dissolveCentre);
+        }
+
+        // The two that act on the outgoing clip as well. A push travels and
+        // has no edge; a dip has neither.
+        kind->setCurrentIndex(kind->findData(static_cast<int>(zaro::model::TransitionKind::Push)));
+        QApplication::processEvents();
+        if (!direction->isVisible()) {
+            zaro::app::testing::failf("a push is not offering a direction to travel in\n");
+        }
+        if (softness->isVisible()) {
+            zaro::app::testing::failf("a push is offering an edge to soften\n");
+        }
+
+        kind->setCurrentIndex(
+            kind->findData(static_cast<int>(zaro::model::TransitionKind::DipToBlack)));
+        QApplication::processEvents();
+        if (spanOf().kind != zaro::model::TransitionKind::DipToBlack) {
+            zaro::app::testing::failf("choosing a dip did not reach the model\n");
+        }
+        if (direction->isVisible() || softness->isVisible()) {
+            zaro::app::testing::failf("a dip is offering a direction or an edge\n");
+        }
+
+        // And the dip reaches the picture. At the midpoint the outgoing shot
+        // has gone and the incoming one has not arrived, so the frame is
+        // black -- which is the half no one-sided shape could produce, because
+        // it had no way to turn the outgoing clip off at all.
+        const double dipped = meanGray(settledGrab(window.monitor()));
+        std::printf("  dip at the midpoint: %.1f\n", dipped);
+        if (!(dipped < 2.0)) {
+            zaro::app::testing::failf("the dip left %.1f on screen at its midpoint\n", dipped);
+        }
+
+        // Back to a wipe, which is what the rows below were measured against.
+        kind->setCurrentIndex(kind->findData(static_cast<int>(zaro::model::TransitionKind::Wipe)));
+        QApplication::processEvents();
+    }
+
+    // The duration field writes back, and the span keeps straddling its cut.
+    const double wanted = spanOf().range.duration().toSecondsDouble() * 0.5;
+    duration->setValue(wanted);
+    QApplication::processEvents();
+    if (std::abs(spanOf().range.duration().toSecondsDouble() - wanted) > 0.05) {
+        zaro::app::testing::failf("typing %.3f s left the span at %.3f s\n", wanted,
+                                  spanOf().range.duration().toSecondsDouble());
+    }
+    // Centred, so it still covers the cut it belongs to.
+    if (spanOf().range.start() > cutAt || spanOf().range.endExclusive() < cutAt) {
+        zaro::app::testing::failf("shortening the span moved it off its cut\n");
+    }
+
+    // And alignment moves it without changing its length.
+    const auto lengthWas = spanOf().range.duration();
+    alignment->setCurrentIndex(alignment->findData(1));
+    QApplication::processEvents();
+    if (spanOf().range.start().rescaledTo(rate) != cutAt.rescaledTo(rate)) {
+        zaro::app::testing::failf("\"starts at the cut\" left the span starting elsewhere\n");
+    }
+    if (spanOf().range.duration() != lengthWas) {
+        zaro::app::testing::failf("changing the alignment changed the length too\n");
+    }
+
+    // And the page is left behind when the selection is. The Transition page
+    // belongs to no clip and no track, so a clip picked while it is up used to
+    // land on a page with every group hidden and no enabled tab to leave by --
+    // an empty panel that looked like the inspector had stopped working.
+    const auto firstClipId =
+        window.project().findSequence(sequenceId)->findTrack(trackId)->clips().front().id;
+    timeline->selectOnly(trackId, firstClipId);
+    QApplication::processEvents();
+    if (effects->pane() == zaro::app::EffectControls::Pane::Transition) {
+        zaro::app::testing::failf("picking a clip left the Transition page up\n");
+    }
+    if (tab->isEnabled()) {
+        zaro::app::testing::failf("the Transition tab is enabled with a clip selected\n");
+    }
+    {
+        auto* motion = effects->findChild<QGroupBox*>("inspector-group-motion");
+        REQUIRE(motion != nullptr);
+        if (!motion->isVisible()) {
+            zaro::app::testing::failf("the clip's own page did not come back\n");
+        }
+    }
+
+    timeline->selectTransition({}, {});
+    QApplication::processEvents();
+    while (window.commands().canUndo()) {
+        window.commands().undo(window.project());
+    }
+    window.monitor()->update();
+    QApplication::processEvents();
+}
+
+// The right-click route to a transition, and the selection a new one gets.
+//
+// Two gestures that used to disagree with each other. Left-clicking a span
+// picked the transition; right-clicking the same pixel opened the menu for the
+// clip underneath, because the context handler tested clips first. And adding a
+// dissolve left the clip selected, so the panel that exists to change its kind
+// was one hunt-for-a-two-pixel-span away.
+//
+// The menu is modal -- `exec` does not return until it closes -- so the
+// inspection is queued before the event is sent and runs from inside the menu's
+// own event loop. Without that this test would hang rather than fail.
+TEST_CASE("Right-clicking a transition offers its own menu", "[gui]") {
+    auto& window = zaro::app::testing::gui();
+    const zaro::app::testing::Rewind rewind;
+    auto* timeline = window.timeline();
+    const auto& sequence = *window.sequence();
+    const auto sequenceId = sequence.id();
+    const auto& videoTrack = sequence.videoTracks().front();
+    const auto trackId = videoTrack.id();
+    const auto rate = sequence.frameRate();
+    const auto row = timeline->rowFor(trackId);
+    REQUIRE(row.has_value());
+    const int y = row->top + row->height / 2;
+
+    const auto first = videoTrack.clips().front();
+    const auto cutAt = first.start() + zaro::time::RationalTime{
+                                           first.duration().rescaledTo(rate).frames() / 2, rate};
+    auto razored = zaro::edit::makeRazor(window.project(), {sequenceId, trackId}, cutAt);
+    if (!razored) {
+        zaro::app::testing::failf("%s\n", razored.error().toString().c_str());
+    }
+    window.commands().execute(window.project(), std::move(*razored));
+    window.commands().breakMerge();
+
+    // Added the way the menu item does it, so this also covers the selection
+    // that adding one now leaves behind.
+    timeline->selectOnly(trackId, first.id);
+    window.setPosition(cutAt);
+    QApplication::processEvents();
+    timeline->addDissolveAtPlayhead();
+    QApplication::processEvents();
+
+    const auto& spans =
+        window.project().findSequence(sequenceId)->findTrack(trackId)->transitions();
+    REQUIRE(!spans.empty());
+    const auto transitionId = spans.front().id;
+    const auto span = spans.front().range;
+
+    // Adding one selects it. Until the panel existed there was nothing to
+    // select it into; now the very next thing somebody does is change its kind.
+    if (timeline->selectedTransition() != transitionId) {
+        zaro::app::testing::failf("adding a dissolve did not select what it added\n");
+    }
+    if (!timeline->selection().empty()) {
+        zaro::app::testing::failf("adding a dissolve left the clip selected as well\n");
+    }
+
+    const int startX = static_cast<int>(timeline->layout().xForTime(span.start()));
+    const int endX = static_cast<int>(timeline->layout().xForTime(span.endExclusive()));
+    const int middleX = (startX + endX) / 2;
+    REQUIRE(endX - startX >= 12);
+
+    // Open the menu over the span, look at it, and optionally pick a kind.
+    struct Seen {
+        bool opened{false};
+        bool offeredType{false};
+        bool offeredRemove{false};
+        bool tickedCurrent{false};
+        int kindCount{0};
+    };
+    const auto rightClick = [&](const QPoint& at, const QString& choose) {
+        Seen seen;
+        QTimer::singleShot(0, [&] {
+            auto* menu = qobject_cast<QMenu*>(QApplication::activePopupWidget());
+            if (menu == nullptr) {
+                return;
+            }
+            seen.opened = true;
+            for (QAction* action : menu->actions()) {
+                if (action->text() == QStringLiteral("Remove Transition")) {
+                    seen.offeredRemove = true;
+                }
+                QMenu* sub = action->menu();
+                if (sub == nullptr || action->text() != QStringLiteral("Type")) {
+                    continue;
+                }
+                seen.offeredType = true;
+                for (QAction* kind : sub->actions()) {
+                    ++seen.kindCount;
+                    // The menu says which kind this already is, so a list of
+                    // seven does not send somebody to the panel to find out.
+                    if (kind->isChecked() && kind->text() == QStringLiteral("Cross Dissolve")) {
+                        seen.tickedCurrent = true;
+                    }
+                    if (!choose.isEmpty() && kind->text() == choose) {
+                        sub->setActiveAction(kind);
+                        QKeyEvent pick(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+                        QCoreApplication::sendEvent(sub, &pick);
+                    }
+                }
+            }
+            if (menu->isVisible()) {
+                menu->close();
+            }
+        });
+        QContextMenuEvent event(QContextMenuEvent::Mouse, at, timeline->mapToGlobal(at));
+        QCoreApplication::sendEvent(timeline, &event);
+        QApplication::processEvents();
+        return seen;
+    };
+
+    const Seen seen = rightClick(QPoint(middleX, y), {});
+    if (!seen.opened) {
+        zaro::app::testing::failf("right-clicking a transition opened no menu\n");
+    }
+    if (!seen.offeredType) {
+        zaro::app::testing::failf(
+            "the menu over a transition offered no Type: it is the clip's menu\n");
+    }
+    if (!seen.offeredRemove) {
+        zaro::app::testing::failf("the transition menu did not offer to remove it\n");
+    }
+    if (seen.kindCount != 7) {
+        zaro::app::testing::failf("the Type menu offered %d kinds, wanted 7\n", seen.kindCount);
+    }
+    if (!seen.tickedCurrent) {
+        zaro::app::testing::failf("the Type menu did not tick the kind it already is\n");
+    }
+    std::printf("  transition menu: %d kinds, remove offered, current ticked\n", seen.kindCount);
+
+    // And a clip's own menu still wins where a clip is what the pointer is on.
+    // The span is a fraction of the clip, so a point well clear of it is still
+    // over the same track.
+    const Seen onClip = rightClick(QPoint(startX - 40, y), {});
+    if (onClip.offeredType) {
+        zaro::app::testing::failf("right-clicking a clip opened the transition menu\n");
+    }
+
+    while (window.commands().canUndo()) {
+        window.commands().undo(window.project());
+    }
+    timeline->selectTransition({}, {});
+    QApplication::processEvents();
+}

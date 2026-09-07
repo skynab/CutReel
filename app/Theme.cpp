@@ -1,0 +1,669 @@
+#include "Theme.h"
+
+#include <QApplication>
+#include <QDir>
+#include <QFont>
+#include <QFontDatabase>
+#include <QPalette>
+#include <QStandardPaths>
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstddef>
+
+#include "Icons.h"
+
+namespace zaro::app::theme {
+namespace {
+
+// The tokens, exactly as the design system writes them. Nothing else in the
+// application names a colour by value.
+constexpr QRgb kBg = 0xff161826;
+constexpr QRgb kSurface = 0xff232532;
+constexpr QRgb kWell = 0xff0d0e16;
+constexpr QRgb kText = 0xffe9e9ed;
+constexpr QRgb kAccent = 0xff9184d9;
+
+constexpr std::array<QRgb, 9> kNeutralRamp{0xfff3f5fe, 0xffe4e7f5, 0xffcfd3e5,
+                                           0xffb2b6ca, 0xff9397ab, 0xff75798c,
+                                           0xff595d6c, 0xff3f424d, 0xff292b31};
+constexpr std::array<QRgb, 9> kAccentRamp{0xfff5f4ff, 0xffe7e5fe, 0xffd2cefd,
+                                          0xffb5abfc, 0xff968ae0, 0xff796cbf,
+                                          0xff5d5294, 0xff423a6a, 0xff2b2741};
+// Generated at the accent ramp's own lightness steps, on the design's teal
+// chroma curve -- so step 400 here and step 400 there sit at the same value,
+// and the two families differ only in hue.
+constexpr std::array<QRgb, 9> kAudioRamp{0xffeaf9fb, 0xffcbf0f5, 0xff90e4ee, 0xff57cbd7, 0xff40a9b4,
+                                         0xff238995, 0xff0e6a74, 0xff064c54, 0xff003238};
+
+/// One hue per group of commands, for the keyboard map.
+///
+/// **A ramp, not a free choice per caller.** Everything else in this palette
+/// says what a thing *is* -- ground, surface, accent -- and two families were
+/// enough while the only distinction to draw was picture against sound. The
+/// hotkey map has to say which of a dozen groups a key belongs to at a glance,
+/// across sixty keys too small for a word, and no amount of one accent does
+/// that.
+///
+/// Generated the way the other ramps were: one lightness band, one chroma
+/// band, hues spread around it -- so no tint reads as brighter or more
+/// important than another, and the whole row sits at the same value as the
+/// text it labels. Ordered so that neighbours in the catalogue are not
+/// neighbours on the wheel.
+constexpr std::array<QRgb, 12> kTints{
+    0xffe97871,  // red
+    0xffec9c63,  // amber
+    0xff89d298,  // green
+    0xffa2ca6c,  // lime
+    0xffaa9df1,  // blurple, the accent's own hue
+    0xff78d5e0,  // sky
+    0xffe4b750,  // yellow
+    0xffe492c9,  // pink
+    0xffc3a5f9,  // violet
+    0xff50bfbe,  // teal, the audio family's hue
+    0xff76b3f1,  // blue
+    0xff9fa4b2,  // grey, for the group that is not about the picture at all
+};
+
+/// Step 100..900 to an index into a ramp, clamped.
+int rampIndex(int step) {
+    const int index = (std::clamp(step, 100, 900) / 100) - 1;
+    return std::clamp(index, 0, 8);
+}
+
+/// A colour as `#rrggbb`, for pasting into the stylesheet.
+QString hex(const QColor& colour) {
+    return colour.name(QColor::HexRgb);
+}
+
+}  // namespace
+
+QColor bg() {
+    return QColor::fromRgba(kBg);
+}
+QColor surface() {
+    return QColor::fromRgba(kSurface);
+}
+QColor well() {
+    return QColor::fromRgba(kWell);
+}
+QColor text() {
+    return QColor::fromRgba(kText);
+}
+QColor accent() {
+    return QColor::fromRgba(kAccent);
+}
+QColor accent(int step) {
+    return QColor::fromRgba(kAccentRamp[static_cast<std::size_t>(rampIndex(step))]);
+}
+QColor neutral(int step) {
+    return QColor::fromRgba(kNeutralRamp[static_cast<std::size_t>(rampIndex(step))]);
+}
+QColor audio(int step) {
+    return QColor::fromRgba(kAudioRamp[static_cast<std::size_t>(rampIndex(step))]);
+}
+
+QColor tint(int index) {
+    const int wrapped = ((index % tintCount()) + tintCount()) % tintCount();
+    return QColor::fromRgba(kTints[static_cast<std::size_t>(wrapped)]);
+}
+
+int tintCount() {
+    return static_cast<int>(kTints.size());
+}
+
+QColor mix(const QColor& under, const QColor& over, double amount) {
+    const double a = std::clamp(amount, 0.0, 1.0);
+    const auto blend = [a](int u, int o) {
+        return static_cast<int>(std::lround(u * (1.0 - a) + o * a));
+    };
+    return QColor{blend(under.red(), over.red()), blend(under.green(), over.green()),
+                  blend(under.blue(), over.blue())};
+}
+
+QColor textAt(double fraction) {
+    return mix(bg(), text(), fraction);
+}
+
+// The divider is the design's `color-mix(in srgb, text 16%, transparent)` --
+// which over the window ground resolves to text at 16%.
+QColor divider() {
+    return textAt(0.16);
+}
+
+namespace {
+
+/// The caret, written where a stylesheet url can reach it.
+///
+/// Rebuilt every run rather than cached across them: it is a few hundred bytes,
+/// and the alternative is a stale arrow in the wrong colour surviving a retune
+/// of the palette. Drawn at the ratio of the screen the app started on, so the
+/// 10px the rule asks for lands on whole device pixels.
+///
+/// An empty path leaves `image: url()` naming nothing, which Qt treats as no
+/// image -- the arrow is missing, exactly as it was before, rather than the
+/// application refusing to start over a piece of chrome.
+QString caretFile(const QString& name, const QColor& ink, bool pointingUp = false) {
+    const QString dir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+    if (dir.isEmpty() || !QDir{}.mkpath(dir)) {
+        return {};
+    }
+    const QString path = dir + '/' + name + ".png";
+    const icons::Glyph glyph = pointingUp ? icons::Glyph::CaretUp : icons::Glyph::CaretDown;
+    if (!icons::pixmap(glyph, 10, ink).save(path)) {
+        return {};
+    }
+    // Forward slashes, and no Windows drive colon left for the parser to read
+    // as the end of a url scheme.
+    return QDir::fromNativeSeparators(path);
+}
+
+}  // namespace
+
+QString styleSheet() {
+    const QString accentHex = hex(accent());
+    const QString surfaceHex = hex(surface());
+    const QString bgHex = hex(bg());
+    const QString textHex = hex(text());
+    const QString dividerHex = hex(divider());
+    const QString hoverHex = hex(mix(surface(), text(), 0.08));
+    const QString pressHex = hex(mix(surface(), accent(), 0.20));
+    const QString selectHex = hex(mix(surface(), accent(), 0.18));
+    const QString mutedHex = hex(textAt(0.55));
+
+    // Written as one sheet rather than per-widget calls: a control's look
+    // should not depend on which panel happened to construct it.
+    //
+    // Two literals rather than one: MSVC caps a *single* string literal at
+    // 16380 bytes and this sheet is longer than that, so the halves are joined
+    // below. The split is at a section boundary, so adding a rule means
+    // growing the half it belongs to.
+    //
+    // Named, and checked, rather than left inline. This overflowed once and the
+    // only thing that noticed was CI -- the compiler here accepts a longer
+    // literal than the one the build uses, so the error arrived as a red build
+    // on someone else's machine. The assertions below fail on the machine that
+    // typed the rule instead.
+    static constexpr char kSheetTop[] = R"(
+QMenuBar { background: transparent; border: none; padding: 1px 4px; }
+QMenuBar::item { background: transparent; padding: 3px 8px; border-radius: 5px; }
+QMenuBar::item:selected, QMenuBar::item:pressed { background: %HOVER%; }
+
+QMenu { background: %SURFACE%; border: 1px solid %DIVIDER%; border-radius: 8px; padding: 4px; }
+QMenu::item { padding: 4px 22px 4px 10px; border-radius: 5px; }
+QMenu::item:selected { background: %SELECT%; color: %ACCENT200%; }
+QMenu::item:disabled { color: %MUTED%; }
+QMenu::separator { height: 1px; background: %DIVIDER%; margin: 3px 8px; }
+QMenu::indicator { width: 12px; height: 12px; margin-left: 6px; }
+
+QPushButton {
+    background: transparent; color: %TEXT%;
+    border: 1px solid %DIVIDER%; border-radius: 8px;
+    padding: 4px 10px; min-height: 22px;
+}
+QPushButton:hover { background: %HOVER%; }
+QPushButton:pressed { background: %PRESS%; }
+QPushButton:checked { background: %SELECT%; color: %ACCENT200%; border-color: %ACCENT%; }
+QPushButton:disabled { color: %MUTED%; border-color: %DIVIDER%; }
+QPushButton[accent="true"] { color: %ACCENT%; border-color: %ACCENT%; }
+QPushButton[flat="true"] { border-color: transparent; color: %MUTED%; }
+QPushButton[flat="true"]:hover { background: %HOVER%; color: %TEXT%; }
+
+QToolButton {
+    background: transparent; color: %MUTED%;
+    border: 1px solid transparent; border-radius: 6px; padding: 2px 4px;
+}
+QToolButton:hover { background: %HOVER%; color: %TEXT%; }
+QToolButton:pressed { background: %PRESS%; }
+QToolButton:checked { background: %SELECT%; color: %ACCENT200%; }
+
+QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {
+    background: %BG%; color: %TEXT%; selection-background-color: %ACCENT700%;
+    border: 1px solid %DIVIDER%; border-radius: 6px;
+    padding: 2px 6px; min-height: 22px;
+}
+QLineEdit:hover, QSpinBox:hover, QDoubleSpinBox:hover, QComboBox:hover { border-color: %NEUTRAL600%; }
+QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus { border-color: %ACCENT%; }
+/* The arrow, and why it is a file.
+
+   Styling `::drop-down` at all takes the combo off the native painter, and Qt
+   then draws no arrow unless `::down-arrow` names an image -- so the rule that
+   removed the border was also removing the one mark that said "this opens".
+   Every combo in the app read as a text field; the font picker read as a field
+   somebody was expected to type a family name into.
+
+   A stylesheet takes a url and nothing else: there is no way to hand it a
+   painted path. So the caret this project already draws is written out once and
+   pointed at. Generated rather than vendored, at the running screen's ratio,
+   which is what keeps it the same caret as the one in the bin's group headings
+   instead of a second arrow from somebody else's icon set. */
+QComboBox::drop-down { border: none; width: 20px; }
+QComboBox::down-arrow { image: url(%CARET%); width: 10px; height: 10px; margin-right: 6px; }
+QComboBox::down-arrow:disabled { image: url(%CARETOFF%); }
+/* Room for the arrow, reserved rather than hoped for.
+
+   Qt works out how wide a combo wants to be from the *native* arrow, not from
+   the zone named above -- so the widget asked for 81px, of which the rule then
+   spent 26 on the drop-down, leaving 47 for a word that measures 46. It fitted
+   by a pixel, and a pixel is not a margin: on a machine whose Inter renders
+   "Centre" a hair wider, the right-hand end of the word was cut off.
+
+   Padding is the one part of the box Qt does count, so this is what makes the
+   space real instead of borrowed from the text. */
+QComboBox { padding-right: 22px; }
+QComboBox QAbstractItemView {
+    background: %SURFACE%; border: 1px solid %DIVIDER%; border-radius: 6px;
+    selection-background-color: %ACCENT800%; selection-color: %ACCENT100%; padding: 3px;
+}
+/* The steppers, missing for the same reason the combo's arrow was: styling the
+   buttons takes the box off the native painter, and Qt then draws no arrow
+   unless one is named. A spin box with no steppers is a field -- the value can
+   be typed, and the nudge that is the whole point of a spin box is not offered.
+
+   Positioned against the border rather than the padding box, stacked, and each
+   given half the height: left to itself Qt puts both in the same place. */
+QSpinBox::up-button, QDoubleSpinBox::up-button {
+    subcontrol-origin: border; subcontrol-position: top right;
+    width: 17px; height: 12px; border: none; background: transparent;
+}
+QSpinBox::down-button, QDoubleSpinBox::down-button {
+    subcontrol-origin: border; subcontrol-position: bottom right;
+    width: 17px; height: 12px; border: none; background: transparent;
+}
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
+    image: url(%CARETUP%); width: 9px; height: 9px;
+}
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
+    image: url(%CARET%); width: 9px; height: 9px;
+}
+/* At the end of the range the button does nothing, and says so. */
+QSpinBox::up-arrow:disabled, QSpinBox::up-arrow:off,
+QDoubleSpinBox::up-arrow:disabled, QDoubleSpinBox::up-arrow:off {
+    image: url(%CARETUPOFF%);
+}
+QSpinBox::down-arrow:disabled, QSpinBox::down-arrow:off,
+QDoubleSpinBox::down-arrow:disabled, QDoubleSpinBox::down-arrow:off {
+    image: url(%CARETOFF%);
+}
+/* Room for them, so a stepper never sits on top of the number. */
+QSpinBox, QDoubleSpinBox { padding-right: 19px; }
+
+QCheckBox, QRadioButton { spacing: 7px; }
+QCheckBox::indicator, QRadioButton::indicator {
+    width: 13px; height: 13px; border: 1px solid %DIVIDER%; background: %BG%;
+}
+QCheckBox::indicator { border-radius: 4px; }
+QRadioButton::indicator { border-radius: 7px; }
+QCheckBox::indicator:hover, QRadioButton::indicator:hover { border-color: %ACCENT%; }
+QCheckBox::indicator:checked, QRadioButton::indicator:checked {
+    background: %ACCENT600%; border-color: %ACCENT%;
+}
+
+/* 1px and not 2px for the same reason the handle is 4px and not 5px: a radius
+   over half the box is dropped, and half of a 3px track is 1.5px. */
+QSlider::groove:horizontal { height: 3px; background: %NEUTRAL800%; border-radius: 1px; }
+QSlider::sub-page:horizontal { background: %ACCENT600%; border-radius: 1px; }
+/* A circle, and it takes both numbers to be one.
+
+   The height comes from the margins. Qt reads a horizontal handle's width from
+   the rule and its height from the groove plus the vertical margins, so a
+   `height` here is ignored: -3px against a 3px groove is what makes the handle
+   9 tall as well as 9 wide.
+
+   The radius has to stay under half of that. Qt drops a border-radius larger
+   than the box it is rounding instead of clamping it, so `5px` on a 9px handle
+   -- the obvious way to write "fully round", and what this rule said until
+   somebody put it beside the design -- silently drew a square. 4px is a circle. */
+QSlider::handle:horizontal {
+    width: 9px; margin: -3px 0; border-radius: 4px; background: %ACCENT300%;
+}
+QSlider::handle:horizontal:hover { background: %ACCENT200%; }
+
+QScrollBar:vertical { width: 9px; background: transparent; margin: 0; }
+QScrollBar:horizontal { height: 9px; background: transparent; margin: 0; }
+QScrollBar::handle { background: %NEUTRAL800%; border-radius: 5px; min-height: 24px; min-width: 24px; }
+QScrollBar::handle:hover { background: %NEUTRAL700%; }
+QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
+QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
+
+/* Tables. There is one -- the keyboard shortcuts -- and it was the only thing
+   in the application still drawn by the platform's own style, because this
+   sheet named every other kind of view and not this one. What that looked like
+   was a header row in grey-on-grey over rows in white-on-dark: the headings
+   read as disabled, which is a poor way to introduce three columns. */
+QTableView {
+    background: %BG%; alternate-background-color: %SURFACE%;
+    border: 1px solid %DIVIDER%; border-radius: 8px;
+    gridline-color: %DIVIDER%; selection-background-color: %SELECT%;
+    selection-color: %ACCENT200%;
+}
+QTableView::item { padding: 4px 8px; }
+QHeaderView { background: transparent; }
+QHeaderView::section {
+    background: %SURFACE%; color: %MUTED%; padding: 5px 8px;
+    border: none; border-bottom: 1px solid %DIVIDER%;
+    font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase;
+}
+QHeaderView::section:hover { color: %TEXT%; }
+QTableCornerButton::section { background: %SURFACE%; border: none; }
+
+QGroupBox {
+    border: 1px solid %DIVIDER%; border-radius: 8px;
+    /* The title sits in this margin; anything less and the border is drawn
+       through the middle of the words. */
+    margin-top: 18px; padding: 10px 8px 6px;
+}
+QGroupBox::title {
+    subcontrol-origin: margin; subcontrol-position: top left; left: 10px; padding: 0 4px;
+    color: %MUTED%; font-size: 10px;
+}
+
+QListWidget, QTreeWidget, QAbstractScrollArea {
+    background: %BG%; border: 1px solid %DIVIDER%; border-radius: 8px;
+}
+QListWidget::item { padding: 3px 6px; border-radius: 6px; }
+QListWidget::item:hover { background: %HOVER%; }
+QListWidget::item:selected { background: %ACCENT800%; color: %ACCENT100%; }
+
+QSplitter::handle { background: %DIVIDER%; }
+QSplitter::handle:horizontal { width: 1px; }
+QSplitter::handle:vertical { height: 1px; }
+QSplitter::handle:hover { background: %ACCENT%; }
+
+QProgressBar {
+    border: 1px solid %DIVIDER%; border-radius: 5px; background: %BG%;
+    max-height: 8px; text-align: center; color: transparent;
+}
+QProgressBar::chunk { background: %ACCENT600%; border-radius: 4px; }
+
+QToolTip {
+    background: %SURFACE%; color: %TEXT%;
+    border: 1px solid %DIVIDER%; border-radius: 6px; padding: 3px 6px;
+}
+QLabel { background: transparent; }
+
+)";
+    static constexpr char kSheetRest[] =
+        R"(/* --- the window's own chrome ------------------------------------------- */
+
+#chrome-titlebar { background: %SURFACE%; border-bottom: 1px solid %DIVIDER%; }
+#chrome-toolbar, #chrome-timeline-bar, #chrome-viewer-bar {
+    background: %BG%; border-bottom: 1px solid %DIVIDER%;
+}
+#chrome-statusbar { background: %BG%; border-top: 1px solid %DIVIDER%; }
+#chrome-statusbar QLabel, #chrome-toolbar QLabel[muted="true"],
+#chrome-timeline-bar QLabel[muted="true"], #chrome-viewer-bar QLabel[muted="true"] {
+    color: %MUTED%; font-size: 11px;
+}
+/* A readout that can be pressed. It carries a border at rest rather than
+   growing one on hover: the fact it states -- the frame size -- is the thing
+   people go looking for a way to change, and an affordance that only appears
+   under the pointer is no help to somebody who never thought to point at it. */
+#chrome-readout {
+    color: %MUTED%; font-size: 11px;
+    background: transparent; border: 1px solid %DIVIDER%; border-radius: 6px;
+    padding: 3px 7px; min-height: 16px;
+}
+#chrome-readout:hover { background: %HOVER%; color: %TEXT%; border-color: %DIVIDER%; }
+#chrome-readout:pressed { background: %PRESS%; }
+#chrome-readout:disabled { color: %MUTED%; background: transparent; border-color: transparent; }
+/* The frame-size dropdown, sized and coloured to sit beside the rate readout
+   rather than to look like a field in a form: same muted text, same hairline
+   border, same 6px radius. Its popup keeps the ordinary combo styling. */
+#chrome-format {
+    color: %MUTED%; font-size: 11px;
+    background: transparent; border: 1px solid %DIVIDER%; border-radius: 6px;
+    padding: 2px 4px 2px 7px; min-height: 16px;
+}
+#chrome-format:hover { background: %HOVER%; color: %TEXT%; }
+#chrome-format:disabled { color: %MUTED%; background: transparent; border-color: transparent; }
+#chrome-format::drop-down { border: none; width: 14px; }
+#chrome-brand { font-weight: 600; padding: 0 6px; }
+#viewer-well { background: %WELL%; }
+#deliver-side { background: %SURFACE%; }
+#deliver-header { background: %SURFACE%; border-bottom: 1px solid %DIVIDER%; }
+#timecode-big { color: %ACCENT300%; }
+#segment-group { border: 1px solid %DIVIDER%; border-radius: 8px; }
+/* Boxed to the 24 pixels these tabs are given, for the reason given on the
+   workspace tabs below. */
+#segment-group QPushButton { padding: 3px 10px; min-height: 16px; }
+#tab-group { background: %HOVER%; border-radius: 8px; }
+/* The box adds up to the 26 pixels the tab is given: 18 of content, 3 of
+   padding above and below, and a pixel of border on each edge. The general
+   button rule asks for 32, and a button told to be shorter than its own style
+   demands has its background drawn at the height the style wanted and pinned to
+   one edge -- which is the gap that used to sit above these tabs and not below
+   them. */
+#tab-group QPushButton {
+    border-color: transparent; color: %MUTED%;
+    padding: 3px 10px; min-height: 18px;
+}
+#tab-group QPushButton:checked { background: %SURFACE%; color: %ACCENT200%; border-color: %DIVIDER%; }
+
+/* --- the media pane ----------------------------------------------------- */
+
+/* A surface panel against the window ground, with the divider on its edge
+   rather than a splitter handle: the design draws one hairline there, and two
+   would read as a gap. */
+#bin-panel { background: %SURFACE%; border-right: 1px solid %DIVIDER%; }
+#bin-tabbar, #bin-footer { background: transparent; }
+#bin-tabbar { border-bottom: 1px solid %DIVIDER%; }
+#bin-footer { border-top: 1px solid %DIVIDER%; color: %FAINT%; font-size: 10px; }
+/* One pill, two panels. The design draws the same tab strip on the bin and on
+   the inspector, so they share a rule rather than each carrying a copy that
+   drifts a half pixel the next time either is touched. */
+#bin-tab, QPushButton[class="inspector-tab"] {
+    border: none; background: transparent; color: %MUTED%;
+    padding: 3px 9px; border-radius: 5px; min-height: 18px; font-size: 11px;
+}
+#bin-tab:hover, QPushButton[class="inspector-tab"]:hover {
+    background: %BINHOVER%; color: %TEXT%;
+}
+#bin-tab:checked, QPushButton[class="inspector-tab"]:checked {
+    background: %ACCENTWASH%; color: %ACCENT300%;
+}
+/* A tab with nothing behind it. Dimmer than an unselected one and still
+   legible: it is saying "not for this clip", not "gone". */
+QPushButton[class="inspector-tab"]:disabled { color: %FAINT%; background: transparent; }
+#inspector-tabbar { background: transparent; border-bottom: 1px solid %DIVIDER%; }
+#inspector-identity { background: transparent; border-bottom: 1px solid %DIVIDER%; }
+/* The tile beside the clip's name: the design's accent-into-neutral wash, which
+   Qt spells as a gradient because it has no `color-mix` in a background. */
+#inspector-identity-tile {
+    border-radius: 5px;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                                stop:0 %ACCENT800%, stop:1 %NEUTRAL900%);
+}
+#inspector-identity-name { font-size: 13px; }
+#inspector-identity-meta { font-size: 10px; color: %FAINT%; }
+#inspector-info-value { color: %TEXT%; }
+
+#bin-chip {
+    border: 1px solid transparent; border-radius: 9px; background: %BINHOVER%;
+    color: %MUTED%; padding: 1px 8px; min-height: 15px; font-size: 10px;
+}
+#bin-chip:hover { color: %TEXT%; }
+#bin-chip:checked { background: %ACCENTWASH%; color: %ACCENT300%; }
+#bin-chip[outline="true"] { background: transparent; border-color: %DIVIDER%; }
+#bin-chip[outline="true"]:checked { background: %ACCENTWASH%; border-color: %ACCENT%; }
+#bin-search { background: %BG%; padding: 3px 8px; min-height: 26px; }
+#bin-glyph-button {
+    border: 1px solid %DIVIDER%; border-radius: 6px; background: transparent;
+    padding: 0; min-height: 26px;
+}
+#bin-glyph-button:hover { background: %BINHOVER%; }
+#bin-glyph-button:checked { background: %ACCENTWASH%; border-color: %ACCENT%; }
+/* No frame and no ground of its own: the rows are drawn by the delegate, and a
+   sunken box inside a surface panel is a second panel. */
+#bin-list { background: transparent; border: none; }
+#bin-list::item { padding: 0; border-radius: 0; background: transparent; }
+#bin-list::item:hover, #bin-list::item:selected { background: transparent; }
+
+/* --- the Color workspace ------------------------------------------------ */
+
+#gallery-panel, #color-palette { background: %SURFACE%; }
+#gallery-panel { border-right: 1px solid %DIVIDER%; }
+#color-palette { border-top: 1px solid %DIVIDER%; }
+#gallery-heading { border-bottom: 1px solid %DIVIDER%; }
+#gallery-title { font-weight: 500; font-size: 11px; }
+#gallery-grid, #gallery-luts, #palette-list { background: transparent; border: none; }
+#gallery-grid::item { border-radius: 5px; padding: 2px; color: %FAINT%; font-size: 9px; }
+#gallery-grid::item:selected, #gallery-luts::item:selected, #palette-list::item:selected {
+    background: %ACCENTWASH%; color: %ACCENT300%;
+}
+#gallery-luts::item, #palette-list::item {
+    border-radius: 5px; padding: 4px 6px; color: %MUTED%; font-size: 11px;
+}
+#gallery-luts::item:hover, #palette-list::item:hover { background: %BINHOVER%; color: %TEXT%; }
+#palette-list { border-right: 1px solid %DIVIDER%; padding: 10px 8px; }
+/* The strip is a well, like the viewer: it is full of pictures. */
+#clip-strip { background: %WELL%; border-top: 1px solid %DIVIDER%; }
+#grade-nodes-box { background: %SURFACE%; border-bottom: 1px solid %DIVIDER%; }
+#scopes-panel { background: transparent; }
+#scope-tabs { background: %HOVER%; border-radius: 7px; }
+#scope-tab {
+    border: none; background: transparent; color: %MUTED%;
+    padding: 3px 0; border-radius: 5px; min-height: 16px; font-size: 10px;
+}
+#scope-tab:hover { color: %TEXT%; }
+#scope-tab:checked { background: %ACCENTWASH%; color: %ACCENT200%; }
+#scope-readout { background: %SURFACE%; border: 1px solid %DIVIDER%; border-radius: 6px; }
+#scope-readout-label {
+    font-size: 9px; letter-spacing: 0.06em; color: %FAINT%; text-transform: uppercase;
+}
+#scope-readout-value { font-family: Menlo, monospace; font-size: 12px; }
+
+/* --- the Audio workspace ------------------------------------------------ */
+
+#audio-side, #loudness-panel, #channel-panel, #frame-thumb, #stems-panel { background: %SURFACE%; }
+#stems-panel { border-bottom: 1px solid %DIVIDER%; }
+#frame-thumb { border-bottom: 1px solid %DIVIDER%; }
+#audio-side { border-right: 1px solid %DIVIDER%; }
+#loudness-panel { border-bottom: 1px solid %DIVIDER%; }
+#channel-panel { border-left: 1px solid %DIVIDER%; }
+#channel-header, #mixer-header { border-bottom: 1px solid %DIVIDER%; background: %SURFACE%; }
+#channel-heading {
+    font-size: 10px; letter-spacing: 0.07em; text-transform: uppercase; color: %FAINT%;
+}
+#mixer-panel { background: %BG%; }
+/* The console sits in a well, like the viewer: it is a row of instruments. */
+#mixer-console { background: %WELL%; }
+#loudness-measure { font-size: 10px; padding: 2px 8px; border-radius: 6px; }
+
+/* --- the keyboard manager ------------------------------------------------
+
+   Four bands: a filter bar, the map in a well, the three panes, a status line.
+   The well is the same well the viewer and the mixer console sit in -- the
+   keyboard is a picture of a thing, and pictures go in wells. */
+
+#hotkey-bar { background: %SURFACE%; border-bottom: 1px solid %DIVIDER%; }
+#hotkey-well { background: %WELL%; border-bottom: 1px solid %DIVIDER%; }
+#hotkey-side { background: %SURFACE%; border-right: 1px solid %DIVIDER%; }
+#hotkey-detail { background: %SURFACE%; border-left: 1px solid %DIVIDER%; }
+#hotkey-status { background: %BG%; border-top: 1px solid %DIVIDER%; }
+#hotkey-status QLabel { color: %FAINT%; font-size: 10px; }
+#hotkey-caption {
+    font-size: 10px; letter-spacing: 0.07em; text-transform: uppercase; color: %FAINT%;
+}
+#hotkey-name { font-size: 15px; }
+#hotkey-legend { font-size: 10px; color: %MUTED%; }
+#hotkey-bar QLabel[muted="true"], #hotkey-detail QLabel[muted="true"] {
+    color: %MUTED%; font-size: 11px;
+}
+/* A modifier, drawn as the key it stands for rather than as a checkbox: the
+   gesture is "hold this", and a held key is lit. */
+#hotkey-mod {
+    min-width: 30px; padding: 3px 7px; border-radius: 6px; border: 1px solid transparent;
+    background: %HOVER%; color: %MUTED%; font-family: Menlo, monospace;
+}
+#hotkey-mod:hover { color: %TEXT%; }
+#hotkey-mod:checked { background: %ACCENTWASH%; color: %ACCENT100%; border-color: %ACCENT600%; }
+/* What the selected command is bound to, big enough to read from where the
+   hands are. Checked is recording: dashed, because nothing is decided yet. */
+#hotkey-binding {
+    min-height: 44px; border: 1px solid %DIVIDER%; border-radius: 8px; background: %BG%;
+    font-family: Menlo, monospace; font-size: 17px; color: %TEXT%;
+}
+#hotkey-binding:hover { border-color: %NEUTRAL600%; }
+#hotkey-binding:checked {
+    background: %ACCENTWASH%; border: 1px dashed %ACCENT300%; color: %ACCENT100%;
+}
+#hotkey-table { background: %BG%; border: none; border-radius: 0; }
+#hotkey-tree { background: transparent; border: none; font-size: 11px; }
+#hotkey-tree::item { padding: 4px 6px; border-radius: 5px; }
+#hotkey-tree::item:hover { background: %BINHOVER%; }
+#hotkey-tree::item:selected { background: %ACCENTWASH%; color: %ACCENT100%; }
+)";
+    // -1 for the terminator: the cap is on the literal's own bytes.
+    static_assert(sizeof(kSheetTop) - 1 < 16380, "the first half of the sheet is over MSVC's cap");
+    static_assert(sizeof(kSheetRest) - 1 < 16380,
+                  "the second half of the sheet is over MSVC's cap");
+
+    return (QString::fromUtf8(kSheetTop) + QString::fromUtf8(kSheetRest))
+        .replace("%CARET%", caretFile("caret", textAt(0.62)))
+        .replace("%CARETOFF%", caretFile("caret-off", textAt(0.30)))
+        .replace("%CARETUP%", caretFile("caret-up", textAt(0.62), true))
+        .replace("%CARETUPOFF%", caretFile("caret-up-off", textAt(0.30), true))
+        .replace("%BG%", bgHex)
+        .replace("%SURFACE%", surfaceHex)
+        .replace("%WELL%", hex(well()))
+        .replace("%TEXT%", textHex)
+        .replace("%MUTED%", mutedHex)
+        .replace("%DIVIDER%", dividerHex)
+        .replace("%HOVER%", hoverHex)
+        .replace("%PRESS%", pressHex)
+        .replace("%SELECT%", selectHex)
+        .replace("%ACCENT100%", hex(accent(100)))
+        .replace("%ACCENT200%", hex(accent(200)))
+        .replace("%ACCENT300%", hex(accent(300)))
+        .replace("%ACCENT600%", hex(accent(600)))
+        .replace("%ACCENT700%", hex(accent(700)))
+        .replace("%ACCENT800%", hex(accent(800)))
+        .replace("%NEUTRAL600%", hex(neutral(600)))
+        .replace("%NEUTRAL700%", hex(neutral(700)))
+        .replace("%NEUTRAL800%", hex(neutral(800)))
+        .replace("%NEUTRAL900%", hex(neutral(900)))
+        .replace("%ACCENTWASH%", hex(mix(surface(), accent(), 0.16)))
+        .replace("%BINHOVER%", hex(mix(surface(), text(), 0.08)))
+        .replace("%FAINT%", hex(textAt(0.42)))
+        .replace("%ACCENT%", accentHex);
+}
+
+void apply(QApplication& application) {
+    // The palette as well as the sheet: dialogs and anything drawn by the style
+    // rather than by a rule -- a menu shadow, a disabled label, the text cursor
+    // -- read the palette, and a light one under a dark sheet shows up as white
+    // flashes at exactly the moments nobody is looking.
+    QPalette palette;
+    palette.setColor(QPalette::Window, bg());
+    palette.setColor(QPalette::WindowText, text());
+    palette.setColor(QPalette::Base, bg());
+    palette.setColor(QPalette::AlternateBase, surface());
+    palette.setColor(QPalette::Text, text());
+    palette.setColor(QPalette::Button, surface());
+    palette.setColor(QPalette::ButtonText, text());
+    palette.setColor(QPalette::BrightText, accent(200));
+    palette.setColor(QPalette::Highlight, accent(700));
+    palette.setColor(QPalette::HighlightedText, accent(100));
+    palette.setColor(QPalette::ToolTipBase, surface());
+    palette.setColor(QPalette::ToolTipText, text());
+    palette.setColor(QPalette::PlaceholderText, textAt(0.45));
+    palette.setColor(QPalette::Disabled, QPalette::WindowText, textAt(0.38));
+    palette.setColor(QPalette::Disabled, QPalette::Text, textAt(0.38));
+    palette.setColor(QPalette::Disabled, QPalette::ButtonText, textAt(0.38));
+    QApplication::setPalette(palette);
+
+    // Inter is the system's face if it happens to be installed; asking for a
+    // family that is not there costs an alias lookup and lands somewhere
+    // arbitrary, so the fallback is named rather than guessed at.
+    QFont font = QApplication::font();
+    if (QFontDatabase::families().contains("Inter")) {
+        font.setFamily("Inter");
+    }
+    font.setPointSizeF(11.5);
+    QApplication::setFont(font);
+
+    application.setStyleSheet(styleSheet());
+}
+
+}  // namespace zaro::app::theme

@@ -1,0 +1,1747 @@
+#include "ProjectBin.h"
+
+#include <QAction>
+#include <QApplication>
+#include <QButtonGroup>
+#include <QCursor>
+#include <QDragEnterEvent>
+#include <QDragLeaveEvent>
+#include <QDragMoveEvent>
+#include <QDropEvent>
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QFontMetrics>
+#include <QFrame>
+#include <QHBoxLayout>
+#include <QInputDialog>
+#include <QKeySequence>
+#include <QLabel>
+#include <QLayout>
+#include <QLineEdit>
+#include <QLinearGradient>
+#include <QListWidget>
+#include <QMenu>
+#include <QMessageBox>
+#include <QMimeData>
+#include <QPainter>
+#include <QPainterPath>
+#include <QPushButton>
+#include <QStackedWidget>
+#include <QStringList>
+#include <QStyledItemDelegate>
+#include <QTimer>
+#include <QUrl>
+#include <QVBoxLayout>
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <filesystem>
+#include <functional>
+#include <map>
+#include <set>
+#include <vector>
+
+#include "zaro/core/edit/Operations.h"
+#include "zaro/core/io/MediaBrowser.h"
+#include "zaro/core/media/Waveform.h"
+#include "zaro/core/model/MediaSearch.h"
+#include "zaro/core/time/Timecode.h"
+#include "zaro/platform/ffmpeg/FFmpegMedia.h"
+#include "zaro/platform/ffmpeg/FFmpegRender.h"
+
+#include "Icons.h"
+#include "MediaDrag.h"
+#include "Say.h"
+#include "Theme.h"
+#include "ThumbnailCache.h"
+#include "TitlePresets.h"
+#include "chrome/FlowLayout.h"
+#include "chrome/Widgets.h"
+
+namespace zaro::app {
+namespace {
+
+// What a row carries. The item's own text stays the file's name, so type-ahead
+// and accessibility still find rows by the thing they are called; everything
+// the delegate draws beyond that is here.
+constexpr int kRoleMedia = Qt::UserRole;         ///< qulonglong: the media id
+constexpr int kRoleSubclip = Qt::UserRole + 1;   ///< qulonglong: the subclip id, or 0
+constexpr int kRoleHeader = Qt::UserRole + 2;    ///< bool: a folder heading
+constexpr int kRoleMeta = Qt::UserRole + 3;      ///< the second line
+constexpr int kRoleBadge = Qt::UserRole + 4;     ///< the duration, over the thumbnail
+constexpr int kRoleGlyph = Qt::UserRole + 5;     ///< int: which icons::Glyph
+constexpr int kRoleUsed = Qt::UserRole + 6;      ///< bool: the cut uses this
+constexpr int kRoleCount = Qt::UserRole + 7;     ///< a heading's tally
+constexpr int kRoleBin = Qt::UserRole + 8;       ///< which folder this row is under
+constexpr int kRoleFolded = Qt::UserRole + 9;    ///< bool: a shut heading
+constexpr int kRolePath = Qt::UserRole + 10;     ///< the file a preview frame comes from
+constexpr int kRolePoster = Qt::UserRole + 11;   ///< double: seconds into it to show
+constexpr int kRoleMissing = Qt::UserRole + 12;  ///< bool: the file is not there
+
+// The row geometry the design draws, in logical pixels.
+constexpr int kThumbWidth = 64;
+constexpr int kThumbHeight = 38;
+constexpr int kRowHeight = 50;
+constexpr int kCompactRowHeight = 24;
+constexpr int kHeaderHeight = 26;
+constexpr int kGutter = 6;
+
+/// The application's "something is wrong" red, as the meters and the mute
+/// button already spell it. A row whose file is not there is drawn in it.
+const QColor kMissingInk{0xd9, 0x6a, 0x6a};
+
+/// The folder a file came from, which is the only grouping a project actually
+/// has. The design's bins -- Interview, Drone, B-roll -- are how footage
+/// arrives off a card, so the folder is not a stand-in for bins so much as
+/// where bins come from.
+QString binNameFor(const std::string& path) {
+    const std::filesystem::path file{path};
+    const std::filesystem::path folder = file.parent_path().filename();
+    return folder.empty() ? QStringLiteral("Media") : QString::fromStdString(folder.string());
+}
+
+/// How far into a file its preview frame is taken from.
+///
+/// A second in, not the first frame: a shot that opens on a slate, a fade or
+/// the lens cap coming off is common enough that frame zero is the one frame
+/// least likely to say what the file is. Halfway for anything shorter, so a
+/// two-second clip still gets a frame from inside itself.
+double posterSecondsFor(const time::Rational& duration) {
+    const double seconds = duration.toDouble();
+    return seconds > 2.0 ? 1.0 : seconds / 2.0;
+}
+
+icons::Glyph glyphFor(const model::MediaRef& ref) {
+    if (ref.info.primaryVideo() == nullptr) {
+        return icons::Glyph::Waveform;
+    }
+    // A still has a picture and no running time; a movie has both.
+    return ref.info.isStill() || !ref.info.duration.isPositive() ? icons::Glyph::Image
+                                                                 : icons::Glyph::FilmStrip;
+}
+
+/// Minutes and seconds, as the design's badge writes them. Not timecode: the
+/// badge is four characters wide and a running time is what it is for.
+QString badgeFor(const time::Rational& duration) {
+    if (!duration.isPositive()) {
+        return {};
+    }
+    const int total = static_cast<int>(std::lround(duration.toDouble()));
+    return QString("%1:%2").arg(total / 60).arg(total % 60, 2, 10, QChar('0'));
+}
+
+/// The second line: what this file is, in the order somebody scanning a bin
+/// reads it -- codec first, because "which of these is the ProRes" is the
+/// question a bin gets asked.
+QString metaFor(const model::MediaRef& ref) {
+    QStringList parts;
+    if (const media::VideoStreamInfo* video = ref.info.primaryVideo()) {
+        if (!video->codecName.empty()) {
+            parts << QString::fromStdString(video->codecName);
+        }
+        parts << QString("%1×%2").arg(video->width).arg(video->height);
+        // A still says so instead of quoting a frame rate. The rate FFmpeg
+        // reports for a .png is 25fps because the demuxer has to say something,
+        // and printing it would be stating a fact about the file that is not
+        // true of it.
+        if (video->isStill) {
+            parts << QStringLiteral("still");
+        } else if (const double rate = video->frameRate.toDouble(); rate > 0.0) {
+            parts << QString("%1 fps").arg(rate, 0, 'g', 4);
+        }
+    } else if (const media::AudioStreamInfo* audio = ref.info.primaryAudio()) {
+        if (!audio->codecName.empty()) {
+            parts << QString::fromStdString(audio->codecName);
+        }
+        parts << QString("%1 kHz").arg(audio->sampleRate.toDouble() / 1000.0, 0, 'g', 4);
+        parts << (audio->channelCount == 1   ? QStringLiteral("mono")
+                  : audio->channelCount == 2 ? QStringLiteral("stereo")
+                                             : QString("%1 ch").arg(audio->channelCount));
+    }
+    // Kept on the row rather than in a menu: a file being read as something
+    // other than what it claims is exactly the kind of setting somebody forgets
+    // they made, and the bin is where they would look for it.
+    if (ref.transferOverride != media::TransferFunction::Unknown) {
+        parts << QString("[%1]").arg(QString::fromUtf8(media::toString(ref.transferOverride)));
+    }
+    if (ref.primariesOverride != media::ColorPrimaries::Unknown) {
+        parts << QString("[%1]").arg(QString::fromUtf8(media::toString(ref.primariesOverride)));
+    }
+    return parts.join(" · ");
+}
+
+QString describe(const model::Subclip& subclip, const model::MediaRef& source) {
+    return QString::fromStdString(subclip.name.empty() ? source.name : subclip.name);
+}
+
+/// Bytes as the footer says them. One decimal, because the number is a sense of
+/// scale and not an accounting.
+/// Every media id any sequence puts on a track.
+///
+/// The design marks used footage with a dot, and the honest answer to "is this
+/// used" is a walk of the cut. Done once per refresh rather than once per row:
+/// a bin of three hundred files against a cut of a thousand clips is otherwise
+/// three hundred thousand comparisons for a five-pixel dot.
+std::set<std::uint64_t> usedMedia(const model::Project& project) {
+    std::set<std::uint64_t> used;
+    for (const model::Sequence& sequence : project.sequences()) {
+        for (const auto* tracks : {&sequence.videoTracks(), &sequence.audioTracks()}) {
+            for (const model::Track& track : *tracks) {
+                for (const model::Clip& clip : track.clips()) {
+                    if (clip.source.isValid()) {
+                        used.insert(clip.source.value());
+                    }
+                }
+            }
+        }
+    }
+    return used;
+}
+
+/// The rows, painted.
+///
+/// A delegate rather than a widget per row for the reason given on the class,
+/// and because the design's row is a thumbnail, two lines of type and a dot --
+/// four draw calls, against four widgets and a layout each.
+class BinDelegate : public QStyledItemDelegate {
+public:
+    explicit BinDelegate(const bool* compact, ThumbnailCache* const* thumbnails,
+                         QObject* parent = nullptr)
+        : QStyledItemDelegate{parent}, compact_{compact}, thumbnails_{thumbnails} {}
+
+    QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const override {
+        Q_UNUSED(option);
+        if (index.data(kRoleHeader).toBool()) {
+            return QSize{0, kHeaderHeight};
+        }
+        const bool subclip = index.data(kRoleSubclip).toULongLong() != 0;
+        return QSize{0, *compact_ || subclip ? kCompactRowHeight : kRowHeight};
+    }
+
+    void paint(QPainter* painter, const QStyleOptionViewItem& option,
+               const QModelIndex& index) const override {
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing, true);
+        const QRect row = option.rect;
+
+        if (index.data(kRoleHeader).toBool()) {
+            paintHeader(painter, row, index);
+            painter->restore();
+            return;
+        }
+
+        // The row's own ground. Selection is the accent wash the rest of the
+        // application uses for a picked thing; hover is the design's 6%.
+        const QRect plate = row.adjusted(kGutter / 2, 1, -kGutter / 2, -1);
+        if ((option.state & QStyle::State_Selected) != 0) {
+            painter->setPen(Qt::NoPen);
+            painter->setBrush(theme::mix(theme::surface(), theme::accent(), 0.20));
+            painter->drawRoundedRect(plate, 7, 7);
+        } else if ((option.state & QStyle::State_MouseOver) != 0) {
+            painter->setPen(Qt::NoPen);
+            painter->setBrush(theme::mix(theme::surface(), theme::text(), 0.06));
+            painter->drawRoundedRect(plate, 7, 7);
+        }
+
+        const bool subclip = index.data(kRoleSubclip).toULongLong() != 0;
+        int textLeft = plate.left() + 6;
+        if (!*compact_ && !subclip) {
+            const QRect thumb{plate.left() + 6, plate.top() + (plate.height() - kThumbHeight) / 2,
+                              kThumbWidth, kThumbHeight};
+            paintThumbnail(painter, thumb, index);
+            textLeft = thumb.right() + 9;
+        } else if (subclip) {
+            // Indented under the file it is a note about, and marked with the
+            // range rather than a picture: a subclip is somebody saying where
+            // the good part is, not a second file.
+            textLeft = plate.left() + 20;
+        }
+
+        // The marks along the right-hand end, outermost first, each one moving
+        // the text's edge in. A row can carry both -- a file the cut uses *and*
+        // cannot find is exactly the row somebody needs to see -- so they are
+        // laid out in sequence rather than each drawn at a fixed place.
+        int textRight = plate.right() - 8;
+        if (index.data(kRoleUsed).toBool()) {
+            const QRect dot{plate.right() - 11, plate.center().y() - 2, 5, 5};
+            painter->setPen(Qt::NoPen);
+            painter->setBrush(theme::accent(500));
+            painter->drawEllipse(dot);
+            textRight = dot.left() - 6;
+        }
+        // In the application's "something is wrong" red, which the name is set
+        // in too: the word says what is wrong and the colour is what catches
+        // the eye down a list of fifty rows.
+        const bool missing = index.data(kRoleMissing).toBool();
+        if (missing) {
+            QFont mark = option.font;
+            mark.setPointSizeF(8.0);
+            mark.setBold(true);
+            painter->setFont(mark);
+            painter->setPen(kMissingInk);
+            const QString word = QStringLiteral("MISSING");
+            const int wide = QFontMetrics{mark}.horizontalAdvance(word);
+            painter->drawText(QRect{textRight - wide, plate.top(), wide, plate.height()},
+                              Qt::AlignRight | Qt::AlignVCenter, word);
+            textRight -= wide + 8;
+        }
+
+        const QString meta = index.data(kRoleMeta).toString();
+        const bool twoLine = !*compact_ && !subclip && !meta.isEmpty();
+        const QRect text{textLeft, plate.top(), std::max(0, textRight - textLeft), plate.height()};
+
+        QFont name = option.font;
+        name.setPointSizeF(9.5);
+        painter->setFont(name);
+        painter->setPen(missing ? kMissingInk : theme::text());
+        const QFontMetrics nameMetrics{name};
+        const QString shownName = nameMetrics.elidedText(index.data(Qt::DisplayRole).toString(),
+                                                         Qt::ElideMiddle, text.width());
+        if (twoLine) {
+            painter->drawText(
+                QRect{text.left(), text.top() + 5, text.width(), nameMetrics.height()},
+                Qt::AlignLeft | Qt::AlignVCenter, shownName);
+            QFont small = option.font;
+            small.setPointSizeF(8.0);
+            painter->setFont(small);
+            painter->setPen(theme::textAt(0.45));
+            const QFontMetrics smallMetrics{small};
+            painter->drawText(QRect{text.left(), text.bottom() - smallMetrics.height() - 5,
+                                    text.width(), smallMetrics.height()},
+                              Qt::AlignLeft | Qt::AlignVCenter,
+                              smallMetrics.elidedText(meta, Qt::ElideRight, text.width()));
+        } else {
+            painter->drawText(text, Qt::AlignLeft | Qt::AlignVCenter, shownName);
+            // In one line the running time is the only other thing that fits,
+            // and it is the one somebody is looking for.
+            const QString badge = index.data(kRoleBadge).toString();
+            if (!badge.isEmpty()) {
+                QFont small = option.font;
+                small.setPointSizeF(8.0);
+                painter->setFont(small);
+                painter->setPen(theme::textAt(0.45));
+                painter->drawText(text, Qt::AlignRight | Qt::AlignVCenter, badge);
+            }
+        }
+        painter->restore();
+    }
+
+private:
+    void paintHeader(QPainter* painter, const QRect& row, const QModelIndex& index) const {
+        const QColor ink = theme::textAt(0.48);
+        const bool folded = index.data(kRoleFolded).toBool();
+        const QPixmap caret =
+            icons::pixmap(folded ? icons::Glyph::CaretRight : icons::Glyph::CaretDown, 11, ink);
+        painter->drawPixmap(QPoint{row.left() + 6, row.center().y() - 5}, caret);
+
+        QFont label = painter->font();
+        label.setPointSizeF(8.0);
+        label.setCapitalization(QFont::AllUppercase);
+        // The design tracks its headings wide, which is what keeps a
+        // three-letter folder name from reading as a typo.
+        label.setLetterSpacing(QFont::PercentageSpacing, 109);
+        painter->setFont(label);
+        painter->setPen(ink);
+        const QRect text{row.left() + 22, row.top(), row.width() - 52, row.height()};
+        painter->drawText(text, Qt::AlignLeft | Qt::AlignVCenter,
+                          index.data(Qt::DisplayRole).toString());
+
+        QFont tally = painter->font();
+        tally.setCapitalization(QFont::MixedCase);
+        tally.setLetterSpacing(QFont::PercentageSpacing, 100);
+        painter->setFont(tally);
+        painter->drawText(QRect{row.left(), row.top(), row.width() - 10, row.height()},
+                          Qt::AlignRight | Qt::AlignVCenter, index.data(kRoleCount).toString());
+    }
+
+    /// The row's own frame, if one has been decoded. Returns whether it drew.
+    ///
+    /// Fitted rather than cropped: what the picture is for is recognising a
+    /// shot, and a crop that takes a fifth off a 4:3 frame to fill a wider box
+    /// is a picture of something slightly other than what the file holds.
+    bool paintFrame(QPainter* painter, const QPainterPath& plate, const QRect& thumb,
+                    const QModelIndex& index) const {
+        ThumbnailCache* cache = thumbnails_ != nullptr ? *thumbnails_ : nullptr;
+        const QString path = index.data(kRolePath).toString();
+        if (cache == nullptr || path.isEmpty()) {
+            return false;
+        }
+        // A whole second in, quantised, so that every row asks for a frame the
+        // cache can actually hit twice rather than one per repaint.
+        const auto at = time::RationalTime::fromSeconds(
+            time::Rational::approximate(index.data(kRolePoster).toDouble()), time::rates::fps25);
+        const QImage frame = cache->lookup(path.toStdString(), at, thumb.height());
+        if (frame.isNull() || frame.width() <= 0 || frame.height() <= 0) {
+            return false;
+        }
+
+        const QRectF box{thumb};
+        const double scale = std::min(box.width() / frame.width(), box.height() / frame.height());
+        const QSizeF fitted{frame.width() * scale, frame.height() * scale};
+        const QRectF where{box.center().x() - fitted.width() / 2.0,
+                           box.center().y() - fitted.height() / 2.0, fitted.width(),
+                           fitted.height()};
+        painter->save();
+        painter->setClipPath(plate);
+        painter->setRenderHint(QPainter::SmoothPixmapTransform, true);
+        painter->drawImage(where, frame);
+        painter->restore();
+        return true;
+    }
+
+    /// A frame of the file, on the plate the design draws: a dark gradient, a
+    /// hairline inside it, and the running time in the corner.
+    ///
+    /// The frame is asked for, never waited for. `ThumbnailCache::lookup` hands
+    /// back what it already has and queues the rest on its worker, so a bin of
+    /// three hundred files fills in over a moment rather than seeking three
+    /// hundred times inside one `paintEvent`. Until a row's frame arrives -- and
+    /// for ever, on a file with no picture in it -- the plate carries the glyph
+    /// for what kind of thing it is, which is what the design falls back to.
+    void paintThumbnail(QPainter* painter, const QRect& thumb, const QModelIndex& index) const {
+        QPainterPath plate;
+        plate.addRoundedRect(thumb, 5, 5);
+        QLinearGradient wash{thumb.topLeft(), thumb.bottomRight()};
+        wash.setColorAt(0.0, theme::neutral(800));
+        wash.setColorAt(1.0, theme::neutral(900));
+        painter->setPen(Qt::NoPen);
+        painter->fillPath(plate, wash);
+
+        painter->setBrush(Qt::NoBrush);
+        painter->setPen(QPen{theme::mix(theme::neutral(900), theme::text(), 0.10), 1.0});
+        painter->drawRoundedRect(QRectF{thumb}.adjusted(0.5, 0.5, -0.5, -0.5), 4.5, 4.5);
+
+        if (!paintFrame(painter, plate, thumb, index)) {
+            const auto glyph = static_cast<icons::Glyph>(index.data(kRoleGlyph).toInt());
+            const QPixmap picture =
+                icons::pixmap(glyph, 15, theme::mix(theme::neutral(900), theme::text(), 0.30));
+            painter->drawPixmap(QPoint{thumb.center().x() - 7, thumb.center().y() - 7}, picture);
+        }
+
+        const QString badge = index.data(kRoleBadge).toString();
+        if (badge.isEmpty()) {
+            return;
+        }
+        QFont mono{QStringLiteral("Menlo")};
+        mono.setStyleHint(QFont::Monospace);
+        mono.setPointSizeF(7.0);
+        painter->setFont(mono);
+        const QFontMetrics metrics{mono};
+        const int width = metrics.horizontalAdvance(badge) + 6;
+        const QRect box{thumb.right() - 3 - width, thumb.bottom() - 2 - metrics.height(), width,
+                        metrics.height()};
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(QColor{0, 0, 0, 140});
+        painter->drawRoundedRect(box, 3, 3);
+        painter->setPen(theme::textAt(0.85));
+        painter->drawText(box, Qt::AlignCenter, badge);
+    }
+
+    const bool* compact_;
+    /// By pointer to the pane's own pointer: the cache is handed to the pane
+    /// after the delegate exists, and a copy taken at construction would stay
+    /// null for the life of the list.
+    ThumbnailCache* const* thumbnails_;
+};
+
+/// The bin's list, with its rows draggable onto the timeline.
+///
+/// The drag carries ids rather than the item model's own format: what is on the
+/// other end of it is the timeline, which needs to know which file was let go
+/// of, and Qt's `application/x-qabstractitemmodeldatalist` says only which row
+/// of which list -- true, and useless to anything outside this widget.
+class BinList : public QListWidget {
+public:
+    using QListWidget::QListWidget;
+
+protected:
+    QMimeData* mimeData(const QList<QListWidgetItem*>& items) const override {
+        for (const QListWidgetItem* item : items) {
+            if (item == nullptr || item->data(kRoleHeader).toBool()) {
+                continue;  // a folder heading is a place, not a file
+            }
+            // Filled in by name rather than as an aggregate: the payload grew a
+            // third field for titles, and a brace list that named two of three
+            // is a warning on one compiler and a silent gap on the next.
+            MediaDrag dragged;
+            dragged.media = model::MediaRefId{item->data(kRoleMedia).toULongLong()};
+            dragged.subclip = model::SubclipId{item->data(kRoleSubclip).toULongLong()};
+            return encodeMediaDrag(dragged);
+        }
+        // Nothing draggable was picked. Qt takes null to mean "no drag", which
+        // is the right answer for a heading rather than an empty one.
+        return nullptr;
+    }
+};
+
+/// The Titles tab's list, with its rows draggable onto the timeline.
+///
+/// The same gesture as a media row and the same payload, carrying a preset id
+/// where a media row carries an id. What lands is decided by the timeline,
+/// which is where the rules about rows and overlaps already live.
+class TitleList : public QListWidget {
+public:
+    using QListWidget::QListWidget;
+
+protected:
+    QMimeData* mimeData(const QList<QListWidgetItem*>& items) const override {
+        for (const QListWidgetItem* item : items) {
+            const QString preset =
+                item != nullptr ? item->data(Qt::UserRole).toString() : QString{};
+            if (!preset.isEmpty()) {
+                MediaDrag dragged;
+                dragged.titlePreset = preset.toStdString();
+                return encodeMediaDrag(dragged);
+            }
+        }
+        return nullptr;
+    }
+};
+
+/// A path in the one spelling the project stores.
+///
+/// The same file arrives spelled two ways: Qt hands out forward slashes, the
+/// filesystem walk behind a dropped folder hands out backslashes, and Windows
+/// treats either drive letter as the same disk. Without a single spelling, a
+/// folder dropped after the files inside it imports every one of them a second
+/// time.
+QString canonicalPath(const QString& path) {
+    return QFileInfo{path}.absoluteFilePath();
+}
+
+/// The same path as something two spellings of one file compare equal on.
+QString pathKey(const QString& path) {
+#ifdef Q_OS_WIN
+    return canonicalPath(path).toLower();
+#else
+    return canonicalPath(path);
+#endif
+}
+
+}  // namespace
+
+ProjectBin::ProjectBin(QWidget* parent) : QWidget{parent} {
+    setObjectName("bin-panel");
+    // The panel paints its own surface, which a plain QWidget does not do for a
+    // stylesheet background.
+    setAttribute(Qt::WA_StyledBackground, true);
+
+    // --- the tab strip ---------------------------------------------------
+    //
+    // Four tabs because the design has four. Only Media is a list of things
+    // this panel owns; the other three name panels that live elsewhere in the
+    // window, and say so rather than pretending to be empty.
+    auto* tabBar = new QFrame(this);
+    tabBar->setObjectName("bin-tabbar");
+    tabBar->setFixedHeight(34);
+    auto* tabRow = new QHBoxLayout(tabBar);
+    tabRow->setContentsMargins(8, 0, 6, 0);
+    tabRow->setSpacing(2);
+
+    auto* tabs = new QButtonGroup(this);
+    tabs->setExclusive(true);
+    const QStringList tabNames{"Media", "Effects", "Titles", "Audio"};
+    for (int index = 0; index < tabNames.size(); ++index) {
+        auto* tab = new QPushButton(tabNames.at(index), tabBar);
+        tab->setObjectName("bin-tab");
+        tab->setCheckable(true);
+        tab->setChecked(index == 0);
+        tab->setCursor(Qt::PointingHandCursor);
+        tabs->addButton(tab, index);
+        tabRow->addWidget(tab);
+    }
+    tabRow->addStretch(1);
+
+    auto* overflow = new QPushButton(tabBar);
+    overflow->setObjectName("bin-tab");
+    overflow->setIcon(icons::toolIcon(icons::Glyph::DotsThree, 14));
+    overflow->setFixedSize(26, 24);
+    overflow->setToolTip("What else this panel can do");
+    tabRow->addWidget(overflow);
+    connect(overflow, &QPushButton::clicked, this, [this] { overflowMenu(); });
+
+    // --- search, and the view toggle beside it ---------------------------
+    //
+    // A filter rather than a second panel. A bin is looked *in*, and typing
+    // three letters of a file name is how: at thirty clips the list is already
+    // longer than the panel is tall.
+    search_ = new QLineEdit(this);
+    search_->setObjectName("bin-search");
+    search_->setPlaceholderText("Search media");
+    search_->setClearButtonEnabled(true);
+    search_->setToolTip("Search name, codec, size, folder and notes");
+    search_->addAction(QIcon{icons::pixmap(icons::Glyph::Magnifier, 13, theme::textAt(0.45))},
+                       QLineEdit::LeadingPosition);
+    connect(search_, &QLineEdit::textChanged, this, [this](const QString& text) {
+        filter_ = text.trimmed();
+        applyFilter();
+    });
+
+    compactButton_ = new QPushButton(this);
+    compactButton_->setObjectName("bin-glyph-button");
+    compactButton_->setIcon(icons::toolIcon(icons::Glyph::Rows, 14));
+    compactButton_->setCheckable(true);
+    compactButton_->setFixedSize(28, 28);
+    compactButton_->setToolTip("List instead of thumbnails");
+    connect(compactButton_, &QPushButton::toggled, this, [this](bool on) {
+        compact_ = on;
+        // Every row's height just changed, and a view only asks the delegate
+        // again when it is told to lay out. Not a refresh: rebuilding the items
+        // would drop the selection, and changing how a list is drawn should not
+        // lose the place somebody was at in it.
+        list_->doItemsLayout();
+    });
+
+    auto* searchRow = new QHBoxLayout;
+    searchRow->setContentsMargins(8, 8, 8, 0);
+    searchRow->setSpacing(6);
+    searchRow->addWidget(search_, 1);
+    searchRow->addWidget(compactButton_);
+
+    // --- the counted chips ------------------------------------------------
+    chipHolder_ = new QWidget(this);
+    auto* chipFlow = new chrome::FlowLayout{chipHolder_, 8, 5};
+    chipHolder_->setLayout(chipFlow);
+    // Without this the column above says "one row of chips" for ever and the
+    // second row is drawn over the list.
+    QSizePolicy chipPolicy{QSizePolicy::Preferred, QSizePolicy::Minimum};
+    chipPolicy.setHeightForWidth(true);
+    chipHolder_->setSizePolicy(chipPolicy);
+    chipGroup_ = new QButtonGroup(this);
+    chipGroup_->setExclusive(false);
+
+    // Files dragged from the file manager land on the pane, not on whichever
+    // child they happen to be over: the list is NoDragDrop, so its viewport
+    // lets the event through, and the search field is told to do the same
+    // rather than take a path in as text to search for.
+    setAcceptDrops(true);
+    search_->setAcceptDrops(false);
+
+    // --- the list ---------------------------------------------------------
+    list_ = new BinList(this);
+    list_->setObjectName("bin-list");
+    list_->setFrameShape(QFrame::NoFrame);
+    list_->setMouseTracking(true);
+    list_->setUniformItemSizes(false);
+    list_->setSelectionMode(QAbstractItemView::SingleSelection);
+    list_->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+    list_->setContextMenuPolicy(Qt::CustomContextMenu);
+    list_->setItemDelegate(new BinDelegate{&compact_, &thumbnails_, list_});
+    list_->viewport()->setAutoFillBackground(false);
+    // Rows drag out onto the timeline. DragOnly, not DragDrop: the pane takes
+    // files from the file manager itself, and a list that also accepted drops
+    // would swallow them before the pane's own handling ever saw them.
+    list_->setDragEnabled(true);
+    list_->setDragDropMode(QAbstractItemView::DragOnly);
+    list_->setDefaultDropAction(Qt::CopyAction);
+
+    // Delete removes the picked row from the project. An action on the list
+    // rather than a key handler, so the shortcut only fires while the list has
+    // the focus -- Delete over the timeline is a different edit entirely, and
+    // a widget-scoped shortcut is how the two are kept from fighting over it.
+    auto* removeRow = new QAction("Remove from project", list_);
+    removeRow->setShortcut(QKeySequence::Delete);
+    removeRow->setShortcutContext(Qt::WidgetWithChildrenShortcut);
+    connect(removeRow, &QAction::triggered, this, [this] { removeSelected(); });
+    list_->addAction(removeRow);
+
+    footer_ = new QLabel(this);
+    footer_->setObjectName("bin-footer");
+    footer_->setFixedHeight(28);
+    footer_->setContentsMargins(12, 0, 12, 0);
+
+    // Media is the only tab with a list behind it; the rest are a sentence
+    // pointing at the panel that does own them.
+    pages_ = new QStackedWidget(this);
+    const auto note = [this](const QString& text) {
+        auto* label = new QLabel(text, this);
+        label->setWordWrap(true);
+        label->setAlignment(Qt::AlignCenter);
+        label->setContentsMargins(20, 0, 20, 0);
+        label->setProperty("muted", true);
+        return label;
+    };
+    // The Media tab is a list *or* a sentence, so it is a stack of its own
+    // inside the tab stack. An empty bin used to be a blank rectangle -- on the
+    // tab a new project opens in, and on a pane that quietly accepts dropped
+    // files without anything on screen saying so. `applyFilter` picks which.
+    binEmpty_ = note(QString{});
+    mediaPage_ = new QStackedWidget(this);
+    mediaPage_->addWidget(list_);
+    mediaPage_->addWidget(binEmpty_);
+    pages_->addWidget(mediaPage_);
+    pages_->addWidget(
+        note(QStringLiteral("Effects live in the Effects panel, beside the monitor.")));
+
+    // The Titles tab used to say "add a title clip to a video track", which was
+    // true and useless: there was nothing anywhere that added one. The button
+    // is the shortest way to make the sentence actionable.
+    auto* titles = new QWidget(this);
+    auto* titlesColumn = new QVBoxLayout(titles);
+    titlesColumn->setContentsMargins(0, 0, 0, 0);
+    titlesColumn->setSpacing(8);
+
+    titleList_ = new TitleList(titles);
+    titleList_->setObjectName("title-list");
+    titleList_->setFrameShape(QFrame::NoFrame);
+    titleList_->setSelectionMode(QAbstractItemView::SingleSelection);
+    titleList_->setDragEnabled(true);
+    titleList_->setDragDropMode(QAbstractItemView::DragOnly);
+    titleList_->setDefaultDropAction(Qt::CopyAction);
+    titleList_->viewport()->setAutoFillBackground(false);
+    for (const TitlePreset& preset : titlePresets()) {
+        auto* item = new QListWidgetItem(QString::fromStdString(preset.name), titleList_);
+        item->setData(Qt::UserRole, QString::fromStdString(preset.id));
+        item->setToolTip(QString::fromStdString(preset.blurb));
+        item->setSizeHint(QSize{0, 34});
+    }
+    // Double-click is the same as the button: some people drag, some people
+    // put the playhead where they want it and ask. Whichever way, it is the row
+    // under the pointer that gets made -- a double-click on Caption that added
+    // a centred card was the pane offering three things and doing one.
+    connect(titleList_, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem* item) {
+        if (item != nullptr) {
+            emit addTitleRequested(item->data(Qt::UserRole).toString());
+        }
+    });
+    titlesColumn->addWidget(titleList_, 1);
+
+    titlesColumn->addWidget(
+        note(QStringLiteral("Drag one onto a picture row, or add it at the playhead.")));
+    auto* addTitle = new QPushButton(QStringLiteral("Add Title"), titles);
+    addTitle->setObjectName("add-title");
+    addTitle->setCursor(Qt::PointingHandCursor);
+    // The button adds whatever is picked in the list, so selecting a row and
+    // pressing it agrees with double-clicking that row. Nothing picked means
+    // the plain title, which is what the button said before it had a list.
+    connect(addTitle, &QPushButton::clicked, this, [this] {
+        const QListWidgetItem* picked = titleList_->currentItem();
+        emit addTitleRequested(picked != nullptr ? picked->data(Qt::UserRole).toString()
+                                                 : QStringLiteral("title"));
+    });
+    auto* buttonRow = new QHBoxLayout;
+    buttonRow->setContentsMargins(12, 0, 12, 12);
+    buttonRow->addStretch(1);
+    buttonRow->addWidget(addTitle);
+    buttonRow->addStretch(1);
+    titlesColumn->addLayout(buttonRow);
+    pages_->addWidget(titles);
+
+    pages_->addWidget(
+        note(QStringLiteral("Audio levels and sends live in the Mixer, under the Audio "
+                            "workspace.")));
+    connect(tabs, &QButtonGroup::idClicked, this, [this](int id) { pages_->setCurrentIndex(id); });
+
+    auto* layout = new QVBoxLayout(this);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+    layout->addWidget(tabBar);
+    layout->addLayout(searchRow);
+    layout->addWidget(chipHolder_);
+    layout->addWidget(pages_, 1);
+    layout->addWidget(footer_);
+
+    connect(list_, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem* item) {
+        if (item != nullptr && !item->data(kRoleHeader).toBool()) {
+            appendSelectedToTimeline();
+        }
+    });
+    connect(list_, &QListWidget::itemClicked, this, [this](QListWidgetItem* item) {
+        // Headings fold. The caret says so, and a bin with four cards in it is
+        // otherwise a list somebody scrolls past rather than reads.
+        if (item == nullptr || !item->data(kRoleHeader).toBool()) {
+            return;
+        }
+        const QString bin = item->data(kRoleBin).toString();
+        if (collapsed_.contains(bin)) {
+            collapsed_.remove(bin);
+        } else {
+            collapsed_.insert(bin);
+        }
+        item->setData(kRoleFolded, collapsed_.contains(bin));
+        applyFilter();
+    });
+    connect(list_, &QListWidget::currentRowChanged, this, [this] {
+        const Selection chosen = selection();
+        if (!chosen.media.isValid()) {
+            return;
+        }
+        if (chosen.subclip.isValid()) {
+            emit openSubclipRequested(chosen.subclip);
+        } else {
+            emit openRequested(chosen.media);
+        }
+    });
+    connect(list_, &QListWidget::customContextMenuRequested, this,
+            [this](const QPoint& where) { rowMenu(where); });
+
+    rebuildChips();
+    applyFilter();
+}
+
+/// The chips: one per folder, counted, plus the two that are not folders.
+///
+/// Rebuilt from the project rather than kept in step by hand, because the set
+/// of folders changes every time somebody imports and a chip for a folder with
+/// nothing in it is a filter that shows an empty list.
+void ProjectBin::rebuildChips() {
+    QLayout* chips = chipHolder_->layout();
+    while (QLayoutItem* old = chips->takeAt(0)) {
+        if (QWidget* widget = old->widget()) {
+            chipGroup_->removeButton(qobject_cast<QAbstractButton*>(widget));
+            // Orphaned now and deleted later: this is reached from a chip's own
+            // toggled(), so deleting outright would pull the ground from under
+            // the signal that got here -- but leaving it parented would keep it
+            // on screen, drawn over the chips that replace it, until the event
+            // loop got round to the deletion.
+            widget->hide();
+            widget->setParent(nullptr);
+            widget->deleteLater();
+        }
+        delete old;
+    }
+
+    std::map<QString, int> counts;
+    int total = 0;
+    if (project_ != nullptr) {
+        for (const model::MediaRef& ref : project_->media()) {
+            ++counts[binNameFor(ref.path)];
+            ++total;
+        }
+    }
+
+    const auto addChip = [this, chips](const QString& label, bool on, bool outline,
+                                       const std::function<void(bool)>& picked) {
+        auto* chip = new QPushButton(label, this);
+        chip->setObjectName("bin-chip");
+        chip->setCheckable(true);
+        chip->setChecked(on);
+        chip->setCursor(Qt::PointingHandCursor);
+        chip->setProperty("outline", outline);
+        chipGroup_->addButton(chip);
+        chips->addWidget(chip);
+        connect(chip, &QPushButton::toggled, this, picked);
+        return chip;
+    };
+
+    addChip(QString("All %1").arg(total), bin_.isEmpty(), false, [this](bool on) {
+        if (on) {
+            setBinFilter({});
+        }
+    });
+    for (const auto& [name, tally] : counts) {
+        const QString bin = name;
+        addChip(QString("%1 %2").arg(bin).arg(tally), bin_ == bin, false,
+                [this, bin](bool on) { setBinFilter(on ? bin : QString{}); });
+    }
+    // The design's outline chip is Favourites. There is no favourite in this
+    // project's model and inventing one would be a field to save, load and
+    // migrate for the sake of a chip -- so it filters on the fact the row
+    // already shows: whether the cut uses this file.
+    auto* used = addChip(QStringLiteral("Used"), usedOnly_, true, [this](bool on) {
+        usedOnly_ = on;
+        applyFilter();
+    });
+    used->setToolTip("Only footage the cut actually uses");
+
+    chipHolder_->updateGeometry();
+}
+
+/// Pick one folder, or all of them, and keep the chips agreeing about it.
+void ProjectBin::setBinFilter(const QString& bin) {
+    if (bin_ == bin) {
+        return;
+    }
+    bin_ = bin;
+    rebuildChips();
+    applyFilter();
+}
+
+/// Hide what the search does not match, rather than rebuilding the list: the
+/// selection survives typing, which is what makes narrowing down feel like
+/// looking rather than starting again.
+///
+/// The match itself is `model::matchesSearch`, not a substring test on the row
+/// text: what is findable should be everything the project knows about a file
+/// -- its codec, its size, its rate, the folder it came from, the notes on it
+/// -- and not merely the part of that which happens to fit on one line.
+void ProjectBin::applyFilter() {
+    const std::string query = filter_.toStdString();
+    int shown = 0;
+    int rows = 0;
+
+    // A heading's visibility is decided by its rows, and its rows come after
+    // it: matches are tallied per folder on the way down, then the headings
+    // are set from the tally.
+    std::map<QString, int> matchesPerBin;
+    std::vector<QListWidgetItem*> headers;
+    for (int row = 0; row < list_->count(); ++row) {
+        QListWidgetItem* item = list_->item(row);
+        const QString bin = item->data(kRoleBin).toString();
+        if (item->data(kRoleHeader).toBool()) {
+            headers.push_back(item);
+            matchesPerBin.try_emplace(bin, 0);
+            continue;
+        }
+        ++rows;
+
+        const model::MediaRef* ref =
+            project_ != nullptr
+                ? project_->findMedia(model::MediaRefId{item->data(kRoleMedia).toULongLong()})
+                : nullptr;
+        const bool matchesText =
+            filter_.isEmpty() ||
+            (ref != nullptr ? model::matchesSearch(*ref, query)
+                            : item->text().contains(filter_, Qt::CaseInsensitive));
+        const bool matchesBin = bin_.isEmpty() || bin == bin_;
+        const bool matchesUsed = !usedOnly_ || item->data(kRoleUsed).toBool();
+        const bool matches = matchesText && matchesBin && matchesUsed;
+        matchesPerBin[bin] += matches ? 1 : 0;
+        // Folding hides the rows without their stopping to count: the tally on
+        // the heading is what is behind the fold, so it has to keep counting.
+        item->setHidden(!matches || collapsed_.contains(bin));
+        shown += matches ? 1 : 0;
+    }
+    for (QListWidgetItem* header : headers) {
+        const QString bin = header->data(kRoleBin).toString();
+        header->setHidden(matchesPerBin[bin] == 0);
+        header->setData(kRoleCount, QString::number(matchesPerBin[bin]));
+    }
+
+    footer_->setText(filter_.isEmpty() && bin_.isEmpty() && !usedOnly_
+                         ? summary()
+                         : QString("%1 of %2 shown").arg(shown).arg(rows));
+
+    // A list with nothing in it says why, and the two reasons are different
+    // things: a project with no footage yet wants to know how to get some, and
+    // a search that matched nothing wants to know that is what happened rather
+    // than that the bin emptied itself.
+    if (shown == 0) {
+        binEmpty_->setText(rows == 0
+                               ? QStringLiteral("No media yet.\n\nPress Import, or drop files here "
+                                                "from the file manager.")
+                               : QStringLiteral("Nothing here matches what you are looking for."));
+    }
+    mediaPage_->setCurrentWidget(shown == 0 ? static_cast<QWidget*>(binEmpty_)
+                                            : static_cast<QWidget*>(list_));
+
+    // Chips count things; with nothing to count they are a row of zeroes above
+    // a sentence explaining there is nothing yet.
+    chipHolder_->setVisible(rows > 0);
+}
+
+/// How many files, what they weigh, and where the proxies stand.
+///
+/// The weight is read from disk rather than from the probe: a bit rate times a
+/// duration is an estimate, and the question this line answers -- will this
+/// project fit on the drive I am about to copy it to -- deserves the real
+/// number.
+QString ProjectBin::summary() const {
+    if (project_ == nullptr) {
+        return QStringLiteral("No project");
+    }
+    const auto& media = project_->media();
+    std::uintmax_t bytes = 0;
+    int proxied = 0;
+    for (const model::MediaRef& ref : media) {
+        std::error_code code;
+        const std::uintmax_t size = std::filesystem::file_size(ref.path, code);
+        if (!code) {
+            bytes += size;
+        }
+        proxied += ref.proxyPath.empty() ? 0 : 1;
+    }
+
+    const int total = static_cast<int>(media.size());
+    QString proxies;
+    if (total == 0 || proxied == 0) {
+        proxies = QStringLiteral("No proxies");
+    } else if (proxied < total) {
+        proxies = QString("Proxies %1 of %2").arg(proxied).arg(total);
+    } else {
+        proxies = project_->usingProxies() ? QStringLiteral("Proxies ready")
+                                           : QStringLiteral("Proxies ready · off");
+    }
+    return QString("%1 %2 · %3 · %4")
+        .arg(total)
+        .arg(total == 1 ? "item" : "items", chrome::humanSize(static_cast<double>(bytes)), proxies);
+}
+
+/// The actions that used to be four buttons under the list.
+///
+/// In a menu because the design gives this panel no button row: at 296 pixels
+/// wide, four buttons clipped every label to two letters, and the same actions
+/// are on the row's own right-click where somebody would reach for them.
+void ProjectBin::overflowMenu() {
+    QMenu menu;
+    const Selection chosen = selection();
+    const bool haveOne = chosen.media.isValid();
+
+    QAction* importAction = menu.addAction("Import…");
+    QAction* transcode = menu.addAction("Import and transcode to ProRes…");
+    menu.addSeparator();
+    QAction* append = menu.addAction("Append to timeline");
+    append->setEnabled(haveOne);
+    QAction* replace = menu.addAction("Replace selected clip with this");
+    replace->setEnabled(haveOne);
+    QAction* interpret = menu.addAction("Interpret footage…");
+    interpret->setEnabled(haveOne);
+    QAction* notes = menu.addAction("Notes…");
+    notes->setEnabled(haveOne);
+    menu.addSeparator();
+    // Named for what it does to the project rather than "Delete": nothing on
+    // disk is touched, and an item in a menu over somebody's rushes had better
+    // be clear about that.
+    QAction* remove =
+        menu.addAction(chosen.subclip.isValid() ? "Remove subclip" : "Remove from project");
+    remove->setEnabled(haveOne);
+
+    QAction* picked = menu.exec(QCursor::pos());
+    if (picked == importAction) {
+        importFiles();
+    } else if (picked == transcode) {
+        importTranscodedDialog();
+    } else if (picked == append) {
+        appendSelectedToTimeline();
+    } else if (picked == replace) {
+        emit replaceRequested(chosen.media);
+    } else if (picked == interpret) {
+        interpretMenu();
+    } else if (picked == notes) {
+        editNotes();
+    } else if (picked == remove) {
+        removeSelected();
+    }
+}
+
+void ProjectBin::rowMenu(const QPoint& where) {
+    QListWidgetItem* item = list_->itemAt(where);
+    if (item == nullptr || item->data(kRoleHeader).toBool()) {
+        overflowMenu();
+        return;
+    }
+    list_->setCurrentItem(item);
+    overflowMenu();
+}
+
+/// Ask for a note about the selected file, and keep it.
+///
+/// The note goes through a command, so it undoes and so a project with a note
+/// in it reads as modified -- the alternative is somebody typing a note,
+/// quitting, and being told there was nothing to save.
+void ProjectBin::editNotes() {
+    const Selection chosen = selection();
+    if (project_ == nullptr || commands_ == nullptr || !chosen.media.isValid()) {
+        return;
+    }
+    const model::MediaRef* ref = project_->findMedia(chosen.media);
+    if (ref == nullptr) {
+        return;
+    }
+    bool accepted = false;
+    const QString typed = QInputDialog::getText(
+        this, "Notes", QString("Notes on %1").arg(QString::fromStdString(ref->name)),
+        QLineEdit::Normal, QString::fromStdString(ref->notes), &accepted);
+    if (!accepted) {
+        return;
+    }
+    setNotes(chosen.media, typed.toStdString());
+}
+
+void ProjectBin::setNotes(model::MediaRefId media, const std::string& notes) {
+    if (project_ == nullptr || commands_ == nullptr) {
+        return;
+    }
+    auto built = edit::makeSetMediaNotes(*project_, media, notes);
+    if (!built) {
+        return;
+    }
+    commands_->execute(*project_, std::move(*built));
+    commands_->breakMerge();
+    refresh();
+    emit edited();
+}
+
+void ProjectBin::bind(const ui::SequenceBinding& binding) {
+    project_ = binding.project;
+    sequenceId_ = binding.sequence;
+    commands_ = binding.commands;
+    refresh();
+}
+
+void ProjectBin::refresh() {
+    list_->clear();
+    if (project_ == nullptr) {
+        rebuildChips();
+        applyFilter();
+        return;
+    }
+
+    const std::set<std::uint64_t> used = usedMedia(*project_);
+
+    // Grouped by the folder each file came from, in the order the folders sort
+    // -- which is stable across imports, where "the order they were added" is
+    // not, and a bin that reorders itself when somebody imports one clip is a
+    // bin nobody can find anything in twice.
+    std::map<QString, std::vector<const model::MediaRef*>> byBin;
+    for (const model::MediaRef& ref : project_->media()) {
+        byBin[binNameFor(ref.path)].push_back(&ref);
+    }
+
+    for (const auto& [bin, refs] : byBin) {
+        auto* header = new QListWidgetItem(bin, list_);
+        header->setData(kRoleHeader, true);
+        header->setData(kRoleBin, bin);
+        header->setData(kRoleCount, QString::number(refs.size()));
+        header->setData(kRoleFolded, collapsed_.contains(bin));
+        // Enabled so it can be clicked shut, but never the selection: a folder
+        // is not a thing to open in the monitor.
+        header->setFlags(Qt::ItemIsEnabled);
+
+        for (const model::MediaRef* ref : refs) {
+            auto* item = new QListWidgetItem(
+                QString::fromStdString(ref->name.empty() ? ref->path : ref->name), list_);
+            item->setData(kRoleMedia, QVariant::fromValue<qulonglong>(ref->id.value()));
+            item->setData(kRoleSubclip, QVariant::fromValue<qulonglong>(0));
+            item->setData(kRoleHeader, false);
+            item->setData(kRoleBin, bin);
+            item->setData(kRoleMeta, metaFor(*ref));
+            item->setData(kRoleBadge, badgeFor(ref->info.duration));
+            item->setData(kRoleGlyph, static_cast<int>(glyphFor(*ref)));
+            // Through the project rather than off the reference, so a row shows
+            // the proxy's frame when proxies are on -- decoding the original
+            // for a picture 38 pixels tall is the cost proxies exist to avoid.
+            // Only where there is a picture to show: a sound file keeps its
+            // waveform glyph.
+            if (ref->info.primaryVideo() != nullptr) {
+                item->setData(kRolePath, QString::fromStdString(project_->resolvedPath(*ref)));
+                item->setData(kRolePoster, posterSecondsFor(ref->info.duration));
+            }
+            item->setData(kRoleUsed, used.count(ref->id.value()) != 0);
+            const bool absent = missing_.contains(ref->id.value());
+            item->setData(kRoleMissing, absent);
+            QString tip = QString::fromStdString(ref->path);
+            if (absent) {
+                // The path first and the explanation after it: what
+                // somebody wants from this tooltip is where the file was
+                // supposed to be.
+                tip +=
+                    "\nThis file is not where the project left it. "
+                    "File ▸ Relink media… will look for it.";
+            }
+            if (!ref->notes.empty()) {
+                tip += "\n" + QString::fromStdString(ref->notes);
+            }
+            item->setToolTip(tip);
+
+            // Subclips of this file, under it. Grouped rather than listed
+            // separately, because what somebody looks for is the take, and the
+            // take is found by finding the file it is in.
+            for (const model::Subclip& subclip : project_->subclips()) {
+                if (subclip.source != ref->id) {
+                    continue;
+                }
+                auto* child = new QListWidgetItem(describe(subclip, *ref), list_);
+                child->setData(kRoleMedia, QVariant::fromValue<qulonglong>(ref->id.value()));
+                child->setData(kRoleSubclip, QVariant::fromValue<qulonglong>(subclip.id.value()));
+                child->setData(kRoleHeader, false);
+                child->setData(kRoleBin, bin);
+                child->setData(
+                    kRoleBadge,
+                    QString("%1s").arg(subclip.range.duration().toSecondsDouble(), 0, 'f', 2));
+                child->setData(kRoleUsed, false);
+                // No preview frame: a subclip row is drawn compact, and a
+                // compact row has no plate to put one on.
+            }
+        }
+    }
+
+    rebuildChips();
+    applyFilter();
+}
+
+void ProjectBin::setThumbnailCache(ThumbnailCache* cache) {
+    if (thumbnails_ == cache) {
+        return;
+    }
+    thumbnails_ = cache;
+    if (thumbnails_ != nullptr) {
+        // Decoding happens on the cache's worker, so a row that had nothing to
+        // draw when it was painted has to be painted again when its frame
+        // lands. The viewport rather than the rows: which rows arrived is not
+        // something the signal says, and a bin is a screenful either way.
+        connect(thumbnails_, &ThumbnailCache::ready, this, [this] {
+            if (list_ != nullptr) {
+                list_->viewport()->update();
+            }
+        });
+    }
+    if (list_ != nullptr) {
+        list_->viewport()->update();
+    }
+}
+
+void ProjectBin::setMissingMedia(const std::vector<model::MediaRefId>& media) {
+    QSet<qulonglong> gone;
+    for (const model::MediaRefId id : media) {
+        gone.insert(id.value());
+    }
+    if (gone == missing_) {
+        return;  // nothing has changed, so nothing needs rebuilding
+    }
+    missing_ = std::move(gone);
+    refresh();
+}
+
+void ProjectBin::removeSelected() {
+    const Selection chosen = selection();
+    if (project_ == nullptr || commands_ == nullptr) {
+        return;
+    }
+
+    // A subclip first: it is the narrower thing under the pointer, and
+    // "remove" on a subclip row plainly means the note rather than the file it
+    // is a note about. Not a command -- a subclip is part of no cut, and
+    // marking one is not undoable either; see Project::addSubclip.
+    if (chosen.subclip.isValid()) {
+        if (project_->removeSubclip(chosen.subclip)) {
+            refresh();
+            emit edited();
+        }
+        return;
+    }
+    if (!chosen.media.isValid()) {
+        return;
+    }
+
+    const model::MediaRef* ref = project_->findMedia(chosen.media);
+    if (ref == nullptr) {
+        return;
+    }
+    const QString name = QString::fromStdString(ref->name.empty() ? ref->path : ref->name);
+
+    // Asked only when it would change the cut. A file nothing uses is a row in
+    // a list, and a dialog in front of tidying one away would make the pane
+    // tedious to keep in order. A file six shots are cut from is a different
+    // question, and the number is the whole of what makes it one.
+    const int inUse = edit::clipsUsingMedia(*project_, chosen.media);
+    if (inUse > 0) {
+        const QString said = QString(
+                                 "%1 is used by %2 clip%3 on the timeline.\n\n"
+                                 "Removing it from the project removes those clips too. "
+                                 "Undo puts it all back.")
+                                 .arg(name)
+                                 .arg(inUse)
+                                 .arg(inUse == 1 ? "" : "s");
+        // Quiet mode says it and goes ahead. The removal was asked for
+        // explicitly and one Ctrl+Z takes it back, so what quiet mode drops
+        // here is the waiting rather than the warning -- which is the whole of
+        // what `app::say` is for.
+        if (app::isQuiet()) {
+            app::say(this, "Remove from project", said);
+        } else {
+            const auto answer =
+                QMessageBox::question(this, "Remove from project", said,
+                                      QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+            if (answer != QMessageBox::Yes) {
+                return;
+            }
+        }
+    }
+
+    auto built = edit::makeRemoveMedia(*project_, chosen.media);
+    if (!built) {
+        app::warn(this, "Remove", QString::fromStdString(built.error().toString()));
+        return;
+    }
+    commands_->execute(*project_, std::move(*built));
+    commands_->breakMerge();
+    refresh();
+    emit edited();
+}
+
+int ProjectBin::count() const {
+    return project_ != nullptr ? static_cast<int>(project_->media().size()) : 0;
+}
+
+/// Import files, transcoding each into an editing codec on the way in.
+///
+/// **The transcode is the media, not a proxy.** A proxy stands in for a file
+/// that stays where it is; an ingest transcode replaces it, because the reason
+/// to do it is that the camera's own codec is painful to cut with. The
+/// original is left exactly where it was -- ingesting must not be a thing that
+/// eats rushes -- and its path is written into the notes, which is the only
+/// record of where this came from once the project points at the copy.
+///
+/// The transcode itself is `makeProxy` with the size left alone: a proxy and an
+/// ingest transcode are one operation with different settings.
+Status ProjectBin::importTranscoded(const std::vector<std::string>& paths,
+                                    const std::string& destination, const std::string& videoCodec) {
+    if (project_ == nullptr || commands_ == nullptr) {
+        return Error{ErrorCode::InvalidData, "there is no project to import into"};
+    }
+    std::error_code code;
+    std::filesystem::create_directories(destination, code);
+    if (!std::filesystem::is_directory(destination, code)) {
+        return Error{ErrorCode::Io, "cannot use " + destination + " as a folder"};
+    }
+
+    for (const std::string& path : paths) {
+        const std::filesystem::path source{path};
+        platform::ffmpeg::ProxySettings settings;
+        settings.source = path;
+        settings.destination =
+            (std::filesystem::path{destination} / (source.stem().string() + ".mov")).string();
+        settings.width = 0;  // the source's own size
+        settings.videoCodec = videoCodec;
+
+        auto made = platform::ffmpeg::makeProxy(settings);
+        if (!made) {
+            return made.error();
+        }
+        auto probed = platform::ffmpeg::probe(made->path);
+        if (!probed) {
+            return probed.error();
+        }
+
+        model::MediaRef ref;
+        ref.path = made->path;
+        ref.name = source.stem().string();
+        ref.info = *probed;
+        ref.notes = "ingested from " + path;
+        if (auto hash = media::quickContentHash(ref.path)) {
+            ref.contentHash = *hash;
+        }
+        if (auto digest = media::contentDigest(ref.path)) {
+            ref.contentDigest = *digest;
+        }
+        auto built = edit::makeImportMedia(*project_, std::move(ref));
+        if (!built) {
+            return built.error();
+        }
+        commands_->execute(*project_, std::move(*built));
+    }
+    commands_->breakMerge();
+    refresh();
+    emit edited();
+    emit mediaImported();
+    return {};
+}
+
+void ProjectBin::importTranscodedDialog() {
+    const QStringList chosen = QFileDialog::getOpenFileNames(this, "Import and transcode");
+    if (chosen.isEmpty()) {
+        return;
+    }
+    const QString into = QFileDialog::getExistingDirectory(this, "Put the transcoded files in");
+    if (into.isEmpty()) {
+        return;
+    }
+    std::vector<std::string> paths;
+    paths.reserve(static_cast<std::size_t>(chosen.size()));
+    for (const QString& path : chosen) {
+        paths.push_back(path.toStdString());
+    }
+
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    const Status done = importTranscoded(paths, into.toStdString(), "prores_ks");
+    QApplication::restoreOverrideCursor();
+    if (!done) {
+        app::warn(this, "Import", QString::fromStdString(done.error().message()));
+    }
+}
+
+void ProjectBin::importFiles() {
+    if (project_ == nullptr || commands_ == nullptr) {
+        return;
+    }
+    const QStringList chosen = QFileDialog::getOpenFileNames(this, "Import media");
+    if (chosen.isEmpty()) {
+        return;
+    }
+    static_cast<void>(importPaths(chosen));
+}
+
+int ProjectBin::importPaths(const QStringList& paths) {
+    if (project_ == nullptr || commands_ == nullptr) {
+        return 0;
+    }
+
+    // A folder stands for the media in it. One level down, not a walk of the
+    // tree: a card's clips are in its folder, and a recursive import of a home
+    // directory somebody let go of over the wrong pane is not recoverable in
+    // one undo.
+    QStringList files;
+    for (const QString& path : paths) {
+        const QFileInfo info{path};
+        if (!info.isDir()) {
+            files.push_back(canonicalPath(path));
+            continue;
+        }
+        auto listed = io::listFolder(path.toStdString());
+        if (!listed) {
+            continue;
+        }
+        for (const io::FolderEntry& entry : *listed) {
+            if (!entry.isFolder) {
+                files.push_back(canonicalPath(QString::fromStdString(entry.path)));
+            }
+        }
+    }
+
+    // Probed on this thread rather than a background one. A probe reads a
+    // header, not a stream -- it takes milliseconds -- and every background
+    // thread added is another lifetime to get right, which is what caused the
+    // abort-on-quit bug.
+    int added = 0;
+    for (const QString& path : files) {
+        const std::string where = path.toStdString();
+
+        // Already in the project? Importing it twice gives two entries
+        // pointing at one file, which is two things to grade and relink -- and
+        // dropping the same folder twice is an easy thing to do. Compared by
+        // key rather than by string, because a project holds paths written by
+        // older imports as well as this one.
+        const QString key = pathKey(path);
+        const bool known = std::any_of(project_->media().begin(), project_->media().end(),
+                                       [&key](const model::MediaRef& ref) {
+                                           return pathKey(QString::fromStdString(ref.path)) == key;
+                                       });
+        if (known) {
+            continue;
+        }
+
+        auto probed = zaro::platform::ffmpeg::probe(where);
+        if (!probed) {
+            continue;
+        }
+        model::MediaRef ref;
+        ref.path = where;
+        ref.name = QFileInfo(path).fileName().toStdString();
+        ref.info = *probed;
+        if (auto hash = media::quickContentHash(ref.path)) {
+            ref.contentHash = *hash;
+        }
+        // Taken at import, because it is the only moment the file is certainly
+        // where the project thinks it is -- and a relink with nothing to
+        // compare against can only match on names.
+        if (auto digest = media::contentDigest(ref.path)) {
+            ref.contentDigest = *digest;
+        }
+
+        auto built = edit::makeImportMedia(*project_, std::move(ref));
+        if (built) {
+            commands_->execute(*project_, std::move(*built));
+            ++added;
+        }
+    }
+    commands_->breakMerge();
+    refresh();
+    emit edited();
+    if (added > 0) {
+        emit mediaImported();
+    }
+    return added;
+}
+
+namespace {
+
+/// The local files in a drag, if it carries any this pane would take.
+///
+/// By extension, like the browser lists by extension: the answer is needed
+/// while the pointer is moving, and opening every file under the cursor to be
+/// sure is not something that can happen at that speed. A folder counts,
+/// because a folder of rushes is the usual thing to let go of here.
+QStringList droppedMedia(const QMimeData* mime) {
+    QStringList paths;
+    if (mime == nullptr || !mime->hasUrls()) {
+        return paths;
+    }
+    for (const QUrl& url : mime->urls()) {
+        if (!url.isLocalFile()) {
+            continue;  // a URL is not a file this program can open
+        }
+        const QString path = url.toLocalFile();
+        const QFileInfo info{path};
+        if (info.isDir() || io::looksLikeMedia(path.toStdString())) {
+            paths.push_back(path);
+        }
+    }
+    return paths;
+}
+
+/// The border that says the pane will take what is over it.
+///
+/// A child laid over the list rather than a paint in the pane's own
+/// `paintEvent`: the pane's layout has no margins, so its children cover every
+/// pixel a border would be drawn on, and whatever it painted would be painted
+/// over.
+class DropHint : public QWidget {
+public:
+    explicit DropHint(QWidget* parent) : QWidget{parent} {
+        setAttribute(Qt::WA_TransparentForMouseEvents);
+        hide();
+    }
+
+protected:
+    void paintEvent(QPaintEvent* /*event*/) override {
+        QPainter painter{this};
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        painter.fillRect(rect(), theme::mix(theme::surface(), theme::accent(), 0.14));
+        painter.setPen(QPen{theme::accent(), 2.0, Qt::DashLine});
+        painter.drawRoundedRect(QRectF{rect()}.adjusted(3.0, 3.0, -3.0, -3.0), 6.0, 6.0);
+    }
+};
+
+}  // namespace
+
+void ProjectBin::dragEnterEvent(QDragEnterEvent* event) {
+    if (project_ == nullptr || commands_ == nullptr || droppedMedia(event->mimeData()).isEmpty()) {
+        event->ignore();
+        return;
+    }
+    // Copy rather than move: the files stay where the shoot left them, and the
+    // project holds a path to them.
+    event->setDropAction(Qt::CopyAction);
+    event->acceptProposedAction();
+    dropHover_ = true;
+    footer_->setText(QStringLiteral("Drop to import"));
+    if (dropHint_ == nullptr) {
+        dropHint_ = new DropHint{this};
+    }
+    dropHint_->setGeometry(pages_->geometry());
+    dropHint_->raise();
+    dropHint_->show();
+}
+
+void ProjectBin::dragMoveEvent(QDragMoveEvent* event) {
+    if (dropHover_) {
+        event->setDropAction(Qt::CopyAction);
+        event->acceptProposedAction();
+        return;
+    }
+    event->ignore();
+}
+
+void ProjectBin::dragLeaveEvent(QDragLeaveEvent* event) {
+    dropHover_ = false;
+    if (dropHint_ != nullptr) {
+        dropHint_->hide();
+    }
+    applyFilter();  // puts the summary back over the "Drop to import"
+    event->accept();
+}
+
+void ProjectBin::dropEvent(QDropEvent* event) {
+    dropHover_ = false;
+    if (dropHint_ != nullptr) {
+        dropHint_->hide();
+    }
+    const QStringList paths = droppedMedia(event->mimeData());
+    if (paths.isEmpty()) {
+        applyFilter();
+        event->ignore();
+        return;
+    }
+    event->setDropAction(Qt::CopyAction);
+    event->accept();
+
+    // Imported after the drop returns, not during it. This runs inside the
+    // window system's drag session -- the mime data belongs to the drag, and
+    // the file manager is waiting for this handler to come back -- so the
+    // paths are taken out and the probing happens on the next turn of the
+    // event loop.
+    //
+    // No wait cursor over it. Building one crashes on macOS: Qt hands
+    // CGImageCreate an image it could not make, and AppKit dereferences the
+    // colour space that is not there. The import is a probe per file and the
+    // line along the bottom says what came of it, which is the feedback that
+    // was wanted from the cursor anyway.
+    QTimer::singleShot(0, this, [this, paths] {
+        const int added = importPaths(paths);
+
+        // `importPaths` has already put the summary back; only the case worth
+        // remarking on -- files that could not be read, or were here already
+        // -- says anything more.
+        if (added == 0) {
+            footer_->setText(QStringLiteral("Nothing to import"));
+        }
+    });
+}
+
+ProjectBin::Selection ProjectBin::selection() const {
+    QListWidgetItem* item = list_->currentItem();
+    if (item == nullptr || item->data(kRoleHeader).toBool()) {
+        return {};
+    }
+    return Selection{model::MediaRefId{item->data(kRoleMedia).toULongLong()},
+                     model::SubclipId{item->data(kRoleSubclip).toULongLong()}};
+}
+
+/// Say what a file's curve and gamut really are.
+///
+/// In the bin because they are facts about the file, and the bin is the list of
+/// files. Not a guess this program could make for somebody: a flat shot and a
+/// log shot are the same picture, and the only thing that can tell them apart
+/// is a person who knows what the camera was set to.
+///
+/// Two submenus under one entry, because they are one question asked twice --
+/// "the container is wrong about this file, here is what it really is" -- and
+/// somebody correcting a log curve is often correcting the gamut in the same
+/// breath. Separate top-level items would be two places to look for one job.
+void ProjectBin::interpretMenu() {
+    const Selection chosen = selection();
+    const model::MediaRef* ref = project_ != nullptr ? project_->findMedia(chosen.media) : nullptr;
+    if (ref == nullptr) {
+        return;
+    }
+
+    QMenu menu;
+    std::map<QAction*, media::TransferFunction> curves;
+    QMenu* curveMenu = menu.addMenu("Curve");
+    for (const media::TransferFunction transfer : media::allTransferFunctions()) {
+        QAction* action =
+            curveMenu->addAction(transfer == media::TransferFunction::Unknown
+                                     ? QString("As the file says (%1)")
+                                           .arg(QString::fromUtf8(media::toString(ref->transfer())))
+                                     : QString::fromUtf8(media::toString(transfer)));
+        action->setCheckable(true);
+        action->setChecked(ref->transferOverride == transfer);
+        curves.emplace(action, transfer);
+    }
+
+    std::map<QAction*, media::ColorPrimaries> gamuts;
+    QMenu* gamutMenu = menu.addMenu("Gamut");
+    for (const media::ColorPrimaries primaries : media::allColorPrimaries()) {
+        QAction* action = gamutMenu->addAction(
+            primaries == media::ColorPrimaries::Unknown
+                ? QString("As the file says (%1)")
+                      .arg(QString::fromUtf8(media::toString(ref->primaries())))
+                : QString::fromUtf8(media::toString(primaries)));
+        action->setCheckable(true);
+        action->setChecked(ref->primariesOverride == primaries);
+        gamuts.emplace(action, primaries);
+    }
+
+    QAction* picked = menu.exec(QCursor::pos());
+    if (picked == nullptr) {
+        return;
+    }
+    const auto curve = curves.find(picked);
+    const auto gamut = gamuts.find(picked);
+    if (curve == curves.end() && gamut == gamuts.end()) {
+        return;
+    }
+    for (model::MediaRef& media : project_->mediaMutable()) {
+        if (media.id != chosen.media) {
+            continue;
+        }
+        if (curve != curves.end()) {
+            media.transferOverride = curve->second;
+        } else {
+            media.primariesOverride = gamut->second;
+        }
+    }
+    refresh();
+    emit colorChanged();
+}
+
+void ProjectBin::appendSelectedToTimeline() {
+    if (project_ == nullptr || commands_ == nullptr) {
+        return;
+    }
+    const Selection chosen = selection();
+    const model::MediaRefId id = chosen.media;
+    const model::MediaRef* ref = project_->findMedia(id);
+    const model::Sequence* sequence = project_->findSequence(sequenceId_);
+    // A still has no running time of its own and is appended all the same:
+    // it is given one below.
+    if (ref == nullptr || sequence == nullptr ||
+        (!ref->info.duration.isPositive() && !ref->info.isStill())) {
+        return;
+    }
+
+    // The first thing on an empty timeline decides its format.
+    //
+    // Done here, before anything below takes a reference into the sequence: a
+    // command replaces the sequence wholesale, so a rate or a track captured
+    // first would be left pointing at the version that has just been thrown
+    // away. That is the bug this project has already found twice.
+    //
+    // In the bin rather than in the model, because it is a decision about what
+    // somebody meant, and those belong where the interaction is; every edit
+    // operation would otherwise have to carry a rule about when a sequence may
+    // change shape. The operation refuses once there is anything to retime, so
+    // calling it again later cannot do harm.
+    if (const media::VideoStreamInfo* first = ref->info.primaryVideo();
+        first != nullptr && sequence->duration().frames() == 0) {
+        // A still's frame rate is fiction -- FFmpeg reports 25fps for a .png
+        // because it has to report something -- so an empty sequence takes its
+        // size from the picture and keeps the rate it already had. Its size is
+        // real and worth having: a sequence built around a photograph should be
+        // the shape of the photograph.
+        const time::Rational rate = ref->info.isStill() ? sequence->frameRate() : first->frameRate;
+        auto conformed =
+            edit::makeConformSequence(*project_, sequenceId_, rate, first->width, first->height);
+        if (conformed) {
+            commands_->execute(*project_, std::move(*conformed));
+            commands_->breakMerge();
+            sequence = project_->findSequence(sequenceId_);
+        }
+    }
+
+    const time::Rational& rate = sequence->frameRate();
+    const media::VideoStreamInfo* video = ref->info.primaryVideo();
+    const time::Rational sourceRate = video != nullptr ? video->frameRate : rate;
+
+    // A subclip appends its range; media appends all of it. This is the only
+    // place a subclip means anything: what lands on the timeline is an
+    // ordinary clip either way.
+    const model::Subclip* subclip = project_->findSubclip(chosen.subclip);
+    // A still is given the default length, at the sequence's rate rather than
+    // its own invented one, and a source range as long as the timeline range it
+    // will occupy -- which is what makes keyframes on it advance. See
+    // model::Clip::sourceSecondsAt.
+    const time::TimeRange sourceRange =
+        ref->info.isStill()
+            ? time::TimeRange{time::RationalTime{0, rate},
+                              time::RationalTime::fromSeconds(
+                                  time::Rational::fromInt(media::kDefaultStillSeconds), rate)}
+        : subclip != nullptr
+            ? subclip->range.rescaledTo(sourceRate)
+            : time::TimeRange{time::RationalTime{0, sourceRate},
+                              time::RationalTime::fromSeconds(ref->info.duration, sourceRate)};
+
+    const bool hasVideo = video != nullptr;
+    const auto& tracks = hasVideo ? sequence->videoTracks() : sequence->audioTracks();
+    if (tracks.empty()) {
+        return;
+    }
+    const model::Track& track = tracks.front();
+
+    // Appended after whatever is already there, which is what "append" means
+    // and avoids having to decide what to overwrite.
+    const time::RationalTime start =
+        track.isEmpty() ? time::RationalTime{0, rate} : track.extent().endExclusive();
+    const auto duration = sourceRange.duration().rescaledTo(rate);
+    if (duration.frames() <= 0) {
+        return;
+    }
+
+    model::Clip clip;
+    clip.id = project_->ids().next<model::ClipTag>();
+    clip.source = id;
+    clip.name = subclip != nullptr && !subclip->name.empty() ? subclip->name : ref->name;
+    clip.sourceRange = sourceRange;
+    clip.timelineRange = time::TimeRange{start, duration};
+
+    auto built = edit::makeOverwrite(*project_, {sequenceId_, track.id()}, clip);
+    if (!built) {
+        return;
+    }
+    commands_->execute(*project_, std::move(*built));
+    commands_->breakMerge();
+    emit edited();
+}
+
+}  // namespace zaro::app

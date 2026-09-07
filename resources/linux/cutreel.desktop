@@ -1,0 +1,24 @@
+[Desktop Entry]
+# The launcher entry the .deb installs into /usr/share/applications.
+#
+# Exec names the executable, which is called cutreel on every platform -- the
+# same word as the package, so that what somebody types in a terminal, what the
+# desktop runs, and what `apt install` was handed are all one name. %f rather
+# than %F: the app opens one project.
+#
+# The basename of this file, minus .desktop, is what
+# QGuiApplication::setDesktopFileName is given in app/main.cpp. That is how the
+# desktop matches a running window to this entry -- Qt writes it into WM_CLASS
+# on X11 and reports it as the app id on Wayland -- and it is what makes the
+# taskbar show the icon and the name below. Renaming this file means changing
+# that call too.
+Type=Application
+Name=CutReel
+GenericName=Video Editor
+Comment=A non-linear video editor
+Exec=cutreel %f
+Icon=cutreel
+Terminal=false
+Categories=AudioVideo;AudioVideoEditing;
+Keywords=video;editor;editing;cut;timeline;nle;
+StartupNotify=true

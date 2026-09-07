@@ -11,20 +11,96 @@ endif()
 
 add_library(zaro_core
     src/Check.cpp
+    src/Environment.cpp
     src/Error.cpp
     src/edit/Command.cpp
     src/edit/CommandStack.cpp
-    src/edit/Operations.cpp
+    src/edit/OperationsAnnotation.cpp
+    src/edit/OperationsClip.cpp
+    src/edit/OperationsCommon.cpp
+    src/edit/OperationsCommon.h
+    src/edit/OperationsContent.cpp
+    src/edit/OperationsPlacement.cpp
+    src/edit/OperationsProject.cpp
+    src/edit/OperationsTrim.cpp
     src/edit/Snapping.cpp
+    src/edit/Sync.cpp
+    src/io/CubeLut.cpp
+    src/io/FinalCutXml.cpp
+    src/io/OtioIo.cpp
+    src/io/PathUrl.h
+    src/io/PathUrl.cpp
+    src/io/PremiereXml.cpp
+    src/io/Xml.h
+    src/io/Xml.cpp
+    src/io/SubtitleIo.cpp
     src/io/ProjectIo.cpp
+    src/io/ProjectJson.h
+    src/io/ProjectJsonDecode.cpp
+    src/io/ProjectJsonEncode.cpp
+    src/playback/AudioRingBuffer.cpp
+    src/playback/PlaybackScheduler.cpp
+    src/playback/Transport.cpp
+    src/render/AudioGraph.cpp
+    src/render/AudioProcessor.cpp
+    src/render/Loudness.cpp
+    src/render/BakeLut.cpp
+    src/render/ColorPipeline.cpp
+    src/render/Downmix.cpp
+    src/render/Ducking.cpp
+    src/render/EffectStack.cpp
+    src/render/FrameCache.cpp
+    src/render/RenderCache.cpp
+    src/render/Compare.cpp
+    src/render/Compositing.cpp
+    src/render/CurveTable.cpp
+    src/render/Gamut.cpp
+    src/render/Grade.cpp
+    src/render/ColorCurveTable.cpp
+    src/render/Keyer.cpp
+    src/render/LutTable.cpp
+    src/render/PathRaster.cpp
+    src/model/MediaSearch.cpp
+    src/io/MediaBrowser.cpp
+    src/io/ProjectLock.cpp
+    src/io/Relink.cpp
+    src/io/ReviewNotes.cpp
+    src/render/Reframe.cpp
+    src/render/Remix.cpp
+    src/render/Resample.cpp
+    src/render/SmartRender.cpp
+    src/render/Stabilise.cpp
+    src/render/Tracker.cpp
+    src/render/Qualifier.cpp
+    src/render/ShapeRaster.cpp
+    src/render/TextRasterizer.cpp
+    src/render/RenderGraph.cpp
+    src/render/SceneDetect.cpp
+    src/render/Scopes.cpp
+    src/render/ShotMatch.cpp
+    src/render/ToneMap.cpp
+    src/render/TransitionShape.cpp
+    src/render/RgbaImage.cpp
+    src/model/Animation.cpp
+    src/model/Caption.cpp
+    src/model/AudioRole.cpp
     src/model/Clip.cpp
+    src/model/ClipKind.cpp
+    src/model/Effect.cpp
+    src/model/Graphic.cpp
+    src/model/Mask.cpp
+    src/model/ClipEffects.cpp
     src/model/Project.cpp
     src/model/Sequence.cpp
+    src/model/ToneCurve.cpp
     src/model/Track.cpp
+    src/model/Transition.cpp
+    src/media/AudioAlign.cpp
     src/media/AudioBuffer.cpp
     src/media/ColorInfo.cpp
     src/media/PixelFormat.cpp
     src/media/VideoFrame.cpp
+    src/media/Waveform.cpp
     src/time/Rational.cpp
     src/time/RationalTime.cpp
     src/time/TimeRange.cpp

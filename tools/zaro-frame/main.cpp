@@ -5,12 +5,15 @@
 // seeking and decoding are frame-exact rather than approximately right.
 
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
 
 #include "zaro/core/time/Timecode.h"
 #include "zaro/platform/ffmpeg/FFmpegMedia.h"
+
+#include "Cli.h"
 
 namespace {
 
@@ -23,11 +26,15 @@ void printUsage() {
     std::puts("  --hardware     require hardware decoding");
     std::puts("  --benchmark N  decode N frames sequentially and report throughput");
     std::puts("  --quiet        suppress the per-frame report");
+    std::puts("  --version       print the version and exit");
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
+    if (zaro::tools::handledVersion(argc, argv, "zaro-frame")) {
+        return 0;
+    }
     if (argc < 3) {
         printUsage();
         return 2;

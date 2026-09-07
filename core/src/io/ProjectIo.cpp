@@ -1,11 +1,20 @@
 #include "zaro/core/io/ProjectIo.h"
 
+#include <algorithm>
+#include <cctype>
+#include <cstdint>
+#include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <sstream>
 
 #include <nlohmann/json.hpp>
 
+#include "zaro/core/model/ClipEffects.h"
+#include "zaro/core/model/Transition.h"
 #include "zaro/core/time/Timecode.h"
+
+#include "ProjectJson.h"
 
 namespace zaro::io {
 
@@ -15,7 +24,18 @@ using json = nlohmann::json;
 /// merged back from here.
 class UnknownFields {
 public:
-    explicit UnknownFields(json document) : document_{std::move(document)} {}
+    // Parenthesised, not braced, and it has to stay that way.
+    //
+    // `json x{y}` is list-initialisation, and nlohmann's initializer-list
+    // constructor is viable for it: a lone json is convertible to the json_ref
+    // that list takes, so the braces can build a one-element *array* holding
+    // the document instead of moving the document in. Which of the two the
+    // overload set picks is not settled the same way by every compiler --
+    // Clang moved, GCC wrapped -- so the carrier came out of a load as
+    // `[{...}]` on Linux, `contains` found nothing on it, and every field a
+    // newer build had written was dropped by the next save. Parentheses cannot
+    // reach the initializer-list constructor at all.
+    explicit UnknownFields(json document) : document_(std::move(document)) {}
     [[nodiscard]] const json& document() const noexcept { return document_; }
 
 private:
@@ -24,312 +44,50 @@ private:
 
 namespace {
 
-// --- Time encoding ----------------------------------------------------------
-// Rationals are written as "30000/1001" rather than a decimal, because the
-// whole point of the type is that 29.97 is not a decimal. A project file that
-// says 29.97 has already lost the information.
+// Reading and writing live in ProjectJsonEncode.cpp and ProjectJsonDecode.cpp;
+// what is left here is the file on disk -- where it goes, how it is replaced,
+// and what a version of it is called.
+using detail::decodeClip;
+using detail::decodeMedia;
+using detail::decodeSequence;
+using detail::decodeSubclip;
+using detail::encode;
+using detail::encodeCaptions;
+using detail::highestId;
+using detail::mergePreserved;
 
-json encode(const time::Rational& value) {
-    return value.toString();
-}
+}  // namespace
 
-Result<time::Rational> decodeRational(const json& node, const char* what) {
-    if (!node.is_string()) {
-        return Error{ErrorCode::InvalidData,
-                     std::string{what} + " should be a string like \"30000/1001\""};
-    }
-    const auto parsed = time::Rational::parse(node.get<std::string>());
-    if (!parsed) {
-        return Error{ErrorCode::InvalidData, std::string{what} + ": cannot read \"" +
-                                                 node.get<std::string>() + "\" as a rate"};
-    }
-    return *parsed;
-}
+namespace {
 
-json encode(const time::RationalTime& value) {
-    return json{{"frames", value.frames()}, {"rate", encode(value.rate())}};
-}
-
-Result<time::RationalTime> decodeTime(const json& node, const char* what) {
-    if (!node.is_object() || !node.contains("frames") || !node.contains("rate")) {
-        return Error{ErrorCode::InvalidData, std::string{what} + " needs \"frames\" and \"rate\""};
+/// FNV-1a over the encoded form. A non-cryptographic hash is the right tool:
+/// the inputs are this program's own output, not something an attacker
+/// supplies, and 64 bits makes an accidental collision between two versions of
+/// one clip a thing that does not happen in a session.
+std::uint64_t hashOf(const json& node) {
+    const std::string text = node.dump();
+    std::uint64_t hash = 14695981039346656037ULL;
+    for (const char c : text) {
+        hash ^= static_cast<std::uint64_t>(static_cast<unsigned char>(c));
+        hash *= 1099511628211ULL;
     }
-    auto rate = decodeRational(node.at("rate"), what);
-    if (!rate) {
-        return rate.error();
-    }
-    return time::RationalTime{node.at("frames").get<std::int64_t>(), *rate};
-}
-
-json encode(const time::TimeRange& value) {
-    return json{{"start", encode(value.start())}, {"duration", encode(value.duration())}};
-}
-
-Result<time::TimeRange> decodeRange(const json& node, const char* what) {
-    if (!node.is_object()) {
-        return Error{ErrorCode::InvalidData, std::string{what} + " should be an object"};
-    }
-    auto start = decodeTime(node.at("start"), what);
-    if (!start) {
-        return start.error();
-    }
-    auto duration = decodeTime(node.at("duration"), what);
-    if (!duration) {
-        return duration.error();
-    }
-    if (duration->frames() < 0) {
-        return Error{ErrorCode::InvalidData, std::string{what} + " has a negative duration"};
-    }
-    return time::TimeRange{*start, *duration};
-}
-
-// --- Model encoding ---------------------------------------------------------
-
-json encode(const model::Clip& clip) {
-    return json{{"id", clip.id.value()},
-                {"source", clip.source.value()},
-                {"name", clip.name},
-                {"enabled", clip.enabled},
-                {"sourceRange", encode(clip.sourceRange)},
-                {"timelineRange", encode(clip.timelineRange)}};
-}
-
-json encode(const model::Track& track) {
-    json clips = json::array();
-    for (const model::Clip& clip : track.clips()) {
-        clips.push_back(encode(clip));
-    }
-    return json{{"id", track.id().value()},   {"kind", model::toString(track.kind())},
-                {"name", track.name()},       {"muted", track.isMuted()},
-                {"locked", track.isLocked()}, {"clips", std::move(clips)}};
-}
-
-json encode(const model::Sequence& sequence) {
-    json videoTracks = json::array();
-    for (const model::Track& track : sequence.videoTracks()) {
-        videoTracks.push_back(encode(track));
-    }
-    json audioTracks = json::array();
-    for (const model::Track& track : sequence.audioTracks()) {
-        audioTracks.push_back(encode(track));
-    }
-    return json{{"id", sequence.id().value()},
-                {"name", sequence.name()},
-                {"frameRate", encode(sequence.frameRate())},
-                {"audioSampleRate", encode(sequence.audioSampleRate())},
-                {"width", sequence.width()},
-                {"height", sequence.height()},
-                {"startTime", encode(sequence.startTime())},
-                {"videoTracks", std::move(videoTracks)},
-                {"audioTracks", std::move(audioTracks)}};
-}
-
-json encode(const model::MediaRef& ref) {
-    // MediaInfo is a probe cache, not project data, so only the parts the model
-    // actually reasons about are written: duration bounds trims, and the size
-    // and rate let a bin show something before any file has been reopened.
-    json cached{{"duration", encode(ref.info.duration)}};
-    if (const media::VideoStreamInfo* video = ref.info.primaryVideo()) {
-        cached["width"] = video->width;
-        cached["height"] = video->height;
-        cached["frameRate"] = encode(video->frameRate);
-    }
-    return json{{"id", ref.id.value()},
-                {"path", ref.path},
-                {"contentHash", ref.contentHash},
-                {"name", ref.name},
-                {"cachedInfo", std::move(cached)}};
-}
-
-// --- Decoding ---------------------------------------------------------------
-
-Result<model::Clip> decodeClip(const json& node) {
-    model::Clip clip;
-    clip.id = model::ClipId{node.value("id", std::uint64_t{0})};
-    clip.source = model::MediaRefId{node.value("source", std::uint64_t{0})};
-    clip.name = node.value("name", std::string{});
-    clip.enabled = node.value("enabled", true);
-
-    if (!clip.id.isValid()) {
-        return Error{ErrorCode::InvalidData, "a clip has no id"};
-    }
-    auto sourceRange = decodeRange(node.at("sourceRange"), "clip sourceRange");
-    if (!sourceRange) {
-        return sourceRange.error();
-    }
-    auto timelineRange = decodeRange(node.at("timelineRange"), "clip timelineRange");
-    if (!timelineRange) {
-        return timelineRange.error();
-    }
-    clip.sourceRange = *sourceRange;
-    clip.timelineRange = *timelineRange;
-    return clip;
-}
-
-Result<model::Track> decodeTrack(const json& node, model::TrackKind kind) {
-    const auto id = model::TrackId{node.value("id", std::uint64_t{0})};
-    if (!id.isValid()) {
-        return Error{ErrorCode::InvalidData, "a track has no id"};
-    }
-    model::Track track{id, kind, node.value("name", std::string{})};
-    track.setMuted(node.value("muted", false));
-    track.setLocked(node.value("locked", false));
-
-    std::vector<model::Clip> clips;
-    for (const json& clipNode : node.value("clips", json::array())) {
-        auto clip = decodeClip(clipNode);
-        if (!clip) {
-            return clip.error();
-        }
-        clips.push_back(std::move(*clip));
-    }
-    // setClips enforces the sorted, non-overlapping invariant, so a corrupt or
-    // hand-edited file is caught here rather than halfway through an edit.
-    track.setClips(std::move(clips));
-    return track;
-}
-
-Result<model::Sequence> decodeSequence(const json& node) {
-    const auto id = model::SequenceId{node.value("id", std::uint64_t{0})};
-    if (!id.isValid()) {
-        return Error{ErrorCode::InvalidData, "a sequence has no id"};
-    }
-    auto frameRate = decodeRational(node.at("frameRate"), "sequence frameRate");
-    if (!frameRate) {
-        return frameRate.error();
-    }
-    model::Sequence sequence{id, node.value("name", std::string{}), *frameRate};
-
-    if (node.contains("audioSampleRate")) {
-        auto rate = decodeRational(node.at("audioSampleRate"), "sequence audioSampleRate");
-        if (!rate) {
-            return rate.error();
-        }
-        sequence.setAudioSampleRate(*rate);
-    }
-    sequence.setSize(node.value("width", 1920), node.value("height", 1080));
-    if (node.contains("startTime")) {
-        auto start = decodeTime(node.at("startTime"), "sequence startTime");
-        if (!start) {
-            return start.error();
-        }
-        sequence.setStartTime(*start);
-    }
-
-    const auto loadTracks = [&](const char* key, model::TrackKind kind) -> Status {
-        for (const json& trackNode : node.value(key, json::array())) {
-            auto track = decodeTrack(trackNode, kind);
-            if (!track) {
-                return track.error();
-            }
-            sequence.tracksMutable(kind).push_back(std::move(*track));
-        }
-        return {};
-    };
-    if (Status status = loadTracks("videoTracks", model::TrackKind::Video); !status) {
-        return status.error();
-    }
-    if (Status status = loadTracks("audioTracks", model::TrackKind::Audio); !status) {
-        return status.error();
-    }
-    return sequence;
-}
-
-Result<model::MediaRef> decodeMedia(const json& node) {
-    model::MediaRef ref;
-    ref.id = model::MediaRefId{node.value("id", std::uint64_t{0})};
-    if (!ref.id.isValid()) {
-        return Error{ErrorCode::InvalidData, "a media reference has no id"};
-    }
-    ref.path = node.value("path", std::string{});
-    ref.contentHash = node.value("contentHash", std::string{});
-    ref.name = node.value("name", std::string{});
-
-    if (node.contains("cachedInfo")) {
-        const json& cached = node.at("cachedInfo");
-        ref.info.path = ref.path;
-        if (cached.contains("duration")) {
-            // Written by encode(Rational) as "400/1", so it has to be read back
-            // the same way. Reading it as a {frames, rate} object silently
-            // failed, and a media duration of zero means every trim bound
-            // disappears the moment a project is reopened.
-            auto duration = decodeRational(cached.at("duration"), "media duration");
-            if (!duration) {
-                return duration.error();
-            }
-            ref.info.duration = *duration;
-        }
-        if (cached.contains("width") && cached.contains("frameRate")) {
-            media::VideoStreamInfo video;
-            video.width = cached.value("width", 0);
-            video.height = cached.value("height", 0);
-            if (auto rate = decodeRational(cached.at("frameRate"), "media frameRate")) {
-                video.frameRate = *rate;
-                video.averageFrameRate = *rate;
-            }
-            video.duration = ref.info.duration;
-            ref.info.videoStreams.push_back(std::move(video));
-        }
-    }
-    return ref;
-}
-
-// --- Unknown-field preservation ---------------------------------------------
-
-/// Copy anything in `original` that `out` does not have.
-///
-/// Arrays of objects are matched by "id" rather than by position, because a
-/// clip that moved from index 3 to index 5 is still the same clip and should
-/// keep whatever the newer build attached to it.
-void mergePreserved(json& out, const json& original) {
-    if (out.is_object() && original.is_object()) {
-        for (const auto& [key, value] : original.items()) {
-            if (!out.contains(key)) {
-                out[key] = value;
-            } else {
-                mergePreserved(out[key], value);
-            }
-        }
-        return;
-    }
-    if (out.is_array() && original.is_array()) {
-        for (json& element : out) {
-            if (!element.is_object() || !element.contains("id")) {
-                continue;
-            }
-            const auto& id = element.at("id");
-            for (const json& originalElement : original) {
-                if (originalElement.is_object() && originalElement.contains("id") &&
-                    originalElement.at("id") == id) {
-                    mergePreserved(element, originalElement);
-                    break;
-                }
-            }
-        }
-    }
-}
-
-std::uint64_t highestId(const model::Project& project) {
-    std::uint64_t highest = 0;
-    const auto bump = [&highest](std::uint64_t value) { highest = std::max(highest, value); };
-    for (const model::MediaRef& ref : project.media()) {
-        bump(ref.id.value());
-    }
-    for (const model::Sequence& sequence : project.sequences()) {
-        bump(sequence.id().value());
-        for (const auto* list : {&sequence.videoTracks(), &sequence.audioTracks()}) {
-            for (const model::Track& track : *list) {
-                bump(track.id().value());
-                for (const model::Clip& clip : track.clips()) {
-                    bump(clip.id.value());
-                }
-            }
-        }
-    }
-    return highest;
+    return hash;
 }
 
 }  // namespace
+
+std::uint64_t fingerprint(const model::Clip& clip) {
+    return hashOf(encode(clip));
+}
+std::uint64_t fingerprint(const model::Transition& transition) {
+    return hashOf(encode(transition));
+}
+std::uint64_t fingerprint(const model::MediaRef& media) {
+    return hashOf(encode(media));
+}
+std::uint64_t fingerprint(const model::CaptionTrack& captions) {
+    return hashOf(encodeCaptions(captions));
+}
 
 Result<std::string> saveProjectToString(const model::Project& project,
                                         const std::shared_ptr<const UnknownFields>& unknown) {
@@ -341,11 +99,25 @@ Result<std::string> saveProjectToString(const model::Project& project,
     for (const model::Sequence& sequence : project.sequences()) {
         sequences.push_back(encode(sequence));
     }
+    json subclips = json::array();
+    for (const model::Subclip& subclip : project.subclips()) {
+        subclips.push_back(encode(subclip));
+    }
 
     json document{{"zaro", {{"schemaVersion", kProjectSchemaVersion}}},
                   {"activeSequence", project.activeSequence().value()},
                   {"media", std::move(media)},
                   {"sequences", std::move(sequences)}};
+    if (!subclips.empty()) {
+        // Only when there are any: a project that has never had one should not
+        // carry an empty list saying so.
+        document["subclips"] = std::move(subclips);
+    }
+    if (project.usingProxies()) {
+        // Only when on. A project that has never seen a proxy should not carry
+        // a line saying so.
+        document["useProxies"] = true;
+    }
 
     if (unknown != nullptr) {
         mergePreserved(document, unknown->document());
@@ -353,21 +125,203 @@ Result<std::string> saveProjectToString(const model::Project& project,
     return document.dump(2) + "\n";
 }
 
+namespace {
+
+/// Write a file beside the target and rename over it.
+///
+/// A truncating write destroys the old file the instant it opens it, so a
+/// crash, a full disk or a pulled cable partway through leaves neither the old
+/// version nor the new -- and the moment somebody is most likely to lose a
+/// day's work is the moment they were saving it. Rename within a directory is
+/// atomic: either the new file is there whole or the old one still is.
+Status writeAtomically(const std::string& path, const std::string& text) {
+    std::error_code code;
+    const std::filesystem::path target{path};
+    std::filesystem::path temporary = target;
+    temporary += ".saving";
+    {
+        std::ofstream file{temporary, std::ios::binary | std::ios::trunc};
+        if (!file) {
+            return Error{ErrorCode::Io, "cannot open " + temporary.string() + " for writing"};
+        }
+        file << text;
+        file.flush();
+        if (!file) {
+            std::filesystem::remove(temporary, code);
+            return Error{ErrorCode::Io, "failed while writing " + temporary.string()};
+        }
+    }
+
+    // In the same directory as the target on purpose: a rename across
+    // filesystems is a copy and a delete, which is exactly the non-atomic
+    // operation this exists to avoid.
+    std::filesystem::rename(temporary, target, code);
+    if (code) {
+        std::filesystem::remove(temporary, code);
+        return Error{ErrorCode::Io, "cannot replace " + path + ": " + code.message()};
+    }
+    return {};
+}
+
+}  // namespace
+
 Status saveProject(const model::Project& project, const std::string& path,
                    const std::shared_ptr<const UnknownFields>& unknown) {
     auto text = saveProjectToString(project, unknown);
     if (!text) {
         return text.error();
     }
-    std::ofstream file{path, std::ios::binary | std::ios::trunc};
-    if (!file) {
-        return Error{ErrorCode::Io, "cannot open " + path + " for writing"};
+    return writeAtomically(path, *text);
+}
+
+Status saveGraphicTemplate(const model::Clip& clip, const std::string& path) {
+    if (!clip.graphic.isSet()) {
+        return Error{ErrorCode::InvalidData, "only a title or a shape can be saved as a template"};
     }
-    file << *text;
+    json out{{"zaroTemplate", 1}, {"clip", encode(clip)}};
+    return writeAtomically(path, out.dump(2));
+}
+
+Result<model::Clip> loadGraphicTemplate(const std::string& path) {
+    std::ifstream file{path, std::ios::binary};
     if (!file) {
-        return Error{ErrorCode::Io, "failed while writing " + path};
+        return Error{ErrorCode::NotFound, "cannot open " + path};
     }
-    return {};
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+
+    json parsed = json::parse(buffer.str(), nullptr, false);
+    if (parsed.is_discarded() || !parsed.is_object() || !parsed.contains("zaroTemplate")) {
+        return Error{ErrorCode::InvalidData, path + " is not a graphic template"};
+    }
+    if (!parsed.contains("clip") || !parsed.at("clip").is_object()) {
+        return Error{ErrorCode::InvalidData, "that template has no graphic in it"};
+    }
+    auto clip = decodeClip(parsed.at("clip"));
+    if (!clip) {
+        return clip.error();
+    }
+    if (!clip->graphic.isSet()) {
+        return Error{ErrorCode::InvalidData, "that template has no graphic in it"};
+    }
+    return clip;
+}
+
+namespace {
+
+/// The stem split into its name and its version number, if it has one.
+///
+/// A version suffix is `_v` followed by digits at the very end. Deliberately
+/// strict: `take_v2_final` is a name somebody chose, not version two of
+/// `take`, and renumbering it would be this tool having an opinion about
+/// their filing.
+struct Versioned {
+    std::string base;
+    int number{0};
+    int width{0};
+    bool numbered{false};
+};
+
+[[nodiscard]] Versioned splitVersion(const std::string& stem) {
+    Versioned split;
+    split.base = stem;
+    std::size_t digits = stem.size();
+    while (digits > 0 && std::isdigit(static_cast<unsigned char>(stem[digits - 1])) != 0) {
+        --digits;
+    }
+    if (digits == stem.size() || digits < 2) {
+        return split;
+    }
+    if (stem[digits - 1] != 'v' && stem[digits - 1] != 'V') {
+        return split;
+    }
+    if (stem[digits - 2] != '_' && stem[digits - 2] != '-') {
+        return split;
+    }
+    split.base = stem.substr(0, digits);
+    split.width = static_cast<int>(stem.size() - digits);
+    split.number = std::stoi(stem.substr(digits));
+    split.numbered = true;
+    return split;
+}
+
+}  // namespace
+
+std::vector<std::string> versionsOf(const std::string& projectPath) {
+    const std::filesystem::path path{projectPath};
+    const Versioned split = splitVersion(path.stem().string());
+    const std::string extension = path.extension().string();
+
+    std::vector<std::pair<int, std::string>> found;
+    std::error_code code;
+    for (const auto& entry : std::filesystem::directory_iterator{
+             path.parent_path().empty() ? std::filesystem::path{"."} : path.parent_path(), code}) {
+        if (!entry.is_regular_file(code) || entry.path().extension() != extension) {
+            continue;
+        }
+        const Versioned other = splitVersion(entry.path().stem().string());
+        // Same name, whether or not either of them is numbered: the unnumbered
+        // file is version one of itself.
+        const std::string otherBase = other.numbered ? other.base : other.base + "_v";
+        const std::string ourBase = split.numbered ? split.base : split.base + "_v";
+        if (otherBase != ourBase) {
+            continue;
+        }
+        found.emplace_back(other.numbered ? other.number : 1, entry.path().string());
+    }
+    std::sort(found.begin(), found.end());
+
+    std::vector<std::string> paths;
+    paths.reserve(found.size());
+    for (auto& [number, where] : found) {
+        paths.push_back(std::move(where));
+    }
+    return paths;
+}
+
+std::string nextVersionPath(const std::string& projectPath) {
+    const std::filesystem::path path{projectPath};
+    const Versioned split = splitVersion(path.stem().string());
+    const std::string extension = path.extension().string();
+
+    int highest = split.numbered ? split.number : 1;
+    for (const std::string& sibling : versionsOf(projectPath)) {
+        const Versioned other = splitVersion(std::filesystem::path{sibling}.stem().string());
+        highest = std::max(highest, other.numbered ? other.number : 1);
+    }
+
+    const int width = split.width > 0 ? split.width : 3;
+    std::ostringstream numbered;
+    numbered << split.base << (split.numbered ? "" : "_v") << std::setw(width) << std::setfill('0')
+             << (highest + 1) << extension;
+    return (path.parent_path() / numbered.str()).string();
+}
+
+std::string autosavePath(const std::string& projectPath) {
+    return projectPath + ".autosave";
+}
+
+bool hasNewerAutosave(const std::string& projectPath) {
+    std::error_code code;
+    const std::filesystem::path recovery{autosavePath(projectPath)};
+    if (!std::filesystem::exists(recovery, code) || code) {
+        return false;
+    }
+    const std::filesystem::path project{projectPath};
+    if (!std::filesystem::exists(project, code) || code) {
+        // No project to compare against -- an autosave of something never
+        // saved. That is the case recovery matters most for.
+        return true;
+    }
+    const auto recoveryTime = std::filesystem::last_write_time(recovery, code);
+    if (code) {
+        return false;
+    }
+    const auto projectTime = std::filesystem::last_write_time(project, code);
+    if (code) {
+        return false;
+    }
+    return recoveryTime > projectTime;
 }
 
 Result<LoadedProject> loadProjectFromString(const std::string& text) {
@@ -376,7 +330,7 @@ Result<LoadedProject> loadProjectFromString(const std::string& text) {
         return Error{ErrorCode::InvalidData, "this is not valid JSON"};
     }
     if (!document.is_object() || !document.contains("zaro")) {
-        return Error{ErrorCode::InvalidData, "this is not a Zaro project file"};
+        return Error{ErrorCode::InvalidData, "this is not a CutReel project file"};
     }
 
     const int version = document.at("zaro").value("schemaVersion", 0);
@@ -407,8 +361,21 @@ Result<LoadedProject> loadProjectFromString(const std::string& text) {
         sequences.push_back(std::move(*sequence));
     }
 
+    loaded.project.setUsingProxies(document.value("useProxies", false));
     loaded.project.setMedia(std::move(media));
     loaded.project.setSequences(std::move(sequences));
+    for (const json& node : document.value("subclips", json::array())) {
+        auto subclip = decodeSubclip(node);
+        if (!subclip) {
+            return subclip.error();
+        }
+        // A subclip of media that is not here describes a range of nothing.
+        // Dropped rather than kept: it would show in the bin as something that
+        // cannot be opened, which is worse than not showing at all.
+        if (loaded.project.findMedia(subclip->source) != nullptr) {
+            loaded.project.addSubclip(std::move(*subclip));
+        }
+    }
     loaded.project.setActiveSequence(
         model::SequenceId{document.value("activeSequence", std::uint64_t{0})});
 

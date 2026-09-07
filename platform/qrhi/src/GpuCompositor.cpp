@@ -1,0 +1,1639 @@
+#include "zaro/platform/qrhi/GpuCompositor.h"
+
+#include <QFile>
+#include <QImage>
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <cstring>
+#include <vector>
+
+#include <QMatrix4x4>
+#include <rhi/qrhi.h>
+
+// The condition Qt guards QRhiVulkanInitParams with in rhi/qrhi_platform.h:
+// its own build had Vulkan, and the Vulkan headers are here now. Named once
+// and used by the member, the include and the branch in create(), so the three
+// cannot drift apart. QVulkanInstance's header self-guards the same way, so
+// including it where the answer is no would declare nothing.
+#if QT_CONFIG(vulkan) && __has_include(<vulkan/vulkan.h>)
+#define ZARO_HAS_VULKAN 1
+#include <QGuiApplication>
+#include <QVulkanInstance>
+#else
+#define ZARO_HAS_VULKAN 0
+#endif
+
+#include "zaro/core/render/ColorCurveTable.h"
+#include "zaro/core/render/ColorPipeline.h"
+#include "zaro/core/render/Gamut.h"
+
+namespace zaro::platform::qrhi {
+namespace {
+
+using model::BlendMode;
+
+/// A unit quad as two triangles.
+constexpr std::array<float, 12> kQuad{
+    -1.0F, -1.0F, 1.0F, -1.0F, -1.0F, 1.0F, -1.0F, 1.0F, 1.0F, -1.0F, 1.0F, 1.0F,
+};
+
+/// 64 bytes of matrix plus a vec4, which satisfies std140 alignment.
+// mat4 transform, vec4 params, vec4 white balance + exposure, vec4 grade,
+// five for the secondary, one for the look, two for the mask, four for the key,
+// and two for the Y'CbCr conversion -- which only composite_yuv.frag reads, but
+// every shader declares, because OpenGL links the stages into one program and
+// will not have two `ubuf`s that disagree. See the note in composite.frag.
+constexpr int kUniformBytes = 64 + 16 + 16 + 16 + (5 * 16) + 16 + 32 + (4 * 16) + 16 + (3 * 16) +
+                              16 + 32 +
+                              // The crop rectangle, in texture coordinates.
+                              16 + 32 + 48;
+constexpr std::size_t kUniformFloats = static_cast<std::size_t>(kUniformBytes) / sizeof(float);
+
+/// Write a grade into the composite shader's uniform block.
+///
+/// Every path that binds that shader goes through this, so a new call site
+/// cannot leave the grade fields as zeros -- which would be a black,
+/// fully-desaturated picture rather than an obviously missing feature.
+/// Upload a baked look cube as a 3D RGBA32F texture.
+///
+/// Sampled with hardware trilinear filtering, which is the same interpolation
+/// render::LutTable does on the CPU -- so the two agree without either of them
+/// knowing anything about the other's arithmetic.
+std::unique_ptr<QRhiTexture> makeLutTexture(QRhi& rhi, QRhiResourceUpdateBatch& batch,
+                                            const render::LutTable& lut) {
+    constexpr int kSize = render::LutTable::kSize;
+    auto texture = std::unique_ptr<QRhiTexture>(rhi.newTexture(
+        QRhiTexture::RGBA32F, kSize, kSize, kSize, 1, QRhiTexture::UsedAsTransferSource));
+    if (texture == nullptr || !texture->create()) {
+        return nullptr;
+    }
+
+    // Padded to four components: three-component float textures are not
+    // universally sampleable, and this is uploaded once per look rather than
+    // per frame.
+    std::vector<float> padded(static_cast<std::size_t>(kSize) * kSize * kSize * 4, 1.0F);
+    const float* entries = lut.data();
+    for (std::size_t i = 0; i < static_cast<std::size_t>(kSize) * kSize * kSize; ++i) {
+        for (std::size_t channel = 0; channel < 3; ++channel) {
+            padded[(i * 4) + channel] = entries[(i * 3) + channel];
+        }
+    }
+
+    // One upload entry per z slice: a 3D texture is uploaded a layer at a time.
+    QRhiTextureUploadDescription description;
+    std::vector<QRhiTextureUploadEntry> slices;
+    std::vector<QImage> keepAlive;
+    keepAlive.reserve(static_cast<std::size_t>(kSize));
+    slices.reserve(static_cast<std::size_t>(kSize));
+    for (int z = 0; z < kSize; ++z) {
+        const float* start = padded.data() + (static_cast<std::size_t>(z) * kSize * kSize * 4);
+        QImage slice(reinterpret_cast<const uchar*>(start), kSize, kSize,
+                     kSize * 4 * static_cast<int>(sizeof(float)), QImage::Format_RGBA32FPx4);
+        keepAlive.push_back(slice.copy());
+        slices.emplace_back(z, 0, QRhiTextureSubresourceUploadDescription(keepAlive.back()));
+    }
+    description.setEntries(slices.cbegin(), slices.cend());
+    batch.uploadTexture(texture.get(), description);
+    return texture;
+}
+
+/// Upload a baked curve table as a 1024x1 RGBA32F texture.
+///
+/// RGBA rather than RGB: three-component float textures are not universally
+/// supported for sampling, and a quarter of 16 kB is not worth the risk of a
+/// format that works on one machine and not the next.
+/// The grade's lookup tables, as one two-row texture.
+///
+/// Row 0 is the tone curves, indexed by `CurveTable::indexFor`; row 1 is
+/// saturation against hue, indexed by hue; row 2 is saturation against
+/// brightness, indexed as row 0 is; row 3 is the hue shift, indexed by hue and
+/// holding an offset in turns -- an offset rather than a destination because a
+/// destination wraps and cannot be interpolated across the seam. Rows of one texture rather than a
+/// texture each, because every extra sampler is another binding to add at eight call sites and
+/// another fallback to get right at each of them -- and a binding missed is undefined behaviour
+/// rather than a compile error.
+///
+/// Sampled at each row's texel centre -- 1/8, 3/8, 5/8, 7/8 for four rows -- so the
+/// linear filter returns that row exactly rather than a blend of its
+/// neighbours. Those coordinates move whenever a row is added, which is why
+/// they are named here and in the shader rather than written as bare numbers.
+///
+/// Either table may be absent, and the row it would have filled is left at
+/// values the shader's flags stop it reading.
+std::unique_ptr<QRhiTexture> makeCurveTexture(QRhi& rhi, QRhiResourceUpdateBatch& batch,
+                                              const render::CurveTable* table,
+                                              const render::ColorCurveTable* hue) {
+    constexpr int kEntries = render::CurveTable::kEntries;
+    auto texture = std::unique_ptr<QRhiTexture>(rhi.newTexture(
+        QRhiTexture::RGBA32F, QSize(kEntries, 4), 1, QRhiTexture::UsedAsTransferSource));
+    if (!texture->create()) {
+        return nullptr;
+    }
+
+    std::vector<float> padded(static_cast<std::size_t>(kEntries) * 4 * 4, 0.0F);
+    const float* entries = table != nullptr ? table->data() : nullptr;
+    for (int i = 0; i < kEntries; ++i) {
+        for (int channel = 0; channel < 3; ++channel) {
+            padded[(static_cast<std::size_t>(i) * 4) + static_cast<std::size_t>(channel)] =
+                entries != nullptr
+                    ? entries[(static_cast<std::size_t>(i) * 3) + static_cast<std::size_t>(channel)]
+                    : 0.0F;
+        }
+        padded[(static_cast<std::size_t>(i) * 4) + 3] = 1.0F;
+    }
+    // The hue row, resampled to the texture's width at texel centres, so the
+    // GPU's linear filter walks the same interpolation the CPU's own table
+    // does. The one place they cannot agree exactly is the half texel either
+    // side of red, where the CPU wraps and a clamped sampler does not -- about
+    // a fifth of a degree of hue, and the sampler is shared with the tone row,
+    // which must clamp.
+    const std::size_t second = static_cast<std::size_t>(kEntries) * 4;
+    const std::size_t third = second * 2;
+    const std::size_t fourth = second * 3;
+    for (int i = 0; i < kEntries; ++i) {
+        const float turn = (static_cast<float>(i) + 0.5F) / static_cast<float>(kEntries);
+        const float value = hue != nullptr ? hue->saturationAt(turn) : 1.0F;
+        const std::size_t at = second + (static_cast<std::size_t>(i) * 4);
+        padded[at] = value;
+        padded[at + 1] = value;
+        padded[at + 2] = value;
+        padded[at + 3] = 1.0F;
+
+        // Row 2 is indexed the way row 0 is, so the shader can reuse the index
+        // it already computed for the tone curves rather than deriving a second
+        // one that would have to agree with it.
+        const float linear =
+            render::CurveTable::linearFor(static_cast<float>(i) / static_cast<float>(kEntries - 1));
+        const float byLuma = hue != nullptr ? hue->saturationAtLuma(linear) : 1.0F;
+        const std::size_t atLuma = third + (static_cast<std::size_t>(i) * 4);
+        padded[atLuma] = byLuma;
+        padded[atLuma + 1] = byLuma;
+        padded[atLuma + 2] = byLuma;
+        padded[atLuma + 3] = 1.0F;
+
+        // Row 3: how far this hue moves, *before* the wrap. The destination
+        // cannot go in a texture that is sampled with linear filtering: it
+        // wraps, and a blend between 0.98 and 0.03 is 0.5 -- a hue on the far
+        // side of the circle from either, which is a visible wrong pixel
+        // wherever the curve crosses red. The offset is continuous there, so
+        // the shader interpolates it and wraps afterwards, in that order,
+        // exactly as `ColorCurveTable::shiftedHue` does.
+        const float destination = hue != nullptr ? hue->hueOffsetAt(turn) : 0.0F;
+        const std::size_t atShift = fourth + (static_cast<std::size_t>(i) * 4);
+        padded[atShift] = destination;
+        padded[atShift + 1] = destination;
+        padded[atShift + 2] = destination;
+        padded[atShift + 3] = 1.0F;
+    }
+
+    QImage staging(reinterpret_cast<const uchar*>(padded.data()), kEntries, 4,
+                   kEntries * 4 * static_cast<int>(sizeof(float)), QImage::Format_RGBA32FPx4);
+    QRhiTextureSubresourceUploadDescription upload(staging.copy());
+    batch.uploadTexture(texture.get(), QRhiTextureUploadDescription({0, 0, upload}));
+    return texture;
+}
+
+void writeGrade(std::array<float, kUniformFloats>& uniformData, const render::GradeConstants& grade,
+                bool curved, const render::SecondaryConstants* secondary, bool shaped = false) {
+    uniformData[20] = grade.balance.r;
+    uniformData[21] = grade.balance.g;
+    uniformData[22] = grade.balance.b;
+    uniformData[23] = grade.exposure;
+    uniformData[24] = grade.contrast;
+    uniformData[25] = grade.saturation;
+    // A flag rather than an identity table: sampling one would round every
+    // ungraded pixel through the table's own resolution, and an ungraded clip
+    // has to come out bit-identical.
+    uniformData[26] = curved ? 1.0F : 0.0F;
+    // And the same for the hue curve, for the same reason: sampling an
+    // identity row would round every ungraded pixel through the table's
+    // resolution, and an ungraded clip has to come out bit-identical.
+    uniformData[27] = shaped ? 1.0F : 0.0F;
+
+    // The three wheels. Written here with the rest of the primary, so a call
+    // site cannot pick up one and forget the other.
+    for (std::size_t channel = 0; channel < 3; ++channel) {
+        uniformData[80 + channel] = grade.slope[channel];
+        uniformData[84 + channel] = grade.offset[channel];
+        uniformData[88 + channel] = grade.power[channel];
+    }
+    uniformData[91] = grade.wheels ? 1.0F : 0.0F;
+
+    // Five more vec4s: the secondary's own correction and its three windows.
+    // Written here rather than at each call site for the same reason the flag
+    // is -- a site that forgot them would key on zeros, which selects nothing
+    // and looks exactly like a feature that is switched off.
+    const bool keyed = secondary != nullptr && secondary->isActive();
+    uniformData[28] = keyed ? secondary->grade.balance.r : 1.0F;
+    uniformData[29] = keyed ? secondary->grade.balance.g : 1.0F;
+    uniformData[30] = keyed ? secondary->grade.balance.b : 1.0F;
+    uniformData[31] = keyed ? secondary->grade.exposure : 1.0F;
+    uniformData[32] = keyed ? secondary->grade.contrast : 1.0F;
+    uniformData[33] = keyed ? secondary->grade.saturation : 1.0F;
+    uniformData[34] = keyed && secondary->showMask ? 1.0F : 0.0F;
+    uniformData[35] = keyed ? 1.0F : 0.0F;
+    if (!keyed) {
+        return;
+    }
+    const render::QualifierConstants& window = secondary->qualifier;
+    uniformData[36] = window.hueCentre;
+    uniformData[37] = window.hueInner;
+    uniformData[38] = window.hueOuter;
+    uniformData[40] = window.satInnerLow;
+    uniformData[41] = window.satOuterLow;
+    uniformData[42] = window.satInnerHigh;
+    uniformData[43] = window.satOuterHigh;
+    uniformData[44] = window.lumaInnerLow;
+    uniformData[45] = window.lumaOuterLow;
+    uniformData[46] = window.lumaInnerHigh;
+    uniformData[47] = window.lumaOuterHigh;
+}
+
+/// The display pass's knee. Written on every draw, because a composite that
+/// left the slot alone would inherit whatever the last present wrote and tone
+/// map a clip on its way into the frame rather than the frame on its way to the
+/// screen.
+void writeDisplay(std::array<float, kUniformFloats>& uniformData, float knee) {
+    uniformData[76] = knee;
+}
+
+void writeKeyer(std::array<float, kUniformFloats>& uniformData,
+                const render::KeyerConstants* keyer) {
+    // Written unconditionally, like the secondary above and for the same
+    // reason: a call site that forgot would leave a kind of zero, which keys
+    // nothing and looks exactly like a feature that is switched off.
+    const bool keying = keyer != nullptr && keyer->isActive();
+    if (!keying) {
+        uniformData[63] = 0.0F;  // no key
+        return;
+    }
+    uniformData[60] = keyer->keyR;
+    uniformData[61] = keyer->keyG;
+    uniformData[62] = keyer->keyB;
+    uniformData[63] = keyer->kind == model::KeyKind::Luma ? 2.0F : 1.0F;
+    uniformData[64] = keyer->tolerance;
+    uniformData[65] = keyer->outer;
+    uniformData[66] = keyer->spill;
+    uniformData[67] = static_cast<float>(keyer->spillChannel);
+    uniformData[68] = keyer->lumaInnerLow;
+    uniformData[69] = keyer->lumaOuterLow;
+    uniformData[70] = keyer->lumaInnerHigh;
+    uniformData[71] = keyer->lumaOuterHigh;
+    uniformData[72] = keyer->showMatte ? 1.0F : 0.0F;
+}
+
+void writeLook(std::array<float, kUniformFloats>& uniformData, const render::LutTable* lut,
+               float amount) {
+    const bool looked = lut != nullptr && lut->isValid() && amount > 0.0F;
+    uniformData[48] = looked ? amount : 0.0F;
+    uniformData[49] = looked ? lut->axisMax() : 1.0F;
+    uniformData[50] = looked ? 1.0F : 0.0F;
+    // The size travels with the cube rather than being written out in the
+    // shader, so the two cannot disagree about how big it is.
+    uniformData[51] = static_cast<float>(render::LutTable::kSize);
+}
+
+/// Written on every draw, like the display knee and for the same reason: a
+/// draw that left the slot alone would inherit the last one's vignette.
+void writeVignette(std::array<float, kUniformFloats>& uniformData,
+                   const model::Vignette* vignette) {
+    const bool set = vignette != nullptr && vignette->isSet();
+    uniformData[92] = set ? static_cast<float>(vignette->amount) : 0.0F;
+    uniformData[93] = set ? static_cast<float>(vignette->midpoint) : 0.0F;
+    uniformData[94] = set ? static_cast<float>(vignette->feather) : 1.0F;
+    uniformData[95] = set ? static_cast<float>(vignette->roundness) : 1.0F;
+}
+
+/// A wipe's mask, in the slots beside the clip's own.
+void writeWipe(std::array<float, kUniformFloats>& uniformData, const model::Mask* wipe) {
+    if (wipe == nullptr || !wipe->isSet()) {
+        // The shape flag itself, which lives in the second vector. The block is
+        // zero-initialised on every draw so this is already 0, but writing the
+        // slot that is actually read beats writing one that happens to be
+        // beside it.
+        uniformData[102] = 0.0F;
+        return;
+    }
+    uniformData[96] = static_cast<float>(wipe->width * 0.5);
+    uniformData[97] = static_cast<float>(wipe->height * 0.5);
+    uniformData[98] = static_cast<float>(wipe->centreX);
+    uniformData[99] = static_cast<float>(wipe->centreY);
+    uniformData[100] = static_cast<float>(wipe->cornerRadius);
+    uniformData[101] = static_cast<float>(wipe->feather);
+    uniformData[102] = wipe->shape == model::MaskShape::Ellipse ? 2.0F : 1.0F;
+    uniformData[103] = wipe->inverted ? 1.0F : 0.0F;
+}
+
+/// The part of the source a crop keeps, as texture coordinates: left, right,
+/// top, bottom.
+///
+/// Written on every path that binds these shaders, an uncropped clip included,
+/// for the reason the gamut rows are written even when they are the identity: a
+/// zero-filled block is the rectangle from 0 to 0, and the fragment shader
+/// discards everything outside the rectangle -- so the failure would not be a
+/// missing crop, it would be a picture that never appears.
+void writeCrop(std::array<float, kUniformFloats>& uniformData, const model::Transform& transform) {
+    const auto fraction = [](double percent) {
+        return static_cast<float>(std::clamp(percent, 0.0, 100.0) / 100.0);
+    };
+    uniformData[104] = fraction(transform.cropLeft);
+    uniformData[105] = 1.0F - fraction(transform.cropRight);
+    uniformData[106] = fraction(transform.cropTop);
+    uniformData[107] = 1.0F - fraction(transform.cropBottom);
+}
+
+void writeMask(std::array<float, kUniformFloats>& uniformData, const model::Mask* mask,
+               QSize frame) {
+    // The frame size travels with every draw: the vertex shader needs it to
+    // turn a clip position back into output pixels, which is the space a mask
+    // is written in.
+    uniformData[18] = static_cast<float>(frame.width());
+    uniformData[19] = static_cast<float>(frame.height());
+    if (mask == nullptr || !mask->isSet()) {
+        // Slot 58 is the shape flag; 54 is the centre. Both are zero in a
+        // freshly initialised block, which is why writing the wrong one was
+        // harmless -- but only by accident.
+        uniformData[58] = 0.0F;
+        return;
+    }
+    uniformData[52] = static_cast<float>(mask->width * 0.5);
+    uniformData[53] = static_cast<float>(mask->height * 0.5);
+    // Slots 54 and 55 are the centre; the shape flag lives in the next vector.
+    uniformData[54] = static_cast<float>(mask->centreX);
+    uniformData[55] = static_cast<float>(mask->centreY);
+    uniformData[56] = static_cast<float>(mask->cornerRadius);
+    uniformData[57] = static_cast<float>(mask->feather);
+    uniformData[58] = mask->shape == model::MaskShape::Ellipse ? 2.0F : 1.0F;
+    uniformData[59] = mask->inverted ? 1.0F : 0.0F;
+}
+/// Where the source's gamut conversion sits: the last three vec4s, one row of
+/// the matrix each, in .xyz.
+constexpr std::size_t kGamutFloat = kUniformFloats - 12;
+/// And the Y'CbCr parameters, the two vec4s before those.
+///
+/// Derived from the gamut rows rather than from the end of the block, so that
+/// appending another field moves one constant and not two -- which is the bug
+/// this layout invites, and it is silent: the shader would read a grade where
+/// it expected a coefficient.
+constexpr std::size_t kChromaFloat = kGamutFloat - 8;
+
+QShader loadShader(const char* path) {
+    QFile file(QString::fromUtf8(path));
+    if (!file.open(QIODevice::ReadOnly)) {
+        return {};
+    }
+    return QShader::fromSerialized(file.readAll());
+}
+
+/// Blend state matching the CPU reference exactly, on premultiplied values.
+void configureBlend(QRhiGraphicsPipeline::TargetBlend& target, BlendMode mode) {
+    target.enable = true;
+    target.opColor = QRhiGraphicsPipeline::Add;
+    target.opAlpha = QRhiGraphicsPipeline::Add;
+    target.srcAlpha = QRhiGraphicsPipeline::One;
+    target.dstAlpha = QRhiGraphicsPipeline::OneMinusSrcAlpha;
+
+    switch (mode) {
+        case BlendMode::Add:
+            target.srcColor = QRhiGraphicsPipeline::One;
+            target.dstColor = QRhiGraphicsPipeline::One;
+            break;
+        case BlendMode::Multiply:
+            // src*dst + dst*(1-srcA)
+            target.srcColor = QRhiGraphicsPipeline::DstColor;
+            target.dstColor = QRhiGraphicsPipeline::OneMinusSrcAlpha;
+            break;
+        case BlendMode::Screen:
+            // src + dst - src*dst
+            target.srcColor = QRhiGraphicsPipeline::One;
+            target.dstColor = QRhiGraphicsPipeline::OneMinusSrcColor;
+            break;
+        case BlendMode::Normal:
+        default:
+            // Porter-Duff `over` on premultiplied values.
+            target.srcColor = QRhiGraphicsPipeline::One;
+            target.dstColor = QRhiGraphicsPipeline::OneMinusSrcAlpha;
+            break;
+    }
+}
+
+}  // namespace
+
+struct GpuCompositor::State {
+#if ZARO_HAS_VULKAN
+    /// The instance the Vulkan device was created from, when that is the
+    /// backend and we created it. Declared before ownedRhi so that it is
+    /// destroyed *after* it: the device outlives nothing, the instance
+    /// outlives the device.
+    std::unique_ptr<QVulkanInstance> vulkanInstance;
+#endif
+
+    /// Set only when this compositor created the device. When a device is
+    /// adopted this stays null and `rhi` points at someone else's.
+    std::unique_ptr<QRhi> ownedRhi;
+    QRhi* rhi{nullptr};
+
+    // Presenting into an external target needs its own pipeline, because a
+    // pipeline is tied to the render pass it was built for.
+    std::unique_ptr<QRhiGraphicsPipeline> presentPipeline;
+    /// Where the preview's highlights start rolling off. 1 is no rolloff.
+    double presentKnee{1.0};
+    std::unique_ptr<QRhiShaderResourceBindings> presentBindings;
+    std::unique_ptr<QRhiBuffer> presentUniforms;
+    std::unique_ptr<QRhiBuffer> vertexBuffer;
+    std::unique_ptr<QRhiSampler> sampler;
+    QShader vertexShader;
+    QShader fragmentShader;
+    QShader yuvFragmentShader;
+
+    // One pipeline per blend mode per source kind, built on first use.
+    // Pipelines are expensive to create and cheap to keep.
+    std::array<std::unique_ptr<QRhiGraphicsPipeline>, 4> pipelines;
+    std::array<std::unique_ptr<QRhiShaderResourceBindings>, 4> bindingLayouts;
+    std::array<std::unique_ptr<QRhiGraphicsPipeline>, 4> yuvPipelines;
+    std::array<std::unique_ptr<QRhiShaderResourceBindings>, 4> yuvBindingLayouts;
+    std::unique_ptr<QRhiSampler> chromaSampler;
+    /// Bound wherever a curve table is not in use. The binding has to exist
+    /// because the pipeline layout says it does; the shader never reads it.
+    std::unique_ptr<QRhiTexture> noCurve;
+    std::unique_ptr<QRhiTexture> noLut;
+
+    /// A linear-light staging surface for one source in one frame.
+    ///
+    /// Conversion has to finish before the transform samples anything, so the
+    /// two cannot share a pass. These are pooled by draw slot and reused across
+    /// frames: allocating a texture per clip per frame would cost more than the
+    /// pass it serves.
+    struct Intermediate {
+        std::unique_ptr<QRhiTexture> texture;
+        std::unique_ptr<QRhiTextureRenderTarget> target;
+        QSize size;
+
+        /// The decoder's planes, uploaded into textures owned by this slot.
+        ///
+        /// Pooled for the reason the staging surface above is: a plane texture
+        /// is the frame itself -- 33 MB of one for 4K 10-bit -- and building
+        /// three of them per clip per frame costs more than the pass they feed.
+        /// Per slot rather than per compositor because two clips are on screen
+        /// at once and neither may overwrite what the other's queued draw still
+        /// reads.
+        struct Plane {
+            std::unique_ptr<QRhiTexture> texture;
+            QSize size;
+            QRhiTexture::Format format{QRhiTexture::UnknownFormat};
+        };
+        std::array<Plane, 3> planes;
+    };
+    std::vector<Intermediate> intermediates;
+    std::size_t intermediateIndex{0};
+
+    /// One descriptor for every staging surface, owned here.
+    ///
+    /// Every staging texture has the same format, and a QRhi render pass
+    /// descriptor is compatible with any target of the same format -- that is
+    /// what "compatible" means in `newCompatibleRenderPassDescriptor`. So there
+    /// is one, and it lives as long as the compositor.
+    ///
+    /// It used to be a raw pointer into whichever slot created the first one,
+    /// and that was a use-after-free waiting for two ordinary things to happen
+    /// together. A change of output size clears the conversion pipeline so it
+    /// will be rebuilt; a change of *source* size makes a slot destroy and
+    /// recreate its descriptor. Opening a second project does both at once. The
+    /// rebuilt pipeline was handed freed memory, and Metal aborted the process
+    /// from inside a repaint, reporting a colour attachment with an invalid
+    /// pixel format and nothing in the stack to say why.
+    std::unique_ptr<QRhiRenderPassDescriptor> intermediatePass;
+
+    std::unique_ptr<QRhiTexture> target;
+    std::unique_ptr<QRhiTextureRenderTarget> renderTarget;
+    std::unique_ptr<QRhiRenderPassDescriptor> renderPass;
+
+    // One texture and uniform buffer per draw in a frame: a clip's source
+    // cannot be overwritten while the draw that uses it is still queued.
+    std::vector<std::unique_ptr<QRhiTexture>> sourceTextures;
+    std::vector<std::unique_ptr<QRhiBuffer>> uniformBuffers;
+    std::vector<std::unique_ptr<QRhiShaderResourceBindings>> bindings;
+
+    /// A draw recorded during the frame, replayed inside the single render
+    /// pass that endFrame opens.
+    struct PendingDraw {
+        QRhiGraphicsPipeline* pipeline{nullptr};
+        QRhiShaderResourceBindings* bindings{nullptr};
+    };
+    std::vector<PendingDraw> draws;
+
+    QRhiCommandBuffer* commandBuffer{nullptr};
+    QSize size;
+    bool inFrame{false};
+    /// False when recording into a command buffer someone else owns.
+    bool ownsFrame{true};
+};
+
+GpuCompositor::GpuCompositor() = default;
+GpuCompositor::~GpuCompositor() {
+    if (state_ && state_->inFrame && state_->rhi) {
+        state_->rhi->endOffscreenFrame();
+    }
+}
+
+namespace {
+
+/// Everything that has to exist on whichever device the compositor ends up
+/// using. Shared between creating a device and adopting one.
+Status buildDeviceResources(GpuCompositor::State& state);
+
+}  // namespace
+
+Result<std::unique_ptr<GpuCompositor>> GpuCompositor::create() {
+    auto compositor = std::unique_ptr<GpuCompositor>(new GpuCompositor());
+    compositor->state_ = std::make_unique<State>();
+    State& state = *compositor->state_;
+
+#if defined(Q_OS_MACOS)
+    QRhiMetalInitParams params;
+    state.ownedRhi.reset(QRhi::create(QRhi::Metal, &params));
+#elif defined(Q_OS_WIN)
+    QRhiD3D11InitParams params;
+    state.ownedRhi.reset(QRhi::create(QRhi::D3D11, &params));
+// Where Vulkan is unavailable -- Qt built without it, or a machine with no
+// Vulkan headers, such as a CI image with no libvulkan-dev -- no branch is
+// compiled at all, ownedRhi stays null, and the check below reports an
+// unsupported backend. That is the same answer callers get from a machine
+// whose driver refuses to initialise, and the compositor tests skip on it.
+#elif ZARO_HAS_VULKAN
+    // Vulkan is the one backend that needs an instance before it can have a
+    // device, and QRhi will not make one: it dereferences params.inst during
+    // create(). Leaving it null is not a failed create returning null, it is a
+    // null-pointer crash inside Qt -- which is what every GPU test did on the
+    // first CI machine to have the Vulkan headers installed.
+    //
+    // And a QVulkanInstance is built by the platform integration, which exists
+    // only once a QGuiApplication does. Asking for one before then is the same
+    // crash a step earlier, so a caller without a GUI application -- the
+    // headless test binaries, among others -- is told there is no backend
+    // rather than being taken down.
+    if (qGuiApp == nullptr) {
+        return Error{ErrorCode::Unsupported,
+                     "Vulkan needs a QGuiApplication before a device can be created"};
+    }
+    auto instance = std::make_unique<QVulkanInstance>();
+    if (!instance->create()) {
+        return Error{ErrorCode::Unsupported, "no Vulkan instance is available"};
+    }
+    QRhiVulkanInitParams params;
+    params.inst = instance.get();
+    state.vulkanInstance = std::move(instance);
+    state.ownedRhi.reset(QRhi::create(QRhi::Vulkan, &params));
+#endif
+    if (!state.ownedRhi) {
+        return Error{ErrorCode::Unsupported, "no GPU backend is available"};
+    }
+    state.rhi = state.ownedRhi.get();
+
+    if (Status status = buildDeviceResources(state); !status) {
+        return status.error();
+    }
+    return compositor;
+}
+
+Result<std::unique_ptr<GpuCompositor>> GpuCompositor::adopt(::QRhi& device) {
+    auto compositor = std::unique_ptr<GpuCompositor>(new GpuCompositor());
+    compositor->state_ = std::make_unique<State>();
+    State& state = *compositor->state_;
+
+    // Borrowed, not owned. The widget that handed us this device outlives us
+    // and will destroy it itself.
+    state.rhi = reinterpret_cast<QRhi*>(&device);
+
+    if (Status status = buildDeviceResources(state); !status) {
+        return status.error();
+    }
+    return compositor;
+}
+
+namespace {
+
+Status buildDeviceResources(GpuCompositor::State& state) {
+    state.vertexShader = loadShader(":/zaro/shaders/composite.vert.qsb");
+    state.fragmentShader = loadShader(":/zaro/shaders/composite.frag.qsb");
+    state.yuvFragmentShader = loadShader(":/zaro/shaders/composite_yuv.frag.qsb");
+    if (!state.vertexShader.isValid() || !state.fragmentShader.isValid() ||
+        !state.yuvFragmentShader.isValid()) {
+        return Error{ErrorCode::Internal, "the compositing shaders are missing from the build"};
+    }
+
+    state.vertexBuffer.reset(
+        state.rhi->newBuffer(QRhiBuffer::Immutable, QRhiBuffer::VertexBuffer, sizeof(kQuad)));
+    if (!state.vertexBuffer->create()) {
+        return Error{ErrorCode::Internal, "cannot allocate a vertex buffer"};
+    }
+
+    // Linear filtering, to match the CPU reference's bilinear sampling.
+    state.sampler.reset(state.rhi->newSampler(QRhiSampler::Linear, QRhiSampler::Linear,
+                                              QRhiSampler::None, QRhiSampler::ClampToEdge,
+                                              QRhiSampler::ClampToEdge));
+    if (!state.sampler->create()) {
+        return Error{ErrorCode::Internal, "cannot create a sampler"};
+    }
+
+    // Nearest for chroma, deliberately. Linear would interpolate the subsampled
+    // planes, which looks better, but the CPU reference takes the nearest
+    // chroma sample and the whole point of that reference is that the two agree.
+    // Proper chroma siting and interpolation is a real improvement and should
+    // change both paths together, not drift them apart.
+    state.noCurve.reset(state.rhi->newTexture(QRhiTexture::RGBA32F, QSize(1, 1), 1,
+                                              QRhiTexture::UsedAsTransferSource));
+    if (!state.noCurve->create()) {
+        return Error{ErrorCode::Internal, "cannot allocate the placeholder curve texture"};
+    }
+
+    state.noLut.reset(
+        state.rhi->newTexture(QRhiTexture::RGBA32F, 1, 1, 1, 1, QRhiTexture::UsedAsTransferSource));
+    if (state.noLut == nullptr || !state.noLut->create()) {
+        return Error{ErrorCode::Internal, "cannot allocate the placeholder look texture"};
+    }
+
+    state.chromaSampler.reset(state.rhi->newSampler(QRhiSampler::Nearest, QRhiSampler::Nearest,
+                                                    QRhiSampler::None, QRhiSampler::ClampToEdge,
+                                                    QRhiSampler::ClampToEdge));
+    if (!state.chromaSampler->create()) {
+        return Error{ErrorCode::Internal, "cannot create a chroma sampler"};
+    }
+    return {};
+}
+
+}  // namespace
+
+std::string GpuCompositor::backendName() const {
+    return state_->rhi ? state_->rhi->backendName() : "none";
+}
+
+Status GpuCompositor::ensureTarget(std::int32_t width, std::int32_t height) {
+    State& state = *state_;
+    if (width <= 0 || height <= 0) {
+        return Error{ErrorCode::InvalidData, "the output has no size"};
+    }
+
+    const QSize wanted(width, height);
+    if (!state.target || state.size != wanted) {
+        state.size = wanted;
+        state.target.reset(
+            state.rhi->newTexture(QRhiTexture::RGBA32F, wanted, 1,
+                                  QRhiTexture::RenderTarget | QRhiTexture::UsedAsTransferSource));
+        if (!state.target->create()) {
+            return Error{ErrorCode::Unsupported, "this GPU cannot render to a 32-bit float target"};
+        }
+        QRhiColorAttachment attachment(state.target.get());
+        state.renderTarget.reset(
+            state.rhi->newTextureRenderTarget(QRhiTextureRenderTargetDescription(attachment)));
+        state.renderPass.reset(state.renderTarget->newCompatibleRenderPassDescriptor());
+        state.renderTarget->setRenderPassDescriptor(state.renderPass.get());
+        if (!state.renderTarget->create()) {
+            return Error{ErrorCode::Internal, "cannot create a render target"};
+        }
+        state.pipelines = {};
+        state.bindingLayouts = {};
+        state.yuvPipelines = {};
+        state.yuvBindingLayouts = {};
+        state.presentPipeline.reset();
+        state.presentBindings.reset();
+    }
+    return {};
+}
+
+void GpuCompositor::startRecording() {
+    State& state = *state_;
+    state.inFrame = true;
+    state.sourceTextures.clear();
+    state.uniformBuffers.clear();
+    state.bindings.clear();
+    state.draws.clear();
+    state.intermediateIndex = 0;
+
+    // Uploads happen outside the render pass, which is also why there is only
+    // one pass: beginPass clears the target, so opening a pass per draw would
+    // wipe out everything already composited. Every clip in a frame is drawn
+    // inside the single pass that endFrame opens.
+    QRhiResourceUpdateBatch* batch = state.rhi->nextResourceUpdateBatch();
+    batch->uploadStaticBuffer(state.vertexBuffer.get(), kQuad.data());
+    state.commandBuffer->resourceUpdate(batch);
+}
+
+Status GpuCompositor::beginFrame(std::int32_t width, std::int32_t height) {
+    State& state = *state_;
+    if (state.inFrame) {
+        return Error{ErrorCode::Internal, "a frame is already in progress"};
+    }
+    if (Status status = ensureTarget(width, height); !status) {
+        return status;
+    }
+    if (state.rhi->beginOffscreenFrame(&state.commandBuffer) != QRhi::FrameOpSuccess) {
+        return Error{ErrorCode::Internal, "cannot begin a GPU frame"};
+    }
+    state.ownsFrame = true;
+    startRecording();
+    return {};
+}
+
+Status GpuCompositor::beginFrameOn(::QRhiCommandBuffer* commandBuffer, std::int32_t width,
+                                   std::int32_t height) {
+    State& state = *state_;
+    if (state.inFrame) {
+        return Error{ErrorCode::Internal, "a frame is already in progress"};
+    }
+    if (commandBuffer == nullptr) {
+        return Error{ErrorCode::InvalidData, "beginFrameOn needs a command buffer"};
+    }
+    if (Status status = ensureTarget(width, height); !status) {
+        return status;
+    }
+    // Record into the caller's frame. A widget has already opened one by the
+    // time it asks us to draw, and opening a second would be an error rather
+    // than a nesting.
+    state.commandBuffer = reinterpret_cast<QRhiCommandBuffer*>(commandBuffer);
+    state.ownsFrame = false;
+    startRecording();
+    return {};
+}
+
+Status GpuCompositor::ensureCompositePipeline(std::size_t blendIndex) {
+    State& state = *state_;
+    if (state.pipelines[blendIndex]) {
+        return {};
+    }
+
+    auto layout =
+        std::unique_ptr<QRhiShaderResourceBindings>(state.rhi->newShaderResourceBindings());
+    layout->setBindings({
+        // Null resources: this set exists only to describe the layout the
+        // pipeline is built against. The real buffers are bound per draw.
+        QRhiShaderResourceBinding::uniformBuffer(
+            0, QRhiShaderResourceBinding::VertexStage | QRhiShaderResourceBinding::FragmentStage,
+            nullptr),
+        QRhiShaderResourceBinding::sampledTexture(1, QRhiShaderResourceBinding::FragmentStage,
+                                                  nullptr, nullptr),
+        QRhiShaderResourceBinding::sampledTexture(2, QRhiShaderResourceBinding::FragmentStage,
+                                                  nullptr, nullptr),
+        QRhiShaderResourceBinding::sampledTexture(3, QRhiShaderResourceBinding::FragmentStage,
+                                                  nullptr, nullptr),
+    });
+    if (!layout->create()) {
+        return Error{ErrorCode::Internal, "cannot create a resource binding layout"};
+    }
+
+    auto pipeline = std::unique_ptr<QRhiGraphicsPipeline>(state.rhi->newGraphicsPipeline());
+    QRhiGraphicsPipeline::TargetBlend target;
+    configureBlend(target, static_cast<BlendMode>(blendIndex));
+    pipeline->setTargetBlends({target});
+    pipeline->setShaderStages({{QRhiShaderStage::Vertex, state.vertexShader},
+                               {QRhiShaderStage::Fragment, state.fragmentShader}});
+
+    QRhiVertexInputLayout inputLayout;
+    inputLayout.setBindings({{2 * sizeof(float)}});
+    inputLayout.setAttributes({{0, 0, QRhiVertexInputAttribute::Float2, 0}});
+    pipeline->setVertexInputLayout(inputLayout);
+    pipeline->setShaderResourceBindings(layout.get());
+    pipeline->setRenderPassDescriptor(state.renderPass.get());
+    if (!pipeline->create()) {
+        return Error{ErrorCode::Internal, "cannot create a graphics pipeline"};
+    }
+    state.bindingLayouts[blendIndex] = std::move(layout);
+    state.pipelines[blendIndex] = std::move(pipeline);
+    return {};
+}
+
+Status GpuCompositor::draw(const render::RgbaImage& source, const model::Transform& transform,
+                           BlendMode blend, const render::GradeConstants& grade,
+                           const render::CurveTable* curves,
+                           const render::SecondaryConstants* secondary, const render::LutTable* lut,
+                           float lutAmount, const model::Mask* mask,
+                           const render::KeyerConstants* keyer, const model::Vignette* vignette,
+                           const model::Mask* wipe, const render::ColorCurveTable* hue) {
+    State& state = *state_;
+    if (!state.inFrame) {
+        return Error{ErrorCode::Internal, "draw outside a frame"};
+    }
+    if (!source.isValid()) {
+        return Error{ErrorCode::InvalidData, "cannot draw an invalid image"};
+    }
+    if (transform.opacity <= 0.0 || transform.scaleX == 0.0 || transform.scaleY == 0.0) {
+        return {};
+    }
+
+    const auto blendIndex = static_cast<std::size_t>(blend);
+    if (Status ready = ensureCompositePipeline(blendIndex); !ready) {
+        return ready;
+    }
+
+    // Upload the source. RGBA32F straight from the working space, so nothing is
+    // quantised on the way to the GPU.
+    auto texture = std::unique_ptr<QRhiTexture>(
+        state.rhi->newTexture(QRhiTexture::RGBA32F, QSize(source.width(), source.height()), 1,
+                              QRhiTexture::UsedAsTransferSource));
+    if (!texture->create()) {
+        return Error{ErrorCode::Internal, "cannot allocate a source texture"};
+    }
+
+    QImage staging(reinterpret_cast<const uchar*>(source.row(0)), source.width(), source.height(),
+                   source.width() * static_cast<int>(sizeof(render::Rgba)),
+                   QImage::Format_RGBA32FPx4);
+    QRhiTextureSubresourceUploadDescription upload(staging.copy());
+    QRhiTextureUploadDescription description({0, 0, upload});
+
+    // Forward transform, mirroring the inverse the CPU applies per pixel:
+    // unit quad -> source pixels -> anchor -> scale -> rotate -> position ->
+    // clip space.
+    QMatrix4x4 matrix;
+    matrix.ortho(-0.5F * static_cast<float>(state.size.width()),
+                 0.5F * static_cast<float>(state.size.width()),
+                 0.5F * static_cast<float>(state.size.height()),
+                 -0.5F * static_cast<float>(state.size.height()), -1.0F, 1.0F);
+    matrix.translate(static_cast<float>(transform.positionX),
+                     static_cast<float>(transform.positionY));
+    matrix.rotate(static_cast<float>(transform.rotationDegrees), 0.0F, 0.0F, 1.0F);
+    matrix.scale(static_cast<float>(transform.scaleX), static_cast<float>(transform.scaleY));
+    matrix.translate(static_cast<float>(-transform.anchorX),
+                     static_cast<float>(-transform.anchorY));
+    matrix.scale(0.5F * static_cast<float>(source.width()),
+                 0.5F * static_cast<float>(source.height()));
+
+    auto uniforms = std::unique_ptr<QRhiBuffer>(
+        state.rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, kUniformBytes));
+    if (!uniforms->create()) {
+        return Error{ErrorCode::Internal, "cannot allocate a uniform buffer"};
+    }
+
+    QRhiResourceUpdateBatch* batch = state.rhi->nextResourceUpdateBatch();
+    batch->uploadTexture(texture.get(), description);
+
+    const bool curved = curves != nullptr && !curves->isIdentity();
+    const bool shaped = hue != nullptr && !hue->isIdentity();
+    const bool looked = lut != nullptr && lut->isValid() && lutAmount > 0.0F;
+    std::unique_ptr<QRhiTexture> lutTexture;
+    std::unique_ptr<QRhiTexture> curveTexture;
+    if (curved || shaped) {
+        curveTexture =
+            makeCurveTexture(*state.rhi, *batch, curved ? curves : nullptr, shaped ? hue : nullptr);
+        if (curveTexture == nullptr) {
+            return Error{ErrorCode::Internal, "cannot allocate a curve texture"};
+        }
+    }
+    if (looked) {
+        lutTexture = makeLutTexture(*state.rhi, *batch, *lut);
+        if (lutTexture == nullptr) {
+            return Error{ErrorCode::Internal, "cannot allocate a look texture"};
+        }
+    }
+
+    auto bindings =
+        std::unique_ptr<QRhiShaderResourceBindings>(state.rhi->newShaderResourceBindings());
+    bindings->setBindings({
+        QRhiShaderResourceBinding::uniformBuffer(
+            0, QRhiShaderResourceBinding::VertexStage | QRhiShaderResourceBinding::FragmentStage,
+            uniforms.get(), 0, static_cast<quint32>(kUniformBytes)),
+        QRhiShaderResourceBinding::sampledTexture(1, QRhiShaderResourceBinding::FragmentStage,
+                                                  texture.get(), state.sampler.get()),
+        QRhiShaderResourceBinding::sampledTexture(
+            2, QRhiShaderResourceBinding::FragmentStage,
+            curveTexture ? curveTexture.get() : state.noCurve.get(), state.sampler.get()),
+        QRhiShaderResourceBinding::sampledTexture(3, QRhiShaderResourceBinding::FragmentStage,
+                                                  looked ? lutTexture.get() : state.noLut.get(),
+                                                  state.sampler.get()),
+    });
+    if (!bindings->create()) {
+        return Error{ErrorCode::Internal, "cannot create resource bindings"};
+    }
+
+    std::array<float, kUniformFloats> uniformData{};
+    const float* matrixData = matrix.constData();
+    for (int i = 0; i < 16; ++i) {
+        uniformData[static_cast<std::size_t>(i)] = matrixData[i];
+    }
+    uniformData[16] = static_cast<float>(transform.opacity);
+    writeGrade(uniformData, grade, curved, secondary, shaped);
+    writeLook(uniformData, lut, lutAmount);
+    writeMask(uniformData, mask, state.size);
+    writeVignette(uniformData, vignette);
+    writeWipe(uniformData, wipe);
+    writeCrop(uniformData, transform);
+    writeKeyer(uniformData, keyer);
+    writeDisplay(uniformData, 1.0F);
+    batch->updateDynamicBuffer(uniforms.get(), 0, kUniformBytes, uniformData.data());
+    state.commandBuffer->resourceUpdate(batch);
+
+    state.draws.push_back(State::PendingDraw{state.pipelines[blendIndex].get(), bindings.get()});
+
+    // Keep everything alive until the frame is submitted. The bindings hold
+    // raw pointers to all of it, so anything dropped here is read after it is
+    // freed -- which is a segfault, not a wrong picture.
+    state.sourceTextures.push_back(std::move(texture));
+    if (curveTexture != nullptr) {
+        state.sourceTextures.push_back(std::move(curveTexture));
+    }
+    if (lutTexture != nullptr) {
+        state.sourceTextures.push_back(std::move(lutTexture));
+    }
+    state.uniformBuffers.push_back(std::move(uniforms));
+    state.bindings.push_back(std::move(bindings));
+    return {};
+}
+
+/// One pass for the whole frame. Transparent black to start with, not opaque
+/// black: a frame with nothing on it is empty, and the difference matters as
+/// soon as anything is exported with an alpha channel.
+void GpuCompositor::submitPass() {
+    State& state = *state_;
+    QRhiCommandBuffer* cb = state.commandBuffer;
+    cb->beginPass(state.renderTarget.get(), QColor::fromRgbF(0, 0, 0, 0), {1.0F, 0});
+    const QRhiCommandBuffer::VertexInput vertexInput(state.vertexBuffer.get(), 0);
+    for (const State::PendingDraw& pending : state.draws) {
+        cb->setGraphicsPipeline(pending.pipeline);
+        cb->setViewport({0, 0, static_cast<float>(state.size.width()),
+                         static_cast<float>(state.size.height())});
+        cb->setShaderResources(pending.bindings);
+        cb->setVertexInput(0, 1, &vertexInput);
+        cb->draw(6);
+    }
+    cb->endPass();
+}
+
+Status GpuCompositor::endFrameOnGpu() {
+    State& state = *state_;
+    if (!state.inFrame) {
+        return Error{ErrorCode::Internal, "endFrame without beginFrame"};
+    }
+    submitPass();
+    // Only close the frame if we opened it. When recording into someone else's
+    // command buffer, ending their frame would submit it out from under them.
+    if (state.ownsFrame) {
+        state.rhi->endOffscreenFrame();
+    }
+    state.inFrame = false;
+    return {};
+}
+
+Status GpuCompositor::endFrame(render::RgbaImage& out) {
+    State& state = *state_;
+    if (!state.inFrame) {
+        return Error{ErrorCode::Internal, "endFrame without beginFrame"};
+    }
+
+    QRhiCommandBuffer* cb = state.commandBuffer;
+
+    submitPass();
+
+    QRhiReadbackResult readback;
+    QRhiResourceUpdateBatch* batch = state.rhi->nextResourceUpdateBatch();
+    batch->readBackTexture(QRhiReadbackDescription(state.target.get()), &readback);
+    cb->resourceUpdate(batch);
+    state.rhi->endOffscreenFrame();
+    state.inFrame = false;
+
+    const int width = state.size.width();
+    const int height = state.size.height();
+    const auto expected =
+        static_cast<qsizetype>(width) * height * static_cast<qsizetype>(sizeof(render::Rgba));
+    if (readback.data.size() < expected) {
+        return Error{ErrorCode::Internal, "the GPU returned less data than the frame needs"};
+    }
+    if (out.width() != width || out.height() != height) {
+        out = render::RgbaImage{width, height};
+    }
+    std::memcpy(out.row(0), readback.data.constData(), static_cast<std::size_t>(expected));
+    return {};
+}
+
+namespace {
+
+/// How the working-space conversion is parameterised for the shader, mirroring
+/// exactly what ColorPipeline.cpp computes on the CPU.
+struct YuvParameters {
+    float sampleScale{255.0F};  ///< normalised texture sample -> raw code value
+    float lumaOffset{16.0F};
+    float lumaScale{1.0F / 219.0F};
+    float chromaScale{1.0F / 224.0F};
+    float midpoint{128.0F};
+    float transferId{0.0F};
+    float semiPlanar{0.0F};
+    float crToR{0.0F};
+    float crToG{0.0F};
+    float cbToG{0.0F};
+    float cbToB{0.0F};
+    /// The source's primaries brought into the working space's, row-major.
+    /// ADR-005 fixes the working space at Rec.709; this is the identity for a
+    /// source already in it, which is most of them.
+    render::GamutMatrix gamut;
+};
+
+int transferIdFor(media::TransferFunction transfer) {
+    switch (transfer) {
+        case media::TransferFunction::Linear:
+            return 1;
+        case media::TransferFunction::SRGB:
+            return 2;
+        case media::TransferFunction::Gamma22:
+            return 3;
+        case media::TransferFunction::Gamma28:
+            return 4;
+        case media::TransferFunction::PQ:
+            return 5;
+        case media::TransferFunction::HLG:
+            return 6;
+        case media::TransferFunction::SLog3:
+            return 7;
+        case media::TransferFunction::VLog:
+            return 8;
+        case media::TransferFunction::LogC3:
+            return 9;
+        default:
+            return 0;  // BT.709 / SMPTE 170M
+    }
+}
+
+YuvParameters parametersFor(const media::VideoFrame& source) {
+    const media::PixelFormatInfo& format = media::info(source.format());
+    const int depth = format.bitsPerComponent;
+
+    YuvParameters out;
+    // Textures are R8 or R16, so a sample comes back normalised. Multiplying by
+    // the container's maximum recovers the raw code value the CPU works with.
+    out.sampleScale = depth > 8 ? 65535.0F : 255.0F;
+    if (source.format() == media::PixelFormat::P010) {
+        // P010 left-justifies its ten bits in a sixteen-bit word.
+        out.sampleScale /= 64.0F;
+    }
+
+    const float peak = static_cast<float>((1 << depth) - 1);
+    if (source.color().range == media::ColorRange::Full) {
+        out.lumaOffset = 0.0F;
+        out.lumaScale = 1.0F / peak;
+        out.chromaScale = 1.0F / peak;
+    } else {
+        const float scale = static_cast<float>(1 << (depth - 8));
+        out.lumaOffset = 16.0F * scale;
+        out.lumaScale = 1.0F / (219.0F * scale);
+        out.chromaScale = 1.0F / (224.0F * scale);
+    }
+    out.midpoint = static_cast<float>(1 << (depth - 1));
+    out.transferId = static_cast<float>(transferIdFor(source.color().transfer));
+    out.semiPlanar = format.planeCount == 2 ? 1.0F : 0.0F;
+    // Must be the same matrix the CPU uses, from the same function -- not a
+    // second copy of the arithmetic. The golden test compares the two paths
+    // pixel for pixel, and a divergence here would show as a wide-gamut clip
+    // that plays one colour and exports another.
+    out.gamut = render::gamutMatrix(source.color().primaries, media::ColorPrimaries::BT709);
+
+    float kr = 0.2126F;
+    float kb = 0.0722F;
+    switch (source.color().matrix) {
+        case media::ColorMatrix::BT601:
+            kr = 0.299F;
+            kb = 0.114F;
+            break;
+        case media::ColorMatrix::BT2020NCL:
+            kr = 0.2627F;
+            kb = 0.0593F;
+            break;
+        case media::ColorMatrix::SMPTE240M:
+            kr = 0.212F;
+            kb = 0.087F;
+            break;
+        default:
+            break;
+    }
+    const float kg = 1.0F - kr - kb;
+    out.crToR = 2.0F * (1.0F - kr);
+    out.cbToB = 2.0F * (1.0F - kb);
+    out.crToG = out.crToR * kr / kg;
+    out.cbToG = out.cbToB * kb / kg;
+    return out;
+}
+
+}  // namespace
+
+Status GpuCompositor::drawSource(const media::VideoFrame& source, const model::Transform& transform,
+                                 const render::GradeConstants& grade, BlendMode blend,
+                                 const render::CurveTable* curves,
+                                 const render::SecondaryConstants* secondary,
+                                 const render::LutTable* lut, float lutAmount,
+                                 const model::Mask* mask, const render::KeyerConstants* keyer,
+                                 const model::Vignette* vignette, const model::Mask* wipe,
+                                 const render::ColorCurveTable* hue) {
+    State& state = *state_;
+    if (!state.inFrame) {
+        return Error{ErrorCode::Internal, "draw outside a frame"};
+    }
+    if (!source.isValid()) {
+        return Error{ErrorCode::InvalidData, "cannot draw an invalid frame"};
+    }
+    const media::PixelFormatInfo& format = media::info(source.format());
+    if (!format.isPlanarYuv) {
+        return Error{ErrorCode::Unsupported, std::string{"pixel format "} +
+                                                 media::toString(source.format()) +
+                                                 " is not a planar or semi-planar Y'CbCr layout"};
+    }
+    if (!render::isSupported(source.color())) {
+        return Error{ErrorCode::Unsupported, std::string{"transfer function '"} +
+                                                 media::toString(source.color().transfer) +
+                                                 "' has no formula here"};
+    }
+    if (transform.opacity <= 0.0 || transform.scaleX == 0.0 || transform.scaleY == 0.0) {
+        return {};
+    }
+
+    const bool deep = format.bitsPerComponent > 8;
+    const bool semiPlanar = format.planeCount == 2;
+    const QSize sourceSize(source.width(), source.height());
+
+    // --- The staging surface for this draw ---------------------------------
+    if (state.intermediateIndex >= state.intermediates.size()) {
+        state.intermediates.emplace_back();
+    }
+    State::Intermediate& staging = state.intermediates[state.intermediateIndex++];
+    if (!staging.texture || staging.size != sourceSize) {
+        staging.size = sourceSize;
+        staging.texture.reset(
+            state.rhi->newTexture(QRhiTexture::RGBA32F, sourceSize, 1, QRhiTexture::RenderTarget));
+        if (!staging.texture->create()) {
+            return Error{ErrorCode::Unsupported, "this GPU cannot render to a float target"};
+        }
+        QRhiColorAttachment attachment(staging.texture.get());
+        staging.target.reset(
+            state.rhi->newTextureRenderTarget(QRhiTextureRenderTargetDescription(attachment)));
+        if (state.intermediatePass == nullptr) {
+            state.intermediatePass.reset(staging.target->newCompatibleRenderPassDescriptor());
+        }
+        staging.target->setRenderPassDescriptor(state.intermediatePass.get());
+        if (!staging.target->create()) {
+            return Error{ErrorCode::Internal, "cannot create a staging render target"};
+        }
+    }
+
+    // --- Pipelines ---------------------------------------------------------
+    const auto blendIndex = static_cast<std::size_t>(blend);
+    if (!state.yuvPipelines[0]) {
+        auto layout =
+            std::unique_ptr<QRhiShaderResourceBindings>(state.rhi->newShaderResourceBindings());
+        layout->setBindings({
+            QRhiShaderResourceBinding::uniformBuffer(
+                0,
+                QRhiShaderResourceBinding::VertexStage | QRhiShaderResourceBinding::FragmentStage,
+                nullptr),
+            QRhiShaderResourceBinding::sampledTexture(1, QRhiShaderResourceBinding::FragmentStage,
+                                                      nullptr, nullptr),
+            QRhiShaderResourceBinding::sampledTexture(2, QRhiShaderResourceBinding::FragmentStage,
+                                                      nullptr, nullptr),
+            QRhiShaderResourceBinding::sampledTexture(3, QRhiShaderResourceBinding::FragmentStage,
+                                                      nullptr, nullptr),
+        });
+        if (!layout->create()) {
+            return Error{ErrorCode::Internal, "cannot create a resource binding layout"};
+        }
+
+        auto pipeline = std::unique_ptr<QRhiGraphicsPipeline>(state.rhi->newGraphicsPipeline());
+        // No blending: this pass produces a surface, it does not composite onto
+        // one. Compositing happens in the second pass, in linear light.
+        pipeline->setTargetBlends({QRhiGraphicsPipeline::TargetBlend{}});
+        pipeline->setShaderStages({{QRhiShaderStage::Vertex, state.vertexShader},
+                                   {QRhiShaderStage::Fragment, state.yuvFragmentShader}});
+        QRhiVertexInputLayout inputLayout;
+        inputLayout.setBindings({{2 * sizeof(float)}});
+        inputLayout.setAttributes({{0, 0, QRhiVertexInputAttribute::Float2, 0}});
+        pipeline->setVertexInputLayout(inputLayout);
+        pipeline->setShaderResourceBindings(layout.get());
+        pipeline->setRenderPassDescriptor(state.intermediatePass.get());
+        if (!pipeline->create()) {
+            return Error{ErrorCode::Internal, "cannot create the colour conversion pipeline"};
+        }
+        state.yuvBindingLayouts[0] = std::move(layout);
+        state.yuvPipelines[0] = std::move(pipeline);
+    }
+    if (Status ready = ensureCompositePipeline(blendIndex); !ready) {
+        return ready;
+    }
+
+    // --- Upload the planes as the decoder produced them ---------------------
+    QRhiResourceUpdateBatch* batch = state.rhi->nextResourceUpdateBatch();
+    const auto uploadPlane = [&](std::size_t plane, QRhiTexture::Format textureFormat,
+                                 int bytesPerTexel) -> QRhiTexture* {
+        const auto index = static_cast<std::int32_t>(plane);
+        const std::int32_t planeWidth =
+            media::rowBytes(source.format(), source.width(), index) / bytesPerTexel;
+        const std::int32_t rows = media::planeHeight(source.format(), source.height(), index);
+
+        const QSize wanted(planeWidth, rows);
+        State::Intermediate::Plane& slot = staging.planes[plane];
+        if (!slot.texture || slot.size != wanted || slot.format != textureFormat) {
+            slot.texture.reset(
+                state.rhi->newTexture(textureFormat, wanted, 1, QRhiTexture::UsedAsTransferSource));
+            if (!slot.texture->create()) {
+                slot.texture.reset();
+                return nullptr;
+            }
+            slot.size = wanted;
+            slot.format = textureFormat;
+        }
+        QRhiTextureSubresourceUploadDescription upload;
+        upload.setData(QByteArray(reinterpret_cast<const char*>(source.plane(plane)),
+                                  static_cast<qsizetype>(rows) * source.stride(plane)));
+        upload.setDataStride(static_cast<quint32>(source.stride(plane)));
+        batch->uploadTexture(slot.texture.get(), QRhiTextureUploadDescription({0, 0, upload}));
+        return slot.texture.get();
+    };
+
+    const QRhiTexture::Format lumaFormat = deep ? QRhiTexture::R16 : QRhiTexture::R8;
+    const int lumaBytes = deep ? 2 : 1;
+    QRhiTexture* textureY = uploadPlane(0, lumaFormat, lumaBytes);
+    QRhiTexture* textureCb = nullptr;
+    QRhiTexture* textureCr = nullptr;
+    if (semiPlanar) {
+        textureCb = uploadPlane(1, deep ? QRhiTexture::RG16 : QRhiTexture::RG8, deep ? 4 : 2);
+        textureCr = textureCb;  // unused by the shader; the binding must be filled
+    } else {
+        textureCb = uploadPlane(1, lumaFormat, lumaBytes);
+        textureCr = uploadPlane(2, lumaFormat, lumaBytes);
+    }
+    if (textureY == nullptr || textureCb == nullptr || textureCr == nullptr) {
+        return Error{ErrorCode::Internal, "cannot allocate a plane texture"};
+    }
+
+    // --- Pass one: Y'CbCr to linear light, at source resolution -------------
+    const YuvParameters parameters = parametersFor(source);
+
+    QMatrix4x4 identity;
+    identity.ortho(-0.5F * static_cast<float>(sourceSize.width()),
+                   0.5F * static_cast<float>(sourceSize.width()),
+                   0.5F * static_cast<float>(sourceSize.height()),
+                   -0.5F * static_cast<float>(sourceSize.height()), -1.0F, 1.0F);
+    identity.scale(0.5F * static_cast<float>(sourceSize.width()),
+                   0.5F * static_cast<float>(sourceSize.height()));
+
+    auto convertUniforms = std::unique_ptr<QRhiBuffer>(
+        state.rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, kUniformBytes));
+    if (!convertUniforms->create()) {
+        return Error{ErrorCode::Internal, "cannot allocate a uniform buffer"};
+    }
+    auto convertBindings =
+        std::unique_ptr<QRhiShaderResourceBindings>(state.rhi->newShaderResourceBindings());
+    convertBindings->setBindings({
+        QRhiShaderResourceBinding::uniformBuffer(
+            0, QRhiShaderResourceBinding::VertexStage | QRhiShaderResourceBinding::FragmentStage,
+            convertUniforms.get(), 0, static_cast<quint32>(kUniformBytes)),
+        QRhiShaderResourceBinding::sampledTexture(1, QRhiShaderResourceBinding::FragmentStage,
+                                                  textureY, state.chromaSampler.get()),
+        QRhiShaderResourceBinding::sampledTexture(2, QRhiShaderResourceBinding::FragmentStage,
+                                                  textureCb, state.chromaSampler.get()),
+        QRhiShaderResourceBinding::sampledTexture(3, QRhiShaderResourceBinding::FragmentStage,
+                                                  textureCr, state.chromaSampler.get()),
+    });
+    if (!convertBindings->create()) {
+        return Error{ErrorCode::Internal, "cannot create conversion bindings"};
+    }
+
+    std::array<float, kUniformFloats> convertData{};
+    const float* identityData = identity.constData();
+    for (int i = 0; i < 16; ++i) {
+        convertData[static_cast<std::size_t>(i)] = identityData[i];
+    }
+    convertData[16] = 1.0F;  // opacity is applied when compositing, not here
+    // The whole plane. This pass turns Y'CbCr into RGBA at 1:1; the crop is
+    // applied by the composite draw that follows, which is where the geometry
+    // is. Cropping here as well would crop twice.
+    writeCrop(convertData, model::Transform{});
+    convertData[17] = parameters.sampleScale;
+    convertData[18] = parameters.lumaOffset;
+    convertData[19] = parameters.lumaScale;
+    convertData[kChromaFloat + 0] = parameters.chromaScale;
+    convertData[kChromaFloat + 1] = parameters.midpoint;
+    convertData[kChromaFloat + 2] = parameters.transferId;
+    convertData[kChromaFloat + 3] = parameters.semiPlanar;
+    convertData[kChromaFloat + 4] = parameters.crToR;
+    convertData[kChromaFloat + 5] = parameters.crToG;
+    convertData[kChromaFloat + 6] = parameters.cbToG;
+    convertData[kChromaFloat + 7] = parameters.cbToB;
+    // The gamut rows, one vec4 each with the fourth component unused. Written
+    // unconditionally, identity included: a row left as zeros would make every
+    // picture black, which is a worse failure than a redundant upload of 1s.
+    for (std::size_t row = 0; row < 3; ++row) {
+        for (std::size_t column = 0; column < 3; ++column) {
+            convertData[kGamutFloat + (row * 4) + column] = parameters.gamut.m[row][column];
+        }
+        convertData[kGamutFloat + (row * 4) + 3] = 0.0F;
+    }
+    batch->updateDynamicBuffer(convertUniforms.get(), 0, kUniformBytes, convertData.data());
+
+    QRhiCommandBuffer* cb = state.commandBuffer;
+    const QRhiCommandBuffer::VertexInput vertexInput(state.vertexBuffer.get(), 0);
+    cb->beginPass(staging.target.get(), QColor::fromRgbF(0, 0, 0, 0), {1.0F, 0}, batch);
+    cb->setGraphicsPipeline(state.yuvPipelines[0].get());
+    cb->setViewport(
+        {0, 0, static_cast<float>(sourceSize.width()), static_cast<float>(sourceSize.height())});
+    cb->setShaderResources(convertBindings.get());
+    cb->setVertexInput(0, 1, &vertexInput);
+    cb->draw(6);
+    cb->endPass();
+
+    // --- Pass two: the transform, sampling linear light ---------------------
+    //
+    // This is why conversion gets its own pass rather than being folded into
+    // the sampler. A bilinear filter applied to encoded Y'CbCr interpolates in
+    // gamma space, which is the same error ADR-005 rejects for blending: the
+    // midpoint between two values is not the value at the midpoint. Converting
+    // first means the filter runs in linear light, and the result matches the
+    // CPU reference instead of merely resembling it.
+    QMatrix4x4 matrix;
+    matrix.ortho(-0.5F * static_cast<float>(state.size.width()),
+                 0.5F * static_cast<float>(state.size.width()),
+                 0.5F * static_cast<float>(state.size.height()),
+                 -0.5F * static_cast<float>(state.size.height()), -1.0F, 1.0F);
+    matrix.translate(static_cast<float>(transform.positionX),
+                     static_cast<float>(transform.positionY));
+    matrix.rotate(static_cast<float>(transform.rotationDegrees), 0.0F, 0.0F, 1.0F);
+    matrix.scale(static_cast<float>(transform.scaleX), static_cast<float>(transform.scaleY));
+    matrix.translate(static_cast<float>(-transform.anchorX),
+                     static_cast<float>(-transform.anchorY));
+    matrix.scale(0.5F * static_cast<float>(sourceSize.width()),
+                 0.5F * static_cast<float>(sourceSize.height()));
+
+    auto uniforms = std::unique_ptr<QRhiBuffer>(
+        state.rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, kUniformBytes));
+    if (!uniforms->create()) {
+        return Error{ErrorCode::Internal, "cannot allocate a uniform buffer"};
+    }
+    const bool curved = curves != nullptr && !curves->isIdentity();
+    const bool shaped = hue != nullptr && !hue->isIdentity();
+    const bool looked = lut != nullptr && lut->isValid() && lutAmount > 0.0F;
+    std::unique_ptr<QRhiTexture> lutTexture;
+    std::unique_ptr<QRhiTexture> curveTexture;
+    if (curved || shaped) {
+        QRhiResourceUpdateBatch* curveBatch = state.rhi->nextResourceUpdateBatch();
+        curveTexture = makeCurveTexture(*state.rhi, *curveBatch, curved ? curves : nullptr,
+                                        shaped ? hue : nullptr);
+        if (curveTexture == nullptr) {
+            return Error{ErrorCode::Internal, "cannot allocate a curve texture"};
+        }
+        state.commandBuffer->resourceUpdate(curveBatch);
+    }
+    if (looked) {
+        QRhiResourceUpdateBatch* lutBatch = state.rhi->nextResourceUpdateBatch();
+        lutTexture = makeLutTexture(*state.rhi, *lutBatch, *lut);
+        if (lutTexture == nullptr) {
+            return Error{ErrorCode::Internal, "cannot allocate a look texture"};
+        }
+        state.commandBuffer->resourceUpdate(lutBatch);
+    }
+
+    auto bindings =
+        std::unique_ptr<QRhiShaderResourceBindings>(state.rhi->newShaderResourceBindings());
+    bindings->setBindings({
+        QRhiShaderResourceBinding::uniformBuffer(
+            0, QRhiShaderResourceBinding::VertexStage | QRhiShaderResourceBinding::FragmentStage,
+            uniforms.get(), 0, static_cast<quint32>(kUniformBytes)),
+        QRhiShaderResourceBinding::sampledTexture(1, QRhiShaderResourceBinding::FragmentStage,
+                                                  staging.texture.get(), state.sampler.get()),
+        QRhiShaderResourceBinding::sampledTexture(
+            2, QRhiShaderResourceBinding::FragmentStage,
+            curveTexture ? curveTexture.get() : state.noCurve.get(), state.sampler.get()),
+        QRhiShaderResourceBinding::sampledTexture(3, QRhiShaderResourceBinding::FragmentStage,
+                                                  looked ? lutTexture.get() : state.noLut.get(),
+                                                  state.sampler.get()),
+    });
+    if (!bindings->create()) {
+        return Error{ErrorCode::Internal, "cannot create resource bindings"};
+    }
+
+    std::array<float, kUniformFloats> uniformData{};
+    const float* matrixData = matrix.constData();
+    for (int i = 0; i < 16; ++i) {
+        uniformData[static_cast<std::size_t>(i)] = matrixData[i];
+    }
+    uniformData[16] = static_cast<float>(transform.opacity);
+    writeGrade(uniformData, grade, curved, secondary, shaped);
+    writeLook(uniformData, lut, lutAmount);
+    writeMask(uniformData, mask, state.size);
+    writeVignette(uniformData, vignette);
+    writeWipe(uniformData, wipe);
+    writeCrop(uniformData, transform);
+    writeKeyer(uniformData, keyer);
+    writeDisplay(uniformData, 1.0F);
+
+    QRhiResourceUpdateBatch* compositeBatch = state.rhi->nextResourceUpdateBatch();
+    compositeBatch->updateDynamicBuffer(uniforms.get(), 0, kUniformBytes, uniformData.data());
+    cb->resourceUpdate(compositeBatch);
+
+    state.draws.push_back(State::PendingDraw{state.pipelines[blendIndex].get(), bindings.get()});
+    if (curveTexture != nullptr) {
+        state.sourceTextures.push_back(std::move(curveTexture));
+    }
+    if (lutTexture != nullptr) {
+        state.sourceTextures.push_back(std::move(lutTexture));
+    }
+    state.uniformBuffers.push_back(std::move(convertUniforms));
+    state.uniformBuffers.push_back(std::move(uniforms));
+    state.bindings.push_back(std::move(convertBindings));
+    state.bindings.push_back(std::move(bindings));
+    return {};
+}
+
+void GpuCompositor::setPresentKnee(double knee) {
+    state_->presentKnee = knee;
+}
+
+Status GpuCompositor::presentInto(::QRhiCommandBuffer* commandBuffer, ::QRhiRenderTarget* target) {
+    State& state = *state_;
+    auto* cb = reinterpret_cast<QRhiCommandBuffer*>(commandBuffer);
+    auto* rt = reinterpret_cast<QRhiRenderTarget*>(target);
+
+    if (cb == nullptr || rt == nullptr) {
+        return Error{ErrorCode::InvalidData, "presentInto needs a command buffer and a target"};
+    }
+    if (!state.target) {
+        return Error{ErrorCode::Internal, "there is no composited frame to present"};
+    }
+    if (state.inFrame) {
+        return Error{ErrorCode::Internal, "presentInto while a frame is still open"};
+    }
+
+    // Built once, against the target's render pass. A pipeline is tied to the
+    // pass it was created for, so this cannot reuse the offscreen one.
+    if (!state.presentPipeline) {
+        state.presentUniforms.reset(
+            state.rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, kUniformBytes));
+        if (!state.presentUniforms->create()) {
+            return Error{ErrorCode::Internal, "cannot allocate the present uniform buffer"};
+        }
+
+        state.presentBindings.reset(state.rhi->newShaderResourceBindings());
+        state.presentBindings->setBindings({
+            QRhiShaderResourceBinding::uniformBuffer(
+                0,
+                QRhiShaderResourceBinding::VertexStage | QRhiShaderResourceBinding::FragmentStage,
+                state.presentUniforms.get(), 0, static_cast<quint32>(kUniformBytes)),
+            QRhiShaderResourceBinding::sampledTexture(1, QRhiShaderResourceBinding::FragmentStage,
+                                                      state.target.get(), state.sampler.get()),
+            // Never read: the present pass has no grade. The binding exists
+            // because the pipeline layout says it does.
+            QRhiShaderResourceBinding::sampledTexture(2, QRhiShaderResourceBinding::FragmentStage,
+                                                      state.noCurve.get(), state.sampler.get()),
+            QRhiShaderResourceBinding::sampledTexture(3, QRhiShaderResourceBinding::FragmentStage,
+                                                      state.noLut.get(), state.sampler.get()),
+        });
+        if (!state.presentBindings->create()) {
+            return Error{ErrorCode::Internal, "cannot create present bindings"};
+        }
+
+        state.presentPipeline.reset(state.rhi->newGraphicsPipeline());
+        QRhiGraphicsPipeline::TargetBlend blend;
+        // The composited frame is premultiplied and goes onto an opaque
+        // backdrop, so `over` is right here too.
+        blend.enable = true;
+        blend.srcColor = QRhiGraphicsPipeline::One;
+        blend.dstColor = QRhiGraphicsPipeline::OneMinusSrcAlpha;
+        blend.srcAlpha = QRhiGraphicsPipeline::One;
+        blend.dstAlpha = QRhiGraphicsPipeline::OneMinusSrcAlpha;
+        state.presentPipeline->setTargetBlends({blend});
+        state.presentPipeline->setShaderStages({{QRhiShaderStage::Vertex, state.vertexShader},
+                                                {QRhiShaderStage::Fragment, state.fragmentShader}});
+
+        QRhiVertexInputLayout inputLayout;
+        inputLayout.setBindings({{2 * sizeof(float)}});
+        inputLayout.setAttributes({{0, 0, QRhiVertexInputAttribute::Float2, 0}});
+        state.presentPipeline->setVertexInputLayout(inputLayout);
+        state.presentPipeline->setShaderResourceBindings(state.presentBindings.get());
+        state.presentPipeline->setRenderPassDescriptor(rt->renderPassDescriptor());
+        if (!state.presentPipeline->create()) {
+            return Error{ErrorCode::Internal, "cannot create the present pipeline"};
+        }
+    }
+
+    // Letterbox: fit the frame inside the target without distorting it. A
+    // preview that quietly stretches the picture is worse than useless, because
+    // every framing decision made against it is wrong.
+    const QSize targetSize = rt->pixelSize();
+    const float frameAspect =
+        static_cast<float>(state.size.width()) / static_cast<float>(state.size.height());
+    const float targetAspect =
+        static_cast<float>(targetSize.width()) / static_cast<float>(targetSize.height());
+    float scaleX = 1.0F;
+    float scaleY = 1.0F;
+    if (frameAspect > targetAspect) {
+        scaleY = targetAspect / frameAspect;
+    } else {
+        scaleX = frameAspect / targetAspect;
+    }
+
+    QMatrix4x4 matrix;
+    // Flip vertically when the backend's framebuffer origin is at the top.
+    //
+    // The composited texture is written with row 0 as the top of the picture.
+    // The present quad maps texture V=0 to the bottom of clip space, so on a
+    // Y-down backend -- Metal, Vulkan, D3D -- the picture arrives upside down,
+    // while on a Y-up one -- OpenGL -- it does not. Getting this wrong is
+    // invisible to any numeric check that only asks whether pixels were lit.
+    const float flip = state.rhi->isYUpInFramebuffer() ? 1.0F : -1.0F;
+    matrix.scale(scaleX, scaleY * flip);
+
+    QRhiResourceUpdateBatch* batch = state.rhi->nextResourceUpdateBatch();
+    std::array<float, kUniformFloats> uniformData{};
+    const float* matrixData = matrix.constData();
+    for (int i = 0; i < 16; ++i) {
+        uniformData[static_cast<std::size_t>(i)] = matrixData[i];
+    }
+    uniformData[16] = 1.0F;  // opacity
+    // The present pass shows what was already composited. Grading here would
+    // apply every clip's correction a second time, to the whole frame.
+    writeGrade(uniformData, render::GradeConstants{}, false, nullptr);
+    writeLook(uniformData, nullptr, 0.0F);
+    writeMask(uniformData, nullptr, state.size);
+    // The frame being presented already has every clip's vignette in it.
+    writeVignette(uniformData, nullptr);
+    writeWipe(uniformData, nullptr);
+    // Nor cropping: what is presented is the finished frame, and every clip in
+    // it was already cropped on its way in.
+    writeCrop(uniformData, model::Transform{});
+    // Nor keying: the frame being presented has already had every clip's key
+    // applied to it, and a second one would cut holes in the composite.
+    writeKeyer(uniformData, nullptr);
+    // The one place it is not 1: this is the frame reaching the screen.
+    writeDisplay(uniformData, static_cast<float>(state.presentKnee));
+    batch->updateDynamicBuffer(state.presentUniforms.get(), 0, kUniformBytes, uniformData.data());
+
+    // Clear to opaque black: the bars either side of a letterboxed frame are
+    // part of the picture area, not a hole in the window.
+    cb->beginPass(rt, QColor::fromRgbF(0, 0, 0, 1), {1.0F, 0}, batch);
+    cb->setGraphicsPipeline(state.presentPipeline.get());
+    cb->setViewport(
+        {0, 0, static_cast<float>(targetSize.width()), static_cast<float>(targetSize.height())});
+    cb->setShaderResources(state.presentBindings.get());
+    const QRhiCommandBuffer::VertexInput vertexInput(state.vertexBuffer.get(), 0);
+    cb->setVertexInput(0, 1, &vertexInput);
+    cb->draw(6);
+    cb->endPass();
+    return {};
+}
+
+Status GpuCompositor::presentToImage(std::int32_t width, std::int32_t height,
+                                     render::RgbaImage& out) {
+    State& state = *state_;
+    if (!state.target) {
+        return Error{ErrorCode::Internal, "there is no composited frame to present"};
+    }
+    if (width <= 0 || height <= 0) {
+        return Error{ErrorCode::InvalidData, "the output has no size"};
+    }
+
+    std::unique_ptr<QRhiTexture> texture(
+        state.rhi->newTexture(QRhiTexture::RGBA32F, QSize(width, height), 1,
+                              QRhiTexture::RenderTarget | QRhiTexture::UsedAsTransferSource));
+    if (!texture->create()) {
+        return Error{ErrorCode::Unsupported, "cannot create a presentation target"};
+    }
+    QRhiColorAttachment attachment(texture.get());
+    std::unique_ptr<QRhiTextureRenderTarget> target(
+        state.rhi->newTextureRenderTarget(QRhiTextureRenderTargetDescription(attachment)));
+    std::unique_ptr<QRhiRenderPassDescriptor> pass(target->newCompatibleRenderPassDescriptor());
+    target->setRenderPassDescriptor(pass.get());
+    if (!target->create()) {
+        return Error{ErrorCode::Internal, "cannot create a presentation render target"};
+    }
+
+    // A different render pass from any previous one, so the pipeline built
+    // against the last target cannot be reused.
+    state.presentPipeline.reset();
+    state.presentBindings.reset();
+
+    QRhiCommandBuffer* cb = nullptr;
+    if (state.rhi->beginOffscreenFrame(&cb) != QRhi::FrameOpSuccess) {
+        return Error{ErrorCode::Internal, "cannot begin a GPU frame"};
+    }
+    if (Status status = presentInto(reinterpret_cast<::QRhiCommandBuffer*>(cb),
+                                    reinterpret_cast<::QRhiRenderTarget*>(target.get()));
+        !status) {
+        state.rhi->endOffscreenFrame();
+        return status;
+    }
+
+    QRhiReadbackResult readback;
+    QRhiResourceUpdateBatch* batch = state.rhi->nextResourceUpdateBatch();
+    batch->readBackTexture(QRhiReadbackDescription(texture.get()), &readback);
+    cb->resourceUpdate(batch);
+    state.rhi->endOffscreenFrame();
+
+    // Built against a target that is about to be destroyed.
+    state.presentPipeline.reset();
+    state.presentBindings.reset();
+
+    const auto expected =
+        static_cast<qsizetype>(width) * height * static_cast<qsizetype>(sizeof(render::Rgba));
+    if (readback.data.size() < expected) {
+        return Error{ErrorCode::Internal, "the GPU returned less data than the frame needs"};
+    }
+    if (out.width() != width || out.height() != height) {
+        out = render::RgbaImage{width, height};
+    }
+    std::memcpy(out.row(0), readback.data.constData(), static_cast<std::size_t>(expected));
+    return {};
+}
+
+}  // namespace zaro::platform::qrhi

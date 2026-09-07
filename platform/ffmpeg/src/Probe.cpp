@@ -1,6 +1,9 @@
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <optional>
+#include <string>
+#include <string_view>
 
 #include "zaro/platform/ffmpeg/FFmpegMedia.h"
 
@@ -10,11 +13,20 @@ namespace zaro::platform::ffmpeg {
 namespace {
 
 std::int32_t rotationFrom(const AVStream& stream) {
-    // The display matrix moved from the stream onto AVCodecParameters in
-    // FFmpeg 7.0, and the old accessor is deprecated there. Support both so the
-    // Linux builds, which trail a release or two behind Homebrew, still work.
+    // The display matrix moved from the stream onto AVCodecParameters in FFmpeg
+    // 6.1, which deprecated the old accessor in the same release that added the
+    // replacement -- so there is no version where either one alone is right.
+    // Support both, so the Linux builds, which trail a release or two behind
+    // Homebrew, still work.
+    //
+    // The test is on libavcodec and not libavformat because that is where both
+    // halves of the new API live: av_packet_side_data_get() arrived in lavc
+    // 60.29.100 and AVCodecParameters::coded_side_data in 60.30.100, so the
+    // later of the two is the boundary. Keying this on a libavformat major
+    // instead put the boundary at 7.0 and left every 6.1 build -- Ubuntu 24.04
+    // among them -- compiling the deprecated call under -Werror.
     const std::uint8_t* data = nullptr;
-#if LIBAVFORMAT_VERSION_MAJOR >= 61
+#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(60, 30, 100)
     const AVCodecParameters& par = *stream.codecpar;
     const AVPacketSideData* side = av_packet_side_data_get(
         par.coded_side_data, par.nb_coded_side_data, AV_PKT_DATA_DISPLAYMATRIX);
@@ -55,6 +67,32 @@ std::optional<time::Timecode> timecodeFrom(const AVStream& stream, const AVForma
     return time::parseTimecode(entry->value);
 }
 
+/// Whether this container is one of FFmpeg's single-picture demuxers.
+///
+/// FFmpeg presents a still as a video stream, and the only reliable sign that
+/// it is a picture rather than a film is which demuxer opened it: `png_pipe`,
+/// `jpeg_pipe`, `image2` and their siblings all exist to hand over exactly one
+/// frame. The stream's own numbers cannot be trusted for this -- the rate is
+/// invented (25fps, always), the duration is either absent or one frame, and
+/// `nb_frames` is usually zero -- so a test built on those would call a
+/// one-frame video a still and a still with a duration a video.
+[[nodiscard]] bool looksLikeStillContainer(const char* formatName) {
+    if (formatName == nullptr) {
+        return false;
+    }
+    const std::string name{formatName};
+    // The _pipe demuxers are one per codec -- png_pipe, jpeg_pipe, webp_pipe,
+    // bmp_pipe, tiff_pipe and a dozen more -- so they are matched by their
+    // shared suffix rather than listed. image2 is the odd one out, and is what
+    // a .jpg most often arrives as.
+    if (name == "image2" || name == "image2pipe") {
+        return true;
+    }
+    static constexpr std::string_view kPipe{"_pipe"};
+    return name.size() > kPipe.size() &&
+           name.compare(name.size() - kPipe.size(), kPipe.size(), kPipe) == 0;
+}
+
 /// Container-declared rate versus observed average rate. A real divergence is
 /// the cheapest available signal that timestamps are not evenly spaced, though
 /// it is only a hint -- conform() is what actually settles the question.
@@ -86,6 +124,8 @@ Result<media::MediaInfo> probe(const std::string& path) {
     media::MediaInfo info;
     info.path = path;
     info.formatName = format->iformat != nullptr ? format->iformat->name : "";
+    const bool still =
+        looksLikeStillContainer(format->iformat != nullptr ? format->iformat->name : nullptr);
     info.bitRate = format->bit_rate;
     if (format->duration != kNoPts) {
         info.duration = time::Rational{format->duration, AV_TIME_BASE};
@@ -136,6 +176,16 @@ Result<media::MediaInfo> probe(const std::string& path) {
                     fromAv(stream.time_base) * time::Rational::fromInt(stream.duration);
             } else {
                 video.duration = info.duration;
+            }
+
+            // A still is one frame however the container spells its duration,
+            // and its duration on a timeline is whatever somebody stretches it
+            // to. Saying so here keeps every caller from having to recognise a
+            // picture for itself.
+            video.isStill = still;
+            if (still) {
+                video.frameCountHint = 1;
+                video.isVariableFrameRate = false;
             }
             info.videoStreams.push_back(std::move(video));
 

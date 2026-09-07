@@ -1,0 +1,334 @@
+// cutreel: the application entry point.
+//
+// The window itself is PreviewWindow, in PreviewWindow.h. What is left here is
+// what a main is for: read the arguments, load the project, show the window,
+// and the two small smoke checks that are worth being able to run against the
+// shipping binary. The rest of the GUI tests live in app/tests.
+
+#include <QApplication>
+#include <QDir>
+#include <QGuiApplication>
+#include <QIcon>
+#include <QMessageBox>
+#include <QPixmap>
+#include <QStringList>
+#include <QSysInfo>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+#include <utility>
+
+#include "zaro/core/Environment.h"
+
+#include "FrameGrab.h"
+#include "PreviewWindow.h"
+#include "Say.h"
+#include "Theme.h"
+
+using namespace zaro;
+using zaro::app::dragOnTimeline;
+using zaro::app::PreviewWindow;
+using zaro::app::settledGrab;
+
+namespace {
+
+/// The application icon, out of the Qt resources built from
+/// resources/branding by app/CMakeLists.txt.
+///
+/// Every size added by hand rather than one file left to be scaled: QIcon picks
+/// the nearest it was given and a 512 taken down to a 16-pixel title bar loses
+/// the blades entirely. Windows has the same artwork a second time, in the
+/// executable's own resources -- that one is what Explorer and the shortcuts
+/// read without running anything, and this one is what the running window and
+/// its dialogs use.
+QIcon windowIcon() {
+    QIcon icon;
+    for (const int size : {16, 32, 48, 64, 128, 256, 512}) {
+        icon.addFile(QString{":/branding/CutReel-%1.png"}.arg(size));
+    }
+    return icon;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    // Line buffered, always. The self-tests print as they go and are usually
+    // read from a redirected file; fully buffered, that file stays empty until
+    // the process exits, so a run that hangs looks exactly like a run that has
+    // not started -- which cost an hour of looking in the wrong place once.
+    //
+    // Windows will not take that call as written. The UCRT validates setvbuf's
+    // arguments and, on failure, runs the invalid-parameter handler -- which in
+    // a release build terminates the process outright with 0xC0000409 rather
+    // than returning an error. Two things here trip it: a size of 0 is outside
+    // the documented 2..INT_MAX range that _IOLBF and _IOFBF require, and this
+    // target is WIN32_EXECUTABLE, so a normal launch has no console attached
+    // and stdout is not open at all. The process died before QApplication was
+    // built, with nothing on any stream to say why. glibc and Apple's libc both
+    // read a null buffer with size 0 as "line buffer, pick your own size", so
+    // the call is fine everywhere else.
+    //
+    // _IONBF is the honest equivalent here: it ignores the size argument, and
+    // it keeps the property this call is for -- output is visible as it is
+    // written, not held until exit. Windows has no line-buffered mode to ask
+    // for regardless; the UCRT treats _IOLBF as _IOFBF, so the original call
+    // would have given full buffering even had it succeeded.
+#ifdef _WIN32
+    if (stdout != nullptr && _fileno(stdout) >= 0) {
+        std::setvbuf(stdout, nullptr, _IONBF, 0);
+    }
+#else
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);
+#endif
+    QApplication application(argc, argv);
+
+    // Which launcher entry this process belongs to. On X11 Qt writes it into
+    // WM_CLASS and on Wayland it is reported as the app id, and both are how a
+    // desktop matches a window on screen to an installed .desktop file -- which
+    // is what makes the taskbar show CutReel's icon and name rather than a
+    // generic square.
+    //
+    // Stated rather than left to the default, which is the executable's own
+    // name. That happens to be the same word today, so this line changes
+    // nothing; it is here so that the day the binary is renamed again, the
+    // entry it belongs to is something somebody had to edit on purpose rather
+    // than a coincidence that quietly stopped holding.
+    //
+    // The name of resources/linux/cutreel.desktop, minus the extension, as the
+    // specification requires. Ignored on Windows and macOS, which identify an
+    // application by its executable and its bundle instead.
+    QGuiApplication::setDesktopFileName("cutreel");
+
+    // Before any window exists: the palette and the sheet decide what every
+    // widget looks like the moment it is constructed, and a window built first
+    // flashes the platform's own colours on its way to these.
+    zaro::app::theme::apply(application);
+    QApplication::setWindowIcon(windowIcon());
+
+    QStringList arguments = QApplication::arguments();
+    const bool selfTest = arguments.removeAll("--selftest") > 0;
+    const bool editTest = arguments.removeAll("--selftest-edit") > 0;
+    const bool quitTest = arguments.removeAll("--selftest-quit") > 0;
+    // Quiet: say things on stderr rather than in a box somebody has to
+    // dismiss. On for the self-tests always, because a test that stops for a
+    // dialog is a test that hangs.
+    const auto quietWanted = zaro::environmentValue("ZARO_QUIET");
+    PreviewWindow::setQuietMode(arguments.removeAll("--quiet") > 0 ||
+                                (quietWanted.has_value() && quietWanted->starts_with('1')) ||
+                                selfTest || editTest || quitTest);
+
+    // A keymap of its own for the self-tests, and for anybody who wants one
+    // beside a project: the tests rebind commands, and rebinding somebody's
+    // real Save key because they ran a test is not on.
+    if (const auto wanted = zaro::environmentValue("ZARO_KEYMAP"); wanted.has_value()) {
+        PreviewWindow::setKeymapPath(QString::fromStdString(*wanted));
+    } else if (selfTest || editTest || quitTest) {
+        PreviewWindow::setKeymapPath(QDir::temp().filePath("zaro-selftest-keymap.conf"));
+    }
+
+    // Project locking is off unless asked for. See PreviewWindow::lockingEnabled.
+    const auto lockingWanted = zaro::environmentValue("ZARO_LOCKING");
+    PreviewWindow::setLockingEnabled(
+        arguments.removeAll("--locking") > 0 ||
+        (lockingWanted.has_value() && lockingWanted->starts_with('1')));
+    QString capturePath;
+    if (const auto at = arguments.indexOf("--capture"); at >= 0 && at + 1 < arguments.size()) {
+        capturePath = arguments.at(at + 1);
+        arguments.removeAt(at + 1);
+        arguments.removeAt(at);
+    }
+    if (arguments.size() < 2) {
+        std::puts("usage: cutreel <project.cutreel> [--selftest]");
+        std::puts("");
+        std::puts("  space        play / pause        J K L   shuttle");
+        std::puts("  left/right   step one frame      home/end  start / end");
+        std::puts("");
+        std::puts("  --selftest        render, verify a picture came out, exit");
+        std::puts("  --capture <png>   with --selftest, save what the monitor showed");
+        std::puts("  --selftest-edit   moved: see the zaro_app_tests target");
+        std::puts("  --selftest-quit   quit with background work in flight, exit");
+        std::puts("  --locking         take a lock on the project, and honour other people's");
+        std::puts("  --quiet           say things on stderr instead of in dialogs");
+
+        // A shortcut carries no arguments, and on Windows this is a GUI binary
+        // with no console for any of the above to appear in -- so an installed
+        // copy launched from the Start Menu or the desktop printed into
+        // nothing and exited, which from the outside is a program that does
+        // not start at all.
+        //
+        // So start an untitled project instead, which is what every other
+        // editor does when it is opened rather than handed a file, and exactly
+        // what File > New builds. Asking first -- an open dialog before any
+        // window exists -- was the previous answer, and it made the installed
+        // shortcut look like it opened a file picker rather than the program:
+        // somebody who wants to start a new cut has nothing to pick, and
+        // cancelling quit outright.
+        //
+        // Quiet is still an error: that is the self-tests and the scripts, and
+        // every one of them is asking for a specific project. Silently giving
+        // them an empty one turns a mistyped path into a green run.
+        if (zaro::app::isQuiet()) {
+            return 2;
+        }
+    }
+
+    zaro::platform::ffmpeg::installLogHandler(false);
+
+    // Empty when nothing was named, and it stays empty: an untitled project
+    // has no file until the first Save asks for one.
+    const std::string projectPath =
+        arguments.size() < 2 ? std::string{} : arguments.at(1).toStdString();
+
+    zaro::model::Project project;
+    zaro::io::LoadedProject loadedProject{};
+    if (projectPath.empty()) {
+        project = zaro::model::newProject();
+    } else {
+        // A recovery file newer than the project means the last session ended
+        // without an explicit save. Offered rather than opened: the autosave is
+        // what somebody was in the middle of, and only they know whether they want
+        // it. Declining leaves the file alone, so the choice can be made again.
+        std::string openPath = projectPath;
+        if (!quitTest && !selfTest && !editTest && zaro::io::hasNewerAutosave(projectPath)) {
+            const auto answer = QMessageBox::question(
+                nullptr, "Recover",
+                QString("There is a more recent recovery file for %1.\n\nOpen it instead?")
+                    .arg(QString::fromStdString(projectPath)));
+            if (answer == QMessageBox::Yes) {
+                openPath = zaro::io::autosavePath(projectPath);
+            }
+        }
+
+        auto loaded = zaro::io::loadProject(openPath);
+        if (!loaded) {
+            // Through say/warn rather than stderr, for the same reason as above: a
+            // window-less binary has no console, so a project that will not open
+            // looked exactly like a program that does not start.
+            zaro::app::warn(nullptr, "Cannot open the project",
+                            QString::fromStdString(loaded.error().toString()));
+            return 1;
+        }
+        project = loaded->project;
+        if (project.findSequence(project.activeSequence()) == nullptr) {
+            zaro::app::warn(nullptr, "Cannot open the project",
+                            "This project has no active sequence.");
+            return 1;
+        }
+        loadedProject = std::move(*loaded);
+    }
+
+    // Recovered work is saved back to the *project*, not to the recovery file:
+    // opening an autosave and then saving into it would leave the real project
+    // stale for ever.
+    PreviewWindow window{std::move(project), std::move(loadedProject), projectPath};
+    if (const auto status = window.openMedia(); !status) {
+        zaro::app::warn(&window, "Cannot open the media",
+                        QString::fromStdString(status.error().toString()));
+        return 1;
+    }
+    window.resize(960, 620);
+    window.show();
+
+    if (quitTest) {
+        // Quit while the waveform thread is still running, which is what
+        // happens when someone presses Cmd+Q on a freshly opened project.
+        // The window is a local here, so returning destroys it -- and a
+        // std::thread destroyed while still joinable calls std::terminate.
+        // No joining, no waiting: that is the point.
+        QApplication::processEvents();
+        std::printf("cutreel quit selftest: exiting with background work in flight\n");
+        return 0;
+    }
+
+    if (editTest) {
+        // The GUI tests moved to app/tests, where they run as sixty separate
+        // Catch2 cases against the same window this builds. They were 6,358
+        // lines inside this function, which meant nothing ran them: there was
+        // no ctest entry and no CI job, and the first failure returned out of
+        // main with the other fifty-nine sections never reached.
+        std::fprintf(stderr,
+                     "cutreel: --selftest-edit is now the zaro_app_tests target.\n"
+                     "          ctest -R zaro_app_tests\n");
+        return 2;
+    }
+
+    if (!selfTest) {
+        return QApplication::exec();
+    }
+
+    // Prove a picture actually reached the widget, rather than that the window
+    // opened. Renders a handful of frames across the sequence and reads one
+    // back -- the only readback in this program, and it exists for this check.
+    const zaro::model::Sequence& sequence = *window.sequence();
+    const std::int64_t last = std::max<std::int64_t>(0, sequence.duration().frames() - 1);
+    window.waitForWaveforms();
+    // Sample across the sequence and keep the brightest. A single position is
+    // not a fair test: plenty of real footage is legitimately black at any
+    // given moment, and a fixture that is black except on flash frames would
+    // fail a check aimed at one timecode.
+    QImage grabbed;
+    double bestLit = 0.0;
+    for (int i = 0; i < 5; ++i) {
+        window.setPosition(zaro::time::RationalTime{last * i / 5, sequence.frameRate()});
+        QApplication::processEvents();
+        const QImage shot = window.monitor()->grabFramebuffer();
+        if (shot.isNull()) {
+            continue;
+        }
+        std::int64_t lit = 0;
+        for (int y = 0; y < shot.height(); ++y) {
+            for (int x = 0; x < shot.width(); ++x) {
+                if (qGray(shot.pixel(x, y)) > 8) {
+                    ++lit;
+                }
+            }
+        }
+        const double fraction =
+            static_cast<double>(lit) / static_cast<double>(shot.width() * shot.height());
+        if (grabbed.isNull() || fraction > bestLit) {
+            bestLit = fraction;
+            grabbed = shot;
+        }
+    }
+
+    if (!window.monitor()->lastError().isEmpty()) {
+        std::fprintf(stderr, "cutreel: %s\n", window.monitor()->lastError().toUtf8().constData());
+        return 1;
+    }
+    if (grabbed.isNull()) {
+        std::fprintf(stderr, "cutreel: the monitor produced no image\n");
+        return 1;
+    }
+
+    // Black at every sampled position would mean the pipeline ran and drew
+    // nothing, which is the failure this is really looking for.
+    const double litFraction = bestLit;
+
+    std::printf("cutreel selftest\n");
+    std::printf("  %lld frames rendered through the widget\n",
+                static_cast<long long>(window.monitor()->framesRendered()));
+    std::printf("  grabbed %dx%d, %.1f%% of it lit\n", grabbed.width(), grabbed.height(),
+                litFraction * 100.0);
+
+    if (!capturePath.isEmpty()) {
+        // The whole window, so the timeline is in the picture too.
+        const QPixmap windowShot = window.grab();
+        if (!windowShot.isNull()) {
+            windowShot.save(capturePath + ".window.png");
+        }
+        if (grabbed.save(capturePath)) {
+            std::printf("  saved %s\n", capturePath.toUtf8().constData());
+        } else {
+            std::fprintf(stderr, "  FAIL: cannot write %s\n", capturePath.toUtf8().constData());
+            return 1;
+        }
+    }
+
+    if (litFraction < 0.05) {
+        std::fprintf(stderr, "  FAIL: the monitor is essentially black\n");
+        return 1;
+    }
+    std::printf("  ok\n");
+    return 0;
+}

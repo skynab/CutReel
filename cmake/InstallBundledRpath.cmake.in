@@ -1,0 +1,118 @@
+# Give every bundled library an RPATH of its own. Runs at install time, after
+# the runtime dependency set has copied the libraries into place.
+#
+# The problem this exists to solve is not that the libraries are missing. They
+# are all there, in lib/cutreel, and the executables find them: each one is
+# linked with INSTALL_RPATH "$ORIGIN/../lib/cutreel". The problem is what the
+# loader does with that RPATH one level further down.
+#
+# Modern binutils defaults to --enable-new-dtags, which records a relative
+# RPATH as DT_RUNPATH rather than DT_RPATH. The two are searched the same way
+# and differ in exactly one respect, which is the one that matters here:
+# DT_RPATH is inherited down the whole dependency chain, and DT_RUNPATH applies
+# only to the direct DT_NEEDED entries of the object carrying it.
+#
+# So /usr/bin/cutreel finds lib/cutreel/libavcodec.so, because that is one of
+# its own DT_NEEDED entries. But libavcodec is a copy of the distribution's,
+# carrying whatever RPATH the distribution gave it -- which is none -- and when
+# the loader goes looking for *its* dependencies, cutreel's DT_RUNPATH is not
+# consulted. libvpx.so.9 sits in lib/cutreel next to libavcodec and is never
+# found, and the program dies before main with:
+#
+#   error while loading shared libraries: libvpx.so.9:
+#   cannot open shared object file: No such file or directory
+#
+# on any machine that does not happen to have the distribution's copy as well.
+# On a machine that does, it silently links against that one instead, which is
+# the same bug wearing a disguise.
+#
+# The fix is to stop relying on inheritance: give each bundled object a
+# DT_RUNPATH that points at the directory the libraries are in, so that it
+# finds them whatever loaded it and whatever that object's own RPATH says.
+#
+# Pointing at that directory is not the same as pointing at $ORIGIN, and the
+# difference is the plugins. A library sits in lib/cutreel itself, so $ORIGIN
+# is the answer for it; a plugin sits two levels down, in
+# lib/cutreel/plugins/platforms, where $ORIGIN holds the other plugins and none
+# of the libraries. Given $ORIGIN, every plugin in the package was unable to
+# find libQt6Core -- and the xcb one could not find libQt6XcbQpa, which is the
+# platform plugin, which is the difference between an application that starts
+# and one that aborts with "could not load the Qt platform plugin". So the
+# offset is computed per object rather than assumed, and an object one
+# directory further down would get $ORIGIN/../../.. without anyone editing
+# this file.
+#
+# --disable-new-dtags on the executables was the other candidate -- one linker
+# flag, and DT_RPATH does inherit. It is not enough: inheritance stops at any
+# object in the chain that has a DT_RUNPATH of its own, and we do not control
+# what the distribution put on the libraries we copied. An RPATH on each object
+# does not care what the chain looks like.
+
+set(zaro_libdir "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/@ZARO_PRIVATE_LIBDIR@")
+
+if(NOT IS_DIRECTORY "${zaro_libdir}")
+    message(FATAL_ERROR
+        "No bundled libraries at ${zaro_libdir}. The runtime dependency set in "
+        "cmake/Packaging.cmake should have filled it before this script ran.")
+endif()
+
+# Looked up here rather than at configure time on purpose: a plain build runs
+# from the build tree, where the build-tree RPATH resolves everything and none
+# of this matters. It is only installing or packaging that needs the tool, so
+# that is where its absence should stop you -- and say so in one line, rather
+# than as a program that will not start on somebody else's machine.
+find_program(ZARO_PATCHELF NAMES patchelf)
+if(NOT ZARO_PATCHELF)
+    message(FATAL_ERROR
+        "patchelf was not found, and the Linux package cannot be built without "
+        "it: the bundled libraries would not be able to find each other. "
+        "Install it with `sudo apt-get install patchelf` and install again.")
+endif()
+
+# Plugins as well as libraries: a Qt platform plugin is a shared object with
+# dependencies of its own, loaded by name at startup from a subdirectory, and
+# it is one level further from bin/ than everything else here.
+file(GLOB_RECURSE zaro_bundled
+    LIST_DIRECTORIES false
+    "${zaro_libdir}/*.so"
+    "${zaro_libdir}/*.so.*")
+
+if(NOT zaro_bundled)
+    message(FATAL_ERROR "No shared objects found under ${zaro_libdir}.")
+endif()
+
+set(zaro_patched 0)
+foreach(zaro_object IN LISTS zaro_bundled)
+    # Symlinks are the soname aliases the dependency set copies alongside the
+    # real files; patching one would rewrite its target a second time.
+    if(IS_SYMLINK "${zaro_object}")
+        continue()
+    endif()
+
+    # How far this object sits below the directory the libraries are in, as a
+    # relative path: empty for a library in it, ../.. for a plugin two down.
+    get_filename_component(zaro_object_dir "${zaro_object}" DIRECTORY)
+    file(RELATIVE_PATH zaro_to_libdir "${zaro_object_dir}" "${zaro_libdir}")
+    # A prefix with a trailing or doubled separator makes RELATIVE_PATH answer
+    # "../../" rather than "../..", which the loader reads the same way and a
+    # person reading `readelf -d` does not. Normalised so that what ships is
+    # the spelling this file describes.
+    string(REGEX REPLACE "/+$" "" zaro_to_libdir "${zaro_to_libdir}")
+    if(zaro_to_libdir STREQUAL "")
+        set(zaro_rpath "$ORIGIN")
+    else()
+        set(zaro_rpath "$ORIGIN/${zaro_to_libdir}")
+    endif()
+
+    execute_process(
+        COMMAND "${ZARO_PATCHELF}" --set-rpath "${zaro_rpath}" "${zaro_object}"
+        RESULT_VARIABLE zaro_patch_result
+        ERROR_VARIABLE zaro_patch_error)
+    if(NOT zaro_patch_result EQUAL 0)
+        message(FATAL_ERROR
+            "patchelf could not set an RPATH on ${zaro_object}: ${zaro_patch_error}")
+    endif()
+    math(EXPR zaro_patched "${zaro_patched} + 1")
+endforeach()
+
+message(STATUS "Set an RPATH on ${zaro_patched} bundled objects in ${zaro_libdir}")

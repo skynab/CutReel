@@ -1,5 +1,8 @@
 #include "zaro/core/media/ColorInfo.h"
 
+#include <cstdint>
+#include <cstring>
+
 namespace zaro::media {
 
 ColorInfo ColorInfo::resolved(std::int32_t width, std::int32_t height) const {
@@ -49,6 +52,27 @@ const char* toString(ColorPrimaries v) noexcept {
     return "unknown";
 }
 
+std::span<const ColorPrimaries> allColorPrimaries() noexcept {
+    static constexpr ColorPrimaries kAll[] = {
+        ColorPrimaries::Unknown,   ColorPrimaries::BT709,  ColorPrimaries::BT601_525,
+        ColorPrimaries::BT601_625, ColorPrimaries::BT2020, ColorPrimaries::DisplayP3,
+    };
+    return kAll;
+}
+
+bool colorPrimariesFromString(const char* name, ColorPrimaries& out) noexcept {
+    if (name == nullptr) {
+        return false;
+    }
+    for (const ColorPrimaries candidate : allColorPrimaries()) {
+        if (std::strcmp(name, toString(candidate)) == 0) {
+            out = candidate;
+            return true;
+        }
+    }
+    return false;
+}
+
 const char* toString(TransferFunction v) noexcept {
     switch (v) {
         case TransferFunction::Unknown:
@@ -69,8 +93,36 @@ const char* toString(TransferFunction v) noexcept {
             return "pq";
         case TransferFunction::HLG:
             return "hlg";
+        case TransferFunction::SLog3:
+            return "slog3";
+        case TransferFunction::VLog:
+            return "vlog";
+        case TransferFunction::LogC3:
+            return "logc3";
     }
     return "unknown";
+}
+
+std::span<const TransferFunction> allTransferFunctions() noexcept {
+    static constexpr TransferFunction kAll[] = {
+        TransferFunction::Unknown, TransferFunction::BT709,     TransferFunction::Gamma22,
+        TransferFunction::Gamma28, TransferFunction::SMPTE170M, TransferFunction::SRGB,
+        TransferFunction::Linear,  TransferFunction::PQ,        TransferFunction::HLG,
+        TransferFunction::SLog3,   TransferFunction::VLog,      TransferFunction::LogC3};
+    return kAll;
+}
+
+bool transferFunctionFromString(const char* name, TransferFunction& out) noexcept {
+    if (name == nullptr) {
+        return false;
+    }
+    for (const TransferFunction candidate : allTransferFunctions()) {
+        if (std::strcmp(name, toString(candidate)) == 0) {
+            out = candidate;
+            return true;
+        }
+    }
+    return false;
 }
 
 const char* toString(ColorMatrix v) noexcept {

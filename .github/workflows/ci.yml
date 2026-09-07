@@ -2,49 +2,248 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
 
+# Superseded pull-request runs are worth cancelling; superseded branch runs are
+# not. A push to main or dev is a commit that will exist forever and whose CI
+# result someone will want to look up later, and the Windows jobs take long
+# enough that a run of pushes would cancel each one in turn and never produce a
+# result for any of them.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # One place to change the Qt version. Windows takes it from the official
+  # binaries; macOS and Linux take whatever Homebrew and the distribution ship,
+  # which is the same thing developers on those platforms have.
+  QT_VERSION: 6.9.3
 
 jobs:
   build-and-test:
-    name: ${{ matrix.os }} / ${{ matrix.preset }}
+    name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    # Generous enough for a cold Windows dependency build, short enough that a
+    # deadlocked test is reported the same day.
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, ubuntu-24.04]
-        preset: [debug, release, asan]
-        exclude:
-          # One sanitizer run is enough signal; it is the slowest job by far.
-          - os: ubuntu-24.04
-            preset: asan
+        # Spelled out rather than a product, because the three platforms do not
+        # want the same presets: sanitizers are a Clang/GCC feature, and Windows
+        # pays a much larger setup cost per job than it is worth spending three
+        # times over.
+        #
+        # `artifact` names the archive a row uploads, and only the three
+        # release rows carry one: a debug or sanitizer build is not something
+        # to hand anybody, and the three that are cover the three platforms.
+        include:
+          - { name: macos / debug,     os: macos-14,      preset: debug }
+          - { name: macos / release,   os: macos-14,      preset: release,         artifact: macos }
+          - { name: macos / asan,      os: macos-14,      preset: asan }
+          - { name: linux / debug,     os: ubuntu-24.04,  preset: debug }
+          - { name: linux / release,   os: ubuntu-24.04,  preset: release,         artifact: linux }
+          - { name: windows / debug,   os: windows-2022,  preset: windows-debug }
+          - { name: windows / release, os: windows-2022,  preset: windows-release, artifact: windows }
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - name: Install Ninja
-        uses: seanmiddleditch/gha-setup-ninja@v5
+      # Ninja comes with every runner image this workflow uses -- 1.13.2 on
+      # ubuntu-24.04, macos-14 and windows-2022 alike -- so it is taken from
+      # there rather than installed. The action that used to do it,
+      # gha-setup-ninja, is one of the node20 actions GitHub now warns about,
+      # and it was fetching a tool already on the machine.
+      #
+      # Checked rather than assumed: if an image ever stops shipping it, this
+      # says so here instead of at Configure, where the failure is about
+      # CMAKE_MAKE_PROGRAM and never mentions Ninja.
+      - name: Check for Ninja
+        shell: bash
+        run: ninja --version
 
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
-        run: brew install ffmpeg pkg-config nlohmann-json
+        # The runner image ships aws/tap pre-tapped for the AWS CLI, and
+        # Homebrew 6 refuses to use an untrusted tap, so every brew command
+        # prints a block about it. Nothing here comes from that tap -- all five
+        # formulae are homebrew/core -- so dropping it is quieter and narrower
+        # than granting whole-tap trust or setting HOMEBREW_NO_REQUIRE_TAP_TRUST.
+        # Tolerant of the tap being absent, in case a later image stops shipping it.
+        run: |
+          brew untap aws/tap || true
+          brew install ffmpeg sdl2 qt pkg-config nlohmann-json
 
+      # Qt is deliberately absent from this list -- see the Qt step below.
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config ffmpeg nlohmann-json3-dev \
+          sudo apt-get install -y pkg-config ffmpeg nlohmann-json3-dev libsdl2-dev \
             libavcodec-dev libavformat-dev libavutil-dev \
-            libswscale-dev libswresample-dev
+            libswscale-dev libswresample-dev \
+            libgl1-mesa-dev libglu1-mesa-dev libxkbcommon-x11-0 libxcb-cursor0 \
+            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
+            libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 \
+            libvulkan-dev mesa-vulkan-drivers \
+            patchelf xvfb libgl1-mesa-dri
+          # patchelf is for packaging, not building: it is what gives the
+          # bundled libraries an RPATH so they can find each other once they
+          # are in lib/cutreel. See cmake/InstallBundledRpath.cmake.in.
+          #
+          # xvfb and the software GL driver are for the render check on the
+          # installed package, below. The GUI job installs the same pair for
+          # the same reason: a QRhiWidget needs a display and a GL that
+          # llvmpipe can stand behind.
+
+      # Windows has no system package manager for the libraries we link, so they
+      # come from the vcpkg manifest instead.
+      # What ilammy/msvc-dev-cmd@v1 was doing, done directly. That action is
+      # the last node20 one in this workflow and has no newer major to move
+      # to -- its master branch still says `using: node20` -- and all it does
+      # is run vcvars64.bat and hand the resulting environment to the steps
+      # that follow. GITHUB_ENV does that part for us.
+      #
+      # Only the variables vcvars actually changes are exported, rather than
+      # the whole environment: GITHUB_ENV is parsed line by line, and cmd's
+      # `set` prints entries that are not name=value pairs at all.
+      - name: Set up MSVC
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) { throw "vswhere.exe not found at $vswhere" }
+          $install = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          if (-not $install) { throw "No Visual Studio with the C++ toolset is installed" }
+          $vcvars = Join-Path $install "VC\Auxiliary\Build\vcvars64.bat"
+          if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found at $vcvars" }
+          Write-Host "Using $vcvars"
+
+          $before = @{}
+          Get-ChildItem env: | ForEach-Object { $before[$_.Name] = $_.Value }
+
+          $exported = 0
+          # `call`, so that control returns and `set` actually runs; stderr is
+          # left alone so that a vcvars failure says why rather than vanishing.
+          foreach ($line in (cmd /c "call `"$vcvars`" >nul && set")) {
+            $pair = $line -split '=', 2
+            if ($pair.Count -ne 2) { continue }
+            $name = $pair[0]
+            $value = $pair[1]
+            # A name is never empty and never starts with '='; a value that
+            # spans lines cannot be written to GITHUB_ENV in this form.
+            if (-not $name -or $name.StartsWith('=') -or $value -match "`n") { continue }
+            if ($before[$name] -ne $value) {
+              Add-Content -Path $env:GITHUB_ENV -Value "$name=$value"
+              $exported++
+            }
+          }
+          Write-Host "Exported $exported variables from vcvars64.bat"
+          if ($exported -eq 0) { throw "vcvars64.bat changed nothing; the toolchain is not set up" }
+
+      # The environment above only reaches the *next* step, so this is both the
+      # check that it worked and the first place it could be checked. Without
+      # it a failure here would surface as CMake not finding a compiler.
+      - name: Check the MSVC toolchain
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          where cl.exe
+          where link.exe
+
+      # Qt comes from the official binaries on both Windows and Linux, and only
+      # from Homebrew on macOS.
+      #
+      # Windows has no system Qt at all. Linux has one, but Ubuntu 24.04 is on
+      # Qt 6.4, and private modules did not get their own CMake package until
+      # 6.9 -- so the GuiPrivate component platform/qrhi asks for cannot be
+      # satisfied from apt at any number of -dev packages. Pinning the version
+      # here also means the two platforms build against one known Qt rather
+      # than whatever the runner image happens to carry this month.
+      #
+      # 6.9.3 is the newest the online installer serves; keep this in step with
+      # the floor in platform/qrhi/CMakeLists.txt.
+      #
+      # platform_qrhi wants GuiPrivate and the shader compiler; the private
+      # headers come with qtbase, qsb does not.
+      - name: Install Qt
+        if: runner.os != 'macOS'
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          arch: ${{ runner.os == 'Windows' && 'win64_msvc2022_64' || 'linux_gcc_64' }}
+          modules: qtshadertools
+          cache: true
+
+      # Restore and save are split deliberately. actions/cache writes its entry
+      # from a post-step, and post-steps do not run when a job is cancelled --
+      # so a single cache action throws away a completed FFmpeg build every time
+      # a run is superseded, and the next run starts from source again. Saving
+      # in a step of its own, on failure as well as success, makes the
+      # dependency build survive whatever our own build then does.
+      #
+      # The key carries the runner image's version as well as the manifest's
+      # hash, and it took a run of forty-minute Windows jobs -- each restoring
+      # a cache that reported a hit -- to learn why. A vcpkg tree is reusable
+      # only on the toolchain that built it: a new image, with its new MSVC and
+      # new vcpkg, changes the ABI hash of every port, and vcpkg rebuilds the
+      # lot from a restored tree exactly as it would from nothing. Keyed on the
+      # manifest alone, that rebuild was invisible and permanent: the restore
+      # was an exact hit, an exact hit is what skips the save below, so the
+      # fresh tree was never written back, and the stale one was restored,
+      # rejected and rebuilt on every push after the image moved. With the
+      # image in the key, a new image is a new key: the old tree still comes
+      # back through the prefix, vcpkg rebuilds only what actually changed, and
+      # the result is saved because there was no exact hit to skip it.
+      # (builtin-baseline in vcpkg.json removes the other thing that used to
+      # move the ABI between images: the ports themselves.)
+      - name: Read the runner image version
+        id: image
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "version=${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore vcpkg packages
+        id: vcpkg-cache
+        if: runner.os == 'Windows'
+        uses: actions/cache/restore@v6
+        with:
+          path: vcpkg_installed
+          key: vcpkg-${{ runner.os }}-${{ steps.image.outputs.version }}-${{ hashFiles('vcpkg.json') }}
+          # Same image first, so a manifest change reuses every port it did not
+          # touch; any image after that, which still beats starting from source
+          # when the toolchain moved but most ports did not.
+          restore-keys: |
+            vcpkg-${{ runner.os }}-${{ steps.image.outputs.version }}-
+            vcpkg-${{ runner.os }}-
+
+      # Built as its own step rather than as a side effect of configuring, so
+      # that the log says plainly how much of the job is other people's code.
+      - name: Build vcpkg dependencies
+        if: runner.os == 'Windows'
+        run: >-
+          vcpkg install --triplet x64-windows
+          --x-install-root=${{ github.workspace }}/vcpkg_installed
+
+      - name: Save vcpkg packages
+        if: always() && runner.os == 'Windows' && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: vcpkg_installed
+          key: vcpkg-${{ runner.os }}-${{ steps.image.outputs.version }}-${{ hashFiles('vcpkg.json') }}
+
+      - name: Install FFmpeg CLI (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg --no-progress -y
 
       # Fixtures are generated rather than committed. Without them the media
       # tests skip rather than fail, so a generator failure would hide silently
       # -- hence the explicit check that they actually appeared.
       - name: Generate media fixtures
+        shell: bash
         run: |
           ./testdata/generate.sh
           test -f testdata/media/ladder_prores.mov
@@ -55,27 +254,370 @@ jobs:
       - name: Build
         run: cmake --build --preset ${{ matrix.preset }}
 
-      - name: Test
-        run: ctest --preset ${{ matrix.preset }}
+      # Shaders are generated for every backend from one GLSL source and
+      # compiled for none of them, so a construct HLSL rejects builds cleanly
+      # and fails at runtime as "cannot create a graphics pipeline" -- which is
+      # how a dynamic index used as an l-value in composite.frag reached us as
+      # thirty red GPU tests. fxc is the same compiler QRhi's D3D11 backend
+      # hands them to, so asking it here turns that into a build failure naming
+      # the file, the line and the error.
+      #
+      # Both Windows rows: the check costs seconds and the debug row is the one
+      # that runs the GPU tests it protects.
+      - name: Check the shaders compile as HLSL
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: pwsh scripts/check-hlsl.ps1 -BuildDir build/${{ matrix.preset }}
 
+      # CPack's WIX generator drives WiX 3's candle.exe and light.exe, which it
+      # finds through the WIX environment variable the toolset's installer sets.
+      # The runner image ships WiX, but a step's own environment is not the
+      # machine's, so it is read back explicitly here -- and installed if a
+      # future image ever stops shipping it. Failing here says "no WiX"; failing
+      # in cpack says "Cannot find candle" three hundred lines into a log.
+      - name: Set up WiX
+        if: runner.os == 'Windows' && matrix.artifact != ''
+        shell: pwsh
+        run: |
+          $wix = $env:WIX
+          if (-not $wix) { $wix = [Environment]::GetEnvironmentVariable("WIX", "Machine") }
+          if (-not $wix) {
+            Write-Host "WiX is not on this image; installing it"
+            choco install wixtoolset --no-progress -y
+            $wix = [Environment]::GetEnvironmentVariable("WIX", "Machine")
+          }
+          if (-not $wix -or -not (Test-Path (Join-Path $wix "bin\candle.exe"))) {
+            throw "WiX 3 toolset not found; cpack cannot build the MSI"
+          }
+          Write-Host "Using WiX at $wix"
+          Add-Content -Path $env:GITHUB_ENV  -Value "WIX=$wix"
+          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $wix "bin")
+
+      # Packaged before the tests run, not after, so that a run whose tests
+      # fail still leaves something to download and try -- which is exactly
+      # when somebody wants to look at a build by hand. cpack installs the
+      # runtime component only, so no test binary reaches the archive.
+      #
+      # The same packages the Release workflow attaches to a draft release;
+      # this makes them available from every run rather than only from a tag.
+      # Windows and Linux are self-contained -- Qt, FFmpeg and SDL travel with
+      # both, plus the MSVC runtime on Windows. macOS is not, for the reason
+      # recorded in cmake/Packaging.cmake: only cutreel.app carries its
+      # Qt, and the command-line tools in bin/ expect the libraries they were
+      # built against to be on the machine.
+      - name: Package
+        if: matrix.artifact != ''
+        run: cpack --preset ${{ matrix.preset }}
+
+      # The MSI cannot carry an icon, so the file people actually download is a
+      # Burn bundle wrapping it. See cmake/bundle.wxs.in.
+      - name: Wrap the MSI in a bootstrapper
+        if: runner.os == 'Windows' && matrix.artifact != ''
+        shell: pwsh
+        run: pwsh scripts/build-msi-bundle.ps1 -BuildDir build/${{ matrix.preset }}
+
+      # The one thing a failed `cpack -G WIX` does not tell you is what WiX
+      # said. CPack prints "Problem running WiX. Please check '.../wix.log'"
+      # and then the runner is thrown away with the log still in it, which is
+      # how the ICE57 error that blocked every MSI for five commits stayed
+      # invisible. Both the log and the generated sources go into the run.
+      - name: Show the WiX log (on failure)
+        if: failure() && runner.os == 'Windows' && matrix.artifact != ''
+        shell: pwsh
+        run: |
+          $wix = "build/${{ matrix.preset }}/_CPack_Packages/win64/WIX"
+          $log = Join-Path $wix "wix.log"
+          if (Test-Path $log) {
+            Write-Host "===== wix.log ====="
+            Get-Content $log
+          } else {
+            Write-Host "No wix.log at $log; cpack failed before running WiX."
+          }
+          # candle and light report by file and line number, so the sources
+          # are worth as much as the log itself.
+          foreach ($f in Get-ChildItem $wix -Include *.wxs,*.wxi -Recurse -ErrorAction SilentlyContinue) {
+            Write-Host "===== $($f.Name) ====="
+            Get-Content $f.FullName
+          }
+
+      - name: Collect the archive
+        if: matrix.artifact != ''
+        shell: bash
+        run: |
+          mkdir -p dist
+          # CPack drops the archive in the build tree next to everything else.
+          find "build/${{ matrix.preset }}" -maxdepth 1 \
+            \( -name 'CutReel-*.tar.gz' -o -name 'CutReel-*.exe' \
+               -o -name 'cutreel_*.deb' \) -exec cp {} dist/ \;
+          ls -l dist
+          # An empty upload is a green job that shipped nothing, which is worse
+          # than a red one.
+          test -n "$(ls -A dist)"
+
+      # The claim the .deb makes is that it runs on a machine holding none of
+      # the build's dependencies. Grepping ldd for "not found" cannot test that
+      # claim on this runner, and it took a broken release to see why: the
+      # runner has every build dependency installed into the default loader
+      # path, so a library the package forgot -- or one it carries but the
+      # loader never looks for there, which is the shape the libvpx failure
+      # took -- resolves to the system's copy and "not found" is never
+      # printed. The check passed on the one machine it could not tell apart
+      # from a clean one. (The reasoning that made it look fair was true of
+      # Qt, which install-qt-action puts somewhere the loader does not search,
+      # and false of FFmpeg and every codec library apt put under /usr/lib.)
+      #
+      # So the question is where each library resolves *to*, and it is asked
+      # of every ELF the package ships -- the executables, the bundled
+      # libraries, and the Qt plugins, which nothing links and which ldd of
+      # the app therefore never sees. For each one, every library it directly
+      # asks for (its DT_NEEDED entries) that is not on the list of libraries
+      # the package leaves to the machine must be found by the loader inside
+      # the package. Not somewhere else, and not nowhere.
+      #
+      # Direct needs, and not the whole closure ldd prints, on purpose. A
+      # library left to the machine brings its own dependencies from the
+      # machine -- fontconfig its libexpat, glib its libpcre2 -- and that is
+      # correct: a bundled libexpat underneath the system's fontconfig is
+      # exactly the mismatch the exclusion list exists to prevent. Judging the
+      # closure flagged both of those and would have flagged the next one;
+      # judging what our own files ask for flags only what we were supposed to
+      # ship. It still catches the libvpx case, because libavcodec is ours and
+      # asks for it directly -- and running ldd on each bundled library means
+      # each one is resolved through its own RPATH, which is the very thing
+      # that was missing. The list is read from the file configure wrote, so it
+      # is the very list Packaging.cmake excludes from bundling.
+      - name: Check the .deb is self-contained
+        if: runner.os == 'Linux' && matrix.artifact != ''
+        shell: bash
+        run: |
+          rm -rf /tmp/unpacked && mkdir -p /tmp/unpacked
+          dpkg-deb -x dist/cutreel_*.deb /tmp/unpacked
+          test -x /tmp/unpacked/usr/bin/cutreel
+          # One anchored alternation of the regexes, one per line in the file.
+          allowed="^($(paste -sd'|' "build/${{ matrix.preset }}/system-libraries.txt"))$"
+          status=0
+          checked=0
+          while IFS= read -r elf; do
+            # Not every file under lib/cutreel is an ELF object; qt.conf is not.
+            needed=$(objdump -p "$elf" 2>/dev/null | awk '/NEEDED/ {print $2}') || continue
+            checked=$((checked + 1))
+            # The loader's own answer for this file, with LD_LIBRARY_PATH
+            # cleared so that only its RPATH and the machine's defaults speak.
+            resolved=$(env -u LD_LIBRARY_PATH ldd "$elf" 2>/dev/null || true)
+            for soname in $needed; do
+              if printf '%s\n' "$soname" | grep -qE "$allowed"; then continue; fi
+              where=$(printf '%s\n' "$resolved" | awk -v s="$soname" '$1 == s && $2 == "=>" { if ($3 == "not") print "not found"; else print $3 }')
+              case "$where" in
+                /tmp/unpacked/*) ;;
+                ""|"not found")
+                  echo "${elf#/tmp/unpacked}: asks for $soname, and the loader cannot find it"
+                  status=1 ;;
+                *)
+                  echo "${elf#/tmp/unpacked}: asks for $soname, which resolves to $where -- outside the package, and not a library it leaves to the machine"
+                  status=1 ;;
+              esac
+            done
+          done < <(find /tmp/unpacked/usr/bin /tmp/unpacked/usr/lib/cutreel -type f | sort)
+          echo "checked $checked ELF objects"
+          test "$checked" -gt 0
+          # And then actually run the tools, with the environment emptied.
+          for tool in zaro-probe zaro-render zaro-cut zaro-otio; do
+            env -i "PATH=$PATH" "HOME=$HOME" "/tmp/unpacked/usr/bin/$tool" --version || status=1
+          done
+          exit $status
+
+      # And the claim installing it makes is that `cutreel` is then a command
+      # and CutReel is then in the applications menu. Neither is something the
+      # build can check -- both are properties of an installed tree, invisible
+      # until somebody has installed the package and typed the name -- which is
+      # how a release shipped with the executable under a name the package
+      # never mentions. So it is installed here, for real, and asked.
+      - name: Check the .deb installs and is launchable
+        if: runner.os == 'Linux' && matrix.artifact != ''
+        shell: bash
+        env:
+          # What the GUI job sets for the same reason: no GPU on a runner, so
+          # GL has to come from llvmpipe, and the RHI backend is named rather
+          # than probed.
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          QSG_RHI_BACKEND: opengl
+          QT_QPA_PLATFORM: xcb
+        run: |
+          sudo apt-get install -y ./dist/cutreel_*.deb
+          # Resolved through PATH, the way a user's shell resolves it.
+          command -v cutreel
+          test -x /usr/bin/cutreel
+          # The launcher entry -- and not just that the file landed. A file in
+          # the right place is not the same as an entry the menu shows, and
+          # these are the ways it can install perfectly and still be invisible:
+          # marked hidden, malformed enough that the desktop skips it, or
+          # pointing Exec at something that is not on the machine. Each one
+          # looks exactly like "the package installed and nothing happened".
+          entry=/usr/share/applications/cutreel.desktop
+          test -f "$entry"
+          if grep -qE '^(NoDisplay|Hidden)=true' "$entry"; then
+            echo "$entry is installed but marked hidden; it will never appear"
+            exit 1
+          fi
+          # Installed rather than used if present: a check that silently skips
+          # itself is a check that was never run.
+          sudo apt-get install -y desktop-file-utils
+          desktop-file-validate "$entry"
+          # Exec's first word, resolved the way a launcher resolves it.
+          command -v "$(grep -m1 '^Exec=' "$entry" | cut -d= -f2 | cut -d' ' -f1)"
+          # And the icon, read out of the entry rather than assumed, in the
+          # theme it is named from. index.theme belongs to hicolor-icon-theme,
+          # which the package depends on precisely so that these directories
+          # are a theme a desktop searches and not three loose folders.
+          test -f /usr/share/icons/hicolor/index.theme
+          test -f "/usr/share/icons/hicolor/256x256/apps/$(sed -n 's/^Icon=//p' "$entry").png"
+          # Started the way a user starts it, with no display, far enough to
+          # prove the installed binary loads its Qt and its platform plugin.
+          # --selftest needs a project of its own; --quiet with no arguments
+          # exits 2 by design, after QApplication and the platform plugin --
+          # the two things that fail on an incomplete package -- have both been
+          # through. `|| code=$?` rather than a bare call: this shell runs
+          # under -e, which would take the expected 2 for a failure.
+          code=0
+          QT_QPA_PLATFORM=offscreen cutreel --quiet || code=$?
+          test "$code" -eq 2
+
+          # And then the thing all of this is for: does the installed package
+          # put a picture on the screen. Everything above can pass on a package
+          # whose application starts, opens a window and draws nothing --
+          # which is what shipped when the xcb plugin's OpenGL integration was
+          # left out of it, because that is a plugin nothing links, loaded by
+          # name, and its absence is a warning on stderr rather than a failure
+          # to start. --selftest renders the project and returns non-zero
+          # unless a frame came back with something lit in it.
+          #
+          # On a real display, deliberately: QT_QPA_PLATFORM=offscreen has no
+          # QRhi, so it would pass without ever touching the code path this
+          # exists to test. Xvfb with llvmpipe behind it is the same recipe the
+          # GUI job uses, and xcb is named rather than left to Qt so that the
+          # plugin under test is the one that gets used.
+          zaro-cut /tmp/smoke.cutreel testdata/media/ladder_prores.mov
+          xvfb-run -a --server-args="-screen 0 1280x800x24" \
+            cutreel /tmp/smoke.cutreel --selftest --capture /tmp/smoke.png
+          # --selftest prints what it measured, but an exit code can be zero
+          # from a build that wrote no file, so the picture is checked too.
+          test -s /tmp/smoke.png
+          sudo apt-get remove -y cutreel
+
+      - name: Upload the archive
+        if: matrix.artifact != ''
+        uses: actions/upload-artifact@v6
+        with:
+          name: cutreel-${{ matrix.artifact }}
+          path: dist/*
+          if-no-files-found: error
+          # Shorter than the 90-day default: these are every-push builds, and
+          # the ones worth keeping are on the Releases page instead.
+          retention-days: 14
+
+      # The GUI suite is excluded here and run once, on its own, in the job
+      # below. It needs a display and a working QRhi, which is a property of the
+      # runner rather than of the build, so running it seven times over would be
+      # seven chances to fail for a reason that is not ours.
+      - name: Test
+        run: ctest --preset ${{ matrix.preset }} -E zaro_app_tests
+
+      # The two exit-criterion harnesses below are POSIX shell scripts that look
+      # for extensionless binaries, so they run on macOS and Linux only. Windows
+      # gets the compile-and-unit-test signal; the pixel-exactness claim is not
+      # platform-specific enough to be worth porting them for.
       - name: Verify frame exactness against FFmpeg
+        if: runner.os != 'Windows'
         run: ZARO_FRAME=build/${{ matrix.preset }}/bin/zaro-frame ./scripts/verify-frame-exact.sh
+
+      - name: Verify audio/video sync in a rendered file
+        if: runner.os != 'Windows'
+        run: |
+          ZARO_CUT=build/${{ matrix.preset }}/bin/zaro-cut \
+          ZARO_RENDER=build/${{ matrix.preset }}/bin/zaro-render \
+          ./scripts/verify-av-sync.sh
 
   format:
     name: clang-format
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # Pinned exactly: clang-format's output changes between major versions,
       # and a CI job that disagrees with everyone's editor gets ignored.
       - name: Install clang-format
         run: pipx install clang-format==22.1.8
 
+      # Every directory is checked before the job gives up. Letting the first
+      # failure abort the loop -- which is what the step's own `bash -e` does
+      # unless the status is caught -- means a report that stops at whichever
+      # directory happened to sort first, and a second push to discover the
+      # rest.
       - name: Check formatting
         run: |
+          status=0
           for dir in core ui-core platform app tools; do
             [ -d "$dir" ] || continue
             find "$dir" \( -name '*.cpp' -o -name '*.h' \) -print0 \
-              | xargs -0 --no-run-if-empty clang-format --dry-run --Werror
+              | xargs -0 --no-run-if-empty clang-format --dry-run --Werror || status=1
           done
+          exit $status
+
+  gui:
+    name: GUI tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      # From the runner image, as in the build-and-test job above.
+      - name: Check for Ninja
+        shell: bash
+        run: ninja --version
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config ffmpeg nlohmann-json3-dev libsdl2-dev \
+            libavcodec-dev libavformat-dev libavutil-dev \
+            libswscale-dev libswresample-dev \
+            libgl1-mesa-dev libglu1-mesa-dev libxkbcommon-x11-0 libxcb-cursor0 \
+            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
+            libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 \
+            libvulkan-dev \
+            xvfb libgl1-mesa-dri mesa-vulkan-drivers
+
+      # The same Qt the build matrix uses; see the note there for why it is not
+      # the distribution's.
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          arch: linux_gcc_64
+          modules: qtshadertools
+          cache: true
+
+      - name: Generate media fixtures
+        run: |
+          ./testdata/generate.sh
+          test -f testdata/media/sync_click_flash.mov
+
+      - name: Configure
+        run: cmake --preset debug
+
+      - name: Build
+        run: cmake --build --preset debug --target zaro_app_tests
+
+      # A real display, not QT_QPA_PLATFORM=offscreen: that plugin has no QRhi,
+      # so a QRhiWidget on it never draws and every test that measures a picture
+      # fails. Xvfb with llvmpipe behind it gives a GL the compositor can use.
+      #
+      # These drive one window through sixty-two gestures and grab the frame
+      # each one produced, so they are slower than the headless suites and are
+      # kept to a single job rather than a matrix.
+      - name: Test
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          QSG_RHI_BACKEND: opengl
+        run: xvfb-run -a --server-args="-screen 0 1600x1200x24" ctest --preset debug -R zaro_app_tests --output-on-failure

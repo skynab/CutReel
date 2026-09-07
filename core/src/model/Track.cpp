@@ -35,6 +35,49 @@ const Clip* Track::clipAt(const time::RationalTime& t) const {
     return candidate.timelineRange.contains(t) ? &candidate : nullptr;
 }
 
+const Transition* Track::transitionAt(const time::RationalTime& t) const {
+    for (const Transition& transition : transitions_) {
+        if (transition.range.contains(t)) {
+            return &transition;
+        }
+    }
+    return nullptr;
+}
+
+const Transition* Track::findTransition(TransitionId id) const {
+    for (const Transition& transition : transitions_) {
+        if (transition.id == id) {
+            return &transition;
+        }
+    }
+    return nullptr;
+}
+
+void Track::setTransitions(std::vector<Transition> transitions) {
+    transitions_ = std::move(transitions);
+}
+
+std::size_t Track::pruneOrphanTransitions() {
+    // The overwhelmingly common case, and worth the line: this runs after every
+    // edit on every track, and a track with no spans has nothing to check.
+    if (transitions_.empty()) {
+        return 0;
+    }
+    const auto orphaned = [this](const Transition& transition) {
+        if (!transition.from.isValid() && !transition.to.isValid()) {
+            return true;
+        }
+        if (transition.from.isValid() && find(transition.from) == nullptr) {
+            return true;
+        }
+        return transition.to.isValid() && find(transition.to) == nullptr;
+    };
+    const auto gone = std::remove_if(transitions_.begin(), transitions_.end(), orphaned);
+    const auto dropped = static_cast<std::size_t>(std::distance(gone, transitions_.end()));
+    transitions_.erase(gone, transitions_.end());
+    return dropped;
+}
+
 std::optional<std::size_t> Track::indexOf(ClipId id) const {
     for (std::size_t i = 0; i < clips_.size(); ++i) {
         if (clips_[i].id == id) {

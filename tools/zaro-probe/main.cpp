@@ -9,10 +9,15 @@
 
 #include "zaro/platform/ffmpeg/FFmpegMedia.h"
 
+#include "Cli.h"
+
 namespace {
 
 void printUsage() {
-    std::puts("usage: zaro-probe <file> [--verbose]");
+    std::puts("usage: zaro-probe <file> [options]");
+    std::puts("");
+    std::puts("  --verbose   include the full stream detail");
+    std::puts("  --version   print the version and exit");
 }
 
 std::string describeRate(const zaro::time::Rational& rate) {
@@ -25,6 +30,9 @@ std::string describeRate(const zaro::time::Rational& rate) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    if (zaro::tools::handledVersion(argc, argv, "zaro-probe")) {
+        return 0;
+    }
     if (argc < 2) {
         printUsage();
         return 2;

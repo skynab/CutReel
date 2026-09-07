@@ -1,0 +1,292 @@
+name: Release
+
+# Tag a commit to cut a release:
+#
+#   git tag v0.7.0 && git push origin v0.7.0
+#
+# The three platform archives are built, attached to a *draft* GitHub release,
+# and left there. Publishing is a person's decision, not a workflow's -- a tag
+# push is easy to do by accident and impossible to unsend once it has mailed
+# every watcher of the repository.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to build and draft a release for
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  QT_VERSION: 6.9.3
+
+jobs:
+  package:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: macos,   os: macos-14,     preset: release }
+          - { name: linux,   os: ubuntu-24.04, preset: release }
+          - { name: windows, os: windows-2022, preset: windows-release }
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      # Ninja comes with every runner image this workflow uses -- 1.13.2 on
+      # ubuntu-24.04, macos-14 and windows-2022 alike -- so it is taken from
+      # there rather than installed. The action that used to do it,
+      # gha-setup-ninja, is one of the node20 actions GitHub now warns about,
+      # and it was fetching a tool already on the machine.
+      #
+      # Checked rather than assumed: if an image ever stops shipping it, this
+      # says so here instead of at Configure, where the failure is about
+      # CMAKE_MAKE_PROGRAM and never mentions Ninja.
+      - name: Check for Ninja
+        shell: bash
+        run: ninja --version
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        # The runner image ships aws/tap pre-tapped for the AWS CLI, and
+        # Homebrew 6 refuses to use an untrusted tap, so every brew command
+        # prints a block about it. Nothing here comes from that tap -- all five
+        # formulae are homebrew/core -- so dropping it is quieter and narrower
+        # than granting whole-tap trust or setting HOMEBREW_NO_REQUIRE_TAP_TRUST.
+        # Tolerant of the tap being absent, in case a later image stops shipping it.
+        run: |
+          brew untap aws/tap || true
+          brew install ffmpeg sdl2 qt pkg-config nlohmann-json
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config ffmpeg nlohmann-json3-dev libsdl2-dev \
+            libavcodec-dev libavformat-dev libavutil-dev \
+            libswscale-dev libswresample-dev \
+            libgl1-mesa-dev libglu1-mesa-dev libxkbcommon-x11-0 libxcb-cursor0 \
+            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
+            libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 \
+            libvulkan-dev \
+            patchelf
+          # patchelf is for packaging: it gives the bundled libraries an RPATH
+          # so they can find each other. See cmake/InstallBundledRpath.cmake.in.
+
+      # What ilammy/msvc-dev-cmd@v1 was doing, done directly. That action is
+      # the last node20 one in this workflow and has no newer major to move
+      # to -- its master branch still says `using: node20` -- and all it does
+      # is run vcvars64.bat and hand the resulting environment to the steps
+      # that follow. GITHUB_ENV does that part for us.
+      #
+      # Only the variables vcvars actually changes are exported, rather than
+      # the whole environment: GITHUB_ENV is parsed line by line, and cmd's
+      # `set` prints entries that are not name=value pairs at all.
+      - name: Set up MSVC
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) { throw "vswhere.exe not found at $vswhere" }
+          $install = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          if (-not $install) { throw "No Visual Studio with the C++ toolset is installed" }
+          $vcvars = Join-Path $install "VC\Auxiliary\Build\vcvars64.bat"
+          if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found at $vcvars" }
+          Write-Host "Using $vcvars"
+
+          $before = @{}
+          Get-ChildItem env: | ForEach-Object { $before[$_.Name] = $_.Value }
+
+          $exported = 0
+          # `call`, so that control returns and `set` actually runs; stderr is
+          # left alone so that a vcvars failure says why rather than vanishing.
+          foreach ($line in (cmd /c "call `"$vcvars`" >nul && set")) {
+            $pair = $line -split '=', 2
+            if ($pair.Count -ne 2) { continue }
+            $name = $pair[0]
+            $value = $pair[1]
+            # A name is never empty and never starts with '='; a value that
+            # spans lines cannot be written to GITHUB_ENV in this form.
+            if (-not $name -or $name.StartsWith('=') -or $value -match "`n") { continue }
+            if ($before[$name] -ne $value) {
+              Add-Content -Path $env:GITHUB_ENV -Value "$name=$value"
+              $exported++
+            }
+          }
+          Write-Host "Exported $exported variables from vcvars64.bat"
+          if ($exported -eq 0) { throw "vcvars64.bat changed nothing; the toolchain is not set up" }
+
+      # The environment above only reaches the *next* step, so this is both the
+      # check that it worked and the first place it could be checked. Without
+      # it a failure here would surface as CMake not finding a compiler.
+      - name: Check the MSVC toolchain
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          where cl.exe
+          where link.exe
+
+      # Windows and Linux both take Qt from the official binaries; the CI
+      # workflow explains why Linux cannot use the distribution's.
+      - name: Install Qt
+        if: runner.os != 'macOS'
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          arch: ${{ runner.os == 'Windows' && 'win64_msvc2022_64' || 'linux_gcc_64' }}
+          modules: qtshadertools
+          cache: true
+
+      # The same key the CI workflow writes, spelled the same way, so a tag
+      # build reuses the dependency tree CI already paid for instead of
+      # rebuilding FFmpeg from source. The CI workflow explains why the runner
+      # image's version is part of it.
+      - name: Read the runner image version
+        id: image
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "version=${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore vcpkg packages
+        if: runner.os == 'Windows'
+        uses: actions/cache/restore@v6
+        with:
+          path: vcpkg_installed
+          key: vcpkg-${{ runner.os }}-${{ steps.image.outputs.version }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-${{ steps.image.outputs.version }}-
+            vcpkg-${{ runner.os }}-
+
+      # No tests in a release build: the tag being built has already been
+      # through CI, and Catch2 is not something to ship or to wait for here.
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }} -DZARO_BUILD_TESTS=OFF
+
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }}
+
+      # The same check the CI workflow runs; see it for why. A shader the
+      # D3D11 backend cannot compile must not reach a release archive.
+      - name: Check the shaders compile as HLSL
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: pwsh scripts/check-hlsl.ps1 -BuildDir build/${{ matrix.preset }}
+
+      # CPack's WIX generator drives WiX 3's candle.exe and light.exe, which it
+      # finds through the WIX environment variable the toolset's installer sets.
+      # See the CI workflow for why it is read back rather than assumed.
+      - name: Set up WiX
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $wix = $env:WIX
+          if (-not $wix) { $wix = [Environment]::GetEnvironmentVariable("WIX", "Machine") }
+          if (-not $wix) {
+            Write-Host "WiX is not on this image; installing it"
+            choco install wixtoolset --no-progress -y
+            $wix = [Environment]::GetEnvironmentVariable("WIX", "Machine")
+          }
+          if (-not $wix -or -not (Test-Path (Join-Path $wix "bin\candle.exe"))) {
+            throw "WiX 3 toolset not found; cpack cannot build the MSI"
+          }
+          Write-Host "Using WiX at $wix"
+          Add-Content -Path $env:GITHUB_ENV  -Value "WIX=$wix"
+          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $wix "bin")
+
+      - name: Package
+        run: cpack --preset ${{ matrix.preset }}
+
+      # The MSI cannot carry an icon, so the file people actually download is a
+      # Burn bundle wrapping it. See cmake/bundle.wxs.in.
+      - name: Wrap the MSI in a bootstrapper
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: pwsh scripts/build-msi-bundle.ps1 -BuildDir build/${{ matrix.preset }}
+
+      # The one thing a failed `cpack -G WIX` does not tell you is what WiX
+      # said. CPack prints "Problem running WiX. Please check '.../wix.log'"
+      # and then the runner is thrown away with the log still in it, which is
+      # how the ICE57 error that blocked every MSI for five commits stayed
+      # invisible. Both the log and the generated sources go into the run.
+      - name: Show the WiX log (on failure)
+        if: failure() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $wix = "build/${{ matrix.preset }}/_CPack_Packages/win64/WIX"
+          $log = Join-Path $wix "wix.log"
+          if (Test-Path $log) {
+            Write-Host "===== wix.log ====="
+            Get-Content $log
+          } else {
+            Write-Host "No wix.log at $log; cpack failed before running WiX."
+          }
+          # candle and light report by file and line number, so the sources
+          # are worth as much as the log itself.
+          foreach ($f in Get-ChildItem $wix -Include *.wxs,*.wxi -Recurse -ErrorAction SilentlyContinue) {
+            Write-Host "===== $($f.Name) ====="
+            Get-Content $f.FullName
+          }
+
+      - name: Collect the archive
+        shell: bash
+        run: |
+          mkdir -p dist
+          # CPack drops the archive in the build tree next to everything else.
+          find "build/${{ matrix.preset }}" -maxdepth 1 \
+            \( -name 'CutReel-*.tar.gz' -o -name 'CutReel-*.exe' \
+               -o -name 'cutreel_*.deb' \) -exec cp {} dist/ \;
+          ls -l dist
+          # An empty upload is a green job that shipped nothing, which is worse
+          # than a red one.
+          test -n "$(ls -A dist)"
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: cutreel-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  draft-release:
+    name: Draft the release
+    needs: package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      # v8 rather than the v6 the other actions are pinned to: v6 of this one is
+      # still a node20 action, and v7 is the first that is not.
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create or update the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          ls -l dist
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* \
+              --draft \
+              --title "CutReel $TAG" \
+              --generate-notes
+          fi
+          echo "Draft release $TAG is ready; publish it from the Releases page."
