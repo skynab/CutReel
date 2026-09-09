@@ -142,6 +142,27 @@ TEST_CASE("Media shorter than the clip is refused", "[edit][replace]") {
     CHECK_FALSE(edit::makeReplaceSource(f.project, f.on(f.v1), clipId, f.shortMedia));
 }
 
+TEST_CASE("A still can replace a clip of any length", "[edit][replace]") {
+    Fixture f;
+    // A photograph reports no duration, which used to be read as "shorter
+    // than the clip" -- a sentence that means nothing about one picture, and
+    // the answer somebody got for swapping a placeholder for the artwork.
+    const model::MediaRefId artwork = f.addStill("artwork.png");
+    REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.v1), f.clip(0, 200, 500))));
+    const model::ClipId clipId = f.track(f.v1).clips().front().id;
+
+    REQUIRE(f.run(edit::makeReplaceSource(f.project, f.on(f.v1), clipId, artwork)));
+    const model::Clip& after = f.track(f.v1).clips().front();
+    CHECK(after.source == artwork);
+    // The cut is untouched, which is the whole promise of this operation.
+    CHECK(after.timelineRange.duration().frames() == 200);
+    // And the picture is read from its beginning: there is no frame 500 of it.
+    CHECK(after.sourceRange.start().frames() == 0);
+    // As long as the clip, so that keyframes on it still advance -- animation
+    // is read in source time.
+    CHECK(after.sourceRange.duration().frames() == 200);
+}
+
 TEST_CASE("A clip with no media to replace is refused", "[edit][replace]") {
     Fixture f;
     model::Graphic shape;
