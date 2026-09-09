@@ -973,6 +973,43 @@ Status GpuCompositor::endFrameOnGpu() {
     return {};
 }
 
+namespace {
+
+/// Copy a readback into an image, the right way up.
+///
+/// **The one thing a GPU readback does not agree about across backends.**
+/// OpenGL puts (0, 0) at the bottom left of a render target; Metal, Vulkan and
+/// D3D put it at the top left. `readBackTexture` hands back whatever the API
+/// says, so on OpenGL the first row of data is the *bottom* row of the picture
+/// and the frame arrives upside down.
+///
+/// That is the same convention the present pass compensates for when it draws
+/// to the screen, which is why the preview looked right and everything read
+/// back off the GPU did not: a check that counts lit pixels reports the same
+/// answer either way, so the flip survived every test there was.
+///
+/// Where it showed: OpenGL is the backend `QRhiWidget` hands the compositor on
+/// Linux -- the only platform where it is ever used, since the device this
+/// class builds for itself is Metal, D3D11 or Vulkan -- so every frame the
+/// render cache pre-rendered there came back inverted, and scrubbing into a
+/// cached stretch turned the picture over.
+void copyReadback(const QRhi& rhi, const QRhiReadbackResult& readback, render::RgbaImage& out) {
+    const std::int32_t width = out.width();
+    const std::int32_t height = out.height();
+    const auto rowBytes = static_cast<std::size_t>(width) * sizeof(render::Rgba);
+    const auto* data = reinterpret_cast<const render::Rgba*>(readback.data.constData());
+    if (!rhi.isYUpInFramebuffer()) {
+        std::memcpy(out.row(0), data, rowBytes * static_cast<std::size_t>(height));
+        return;
+    }
+    for (std::int32_t y = 0; y < height; ++y) {
+        std::memcpy(out.row(height - 1 - y), data + static_cast<std::ptrdiff_t>(y) * width,
+                    rowBytes);
+    }
+}
+
+}  // namespace
+
 Status GpuCompositor::endFrame(render::RgbaImage& out) {
     State& state = *state_;
     if (!state.inFrame) {
@@ -1000,7 +1037,7 @@ Status GpuCompositor::endFrame(render::RgbaImage& out) {
     if (out.width() != width || out.height() != height) {
         out = render::RgbaImage{width, height};
     }
-    std::memcpy(out.row(0), readback.data.constData(), static_cast<std::size_t>(expected));
+    copyReadback(*state.rhi, readback, out);
     return {};
 }
 
@@ -1632,7 +1669,7 @@ Status GpuCompositor::presentToImage(std::int32_t width, std::int32_t height,
     if (out.width() != width || out.height() != height) {
         out = render::RgbaImage{width, height};
     }
-    std::memcpy(out.row(0), readback.data.constData(), static_cast<std::size_t>(expected));
+    copyReadback(*state.rhi, readback, out);
     return {};
 }
 
