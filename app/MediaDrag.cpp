@@ -2,10 +2,15 @@
 
 #include <QByteArray>
 #include <QDataStream>
+#include <QFileInfo>
 #include <QIODevice>
+#include <QList>
 #include <QMimeData>
 #include <QString>
+#include <QUrl>
 #include <cstdint>
+
+#include "zaro/core/io/MediaBrowser.h"
 
 namespace zaro::app {
 namespace {
@@ -14,7 +19,50 @@ namespace {
 /// carry two numbers cannot be mistaken for one of ours.
 constexpr const char* kMimeType = "application/x-cutreel-media";
 
+constexpr const char* kProjectExtension = "cutreel";
+
 }  // namespace
+
+QStringList droppedMediaPaths(const QMimeData* mime) {
+    QStringList paths;
+    if (mime == nullptr || !mime->hasUrls()) {
+        return paths;
+    }
+    for (const QUrl& url : mime->urls()) {
+        if (!url.isLocalFile()) {
+            continue;  // a URL is not a file this program can open
+        }
+        const QString path = url.toLocalFile();
+        const QFileInfo info{path};
+        if (info.isDir() || io::looksLikeMedia(path.toStdString())) {
+            paths.push_back(path);
+        }
+    }
+    return paths;
+}
+
+std::string droppedProjectPath(const QMimeData* mime) {
+    if (mime == nullptr || !mime->hasUrls()) {
+        return {};
+    }
+    const QList<QUrl> urls = mime->urls();
+    if (urls.size() != 1 || !urls.front().isLocalFile()) {
+        return {};
+    }
+    const QString path = urls.front().toLocalFile();
+    const QFileInfo info{path};
+    // By name, not by opening it. The answer is wanted while the pointer is
+    // still moving, and the border that says "this will be taken" has to be
+    // drawn before the button comes up. A file named like a project that
+    // turns out not to be one is refused by the open, with a sentence saying
+    // so -- which is the right place for that answer and the wrong place for
+    // this one.
+    if (info.isDir() ||
+        info.suffix().compare(QLatin1String{kProjectExtension}, Qt::CaseInsensitive) != 0) {
+        return {};
+    }
+    return path.toStdString();
+}
 
 const char* mediaDragMimeType() {
     return kMimeType;

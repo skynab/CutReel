@@ -5,6 +5,7 @@
 // it is spelled.
 #pragma once
 
+#include <QStringList>
 #include <optional>
 #include <string>
 
@@ -48,5 +49,34 @@ struct MediaDrag {
 
 /// What a drag carries, if it is one of ours and names something.
 [[nodiscard]] std::optional<MediaDrag> decodeMediaDrag(const QMimeData* mime);
+
+/// The media files a drag out of the file manager carries, if it carries any.
+///
+/// By extension, the way the media browser lists by extension: the answer is
+/// needed while the pointer is still moving, and opening every file under the
+/// cursor to be sure is not something that can happen at that speed. A folder
+/// counts, because a folder of rushes is the usual thing to let go of.
+///
+/// Shared by the bin and the timeline, which both take footage from the file
+/// manager and must agree to the letter about what counts as some -- a drag
+/// the timeline offers to take and the bin then refuses to import is a drop
+/// that appears to do nothing.
+[[nodiscard]] QStringList droppedMediaPaths(const QMimeData* mime);
+
+/// The project file a drag out of the file manager carries, if that is what it
+/// is carrying. Empty otherwise.
+///
+/// Here rather than in the window, because the window is not where the drop
+/// lands. Qt hands a drop to the widget under the pointer that accepts drops
+/// and stops there -- a drag event a child refuses does not fall through to
+/// its parent -- so the bin and the timeline, which cover nearly the whole
+/// window, each have to recognise a project and pass it up. One reader so
+/// that they cannot come to disagree about what counts.
+///
+/// **One file, and only a project.** A drag of several is somebody importing
+/// rushes, and a project among them would replace the window they were
+/// importing into: an answer to a question nobody asked, and the surest way
+/// to lose the last few minutes of work. A folder is likewise an import.
+[[nodiscard]] std::string droppedProjectPath(const QMimeData* mime);
 
 }  // namespace zaro::app
