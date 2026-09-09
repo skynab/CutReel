@@ -2,6 +2,9 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
+#include <string>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -361,4 +364,150 @@ TEST_CASE("A sequence's delivery curve survives a round trip", "[io][tonemap]") 
         REQUIRE(bare);
         CHECK(bare->find("\"output\"") == std::string::npos);
     }
+}
+
+// --- Portable paths ---------------------------------------------------------
+//
+// The thing these are all about: a project and its footage that were moved
+// together should still find each other, and a project moved on its own
+// should still find footage that stayed where it was.
+
+namespace {
+
+/// A project in `dir` with one media reference pointing at a file that really
+/// exists at `mediaPath`, saved. Returns the project's path.
+std::string saveProjectPointingAt(const std::filesystem::path& dir,
+                                  const std::filesystem::path& mediaPath) {
+    std::filesystem::create_directories(dir);
+    std::filesystem::create_directories(mediaPath.parent_path());
+    std::ofstream{mediaPath} << "not really a movie";
+
+    Fixture f;
+    std::vector<model::MediaRef> media = f.project.media();
+    media.front().path = mediaPath.string();
+    f.project.setMedia(std::move(media));
+
+    const std::string path = (dir / "cut.cutreel").string();
+    REQUIRE(io::saveProject(f.project, path));
+    return path;
+}
+
+}  // namespace
+
+TEST_CASE("A project moved with its footage still finds it", "[io][save][paths]") {
+    TempDir dir;
+    const std::filesystem::path was = dir.path / "was";
+    const std::string project = saveProjectPointingAt(was, was / "footage" / "clip.mov");
+
+    // The whole folder somewhere else -- another disk, another machine, a
+    // different account. The absolute path in the file now names nothing.
+    const std::filesystem::path now = dir.path / "now";
+    std::filesystem::rename(was, now);
+
+    auto reopened = io::loadProject((now / "cut.cutreel").string());
+    REQUIRE(reopened);
+    const std::filesystem::path found{reopened->project.media().front().path};
+    CHECK(std::filesystem::exists(found));
+    CHECK(std::filesystem::equivalent(found, now / "footage" / "clip.mov"));
+}
+
+TEST_CASE("A project moved away from its footage still finds it", "[io][save][paths]") {
+    TempDir dir;
+    // Footage that does not travel with the project: a shared library, a card
+    // still in the reader, anything on another volume.
+    const std::filesystem::path media = dir.path / "library" / "clip.mov";
+    const std::filesystem::path was = dir.path / "was";
+    const std::string project = saveProjectPointingAt(was, media);
+
+    const std::filesystem::path now = dir.path / "elsewhere" / "deeper";
+    std::filesystem::create_directories(now.parent_path());
+    std::filesystem::rename(was, now);
+
+    auto reopened = io::loadProject((now / "cut.cutreel").string());
+    REQUIRE(reopened);
+    // The relative path names nothing from here, so the absolute one wins --
+    // which is the whole reason both are written.
+    const std::filesystem::path found{reopened->project.media().front().path};
+    CHECK(std::filesystem::exists(found));
+    CHECK(std::filesystem::equivalent(found, media));
+}
+
+TEST_CASE("A copied project folder edits its own copies", "[io][save][paths]") {
+    TempDir dir;
+    const std::filesystem::path original = dir.path / "original";
+    const std::string project = saveProjectPointingAt(original, original / "footage" / "clip.mov");
+
+    const std::filesystem::path copy = dir.path / "copy";
+    std::filesystem::copy(original, copy, std::filesystem::copy_options::recursive);
+
+    auto reopened = io::loadProject((copy / "cut.cutreel").string());
+    REQUIRE(reopened);
+    // Both files exist. Reaching back into the folder this one was copied out
+    // of would mean grading somebody's other project by accident.
+    const std::filesystem::path found{reopened->project.media().front().path};
+    CHECK(std::filesystem::equivalent(found, copy / "footage" / "clip.mov"));
+}
+
+TEST_CASE("A project file written before any of this loads as it always did", "[io][save][paths]") {
+    TempDir dir;
+    const std::filesystem::path media = dir.path / "footage" / "clip.mov";
+    std::filesystem::create_directories(media.parent_path());
+    std::ofstream{media} << "not really a movie";
+
+    // Every project file written before the relative twin existed looks like
+    // this: one path, and it is the absolute one.
+    const std::string text = R"({
+        "zaro": {"schemaVersion": 1},
+        "media": [{"id": 1, "path": ")" +
+                             std::filesystem::path{media}.generic_string() + R"("}],
+        "sequences": [{"id": 2, "frameRate": "25"}]})";
+
+    auto loaded = io::loadProjectFromString(text, dir.path.string());
+    REQUIRE(loaded);
+    REQUIRE(loaded->project.media().size() == 1);
+    CHECK(std::filesystem::equivalent(std::filesystem::path{loaded->project.media().front().path},
+                                      media));
+
+    SECTION("and gains its twin the next time it is saved") {
+        const std::string project = (dir.path / "cut.cutreel").string();
+        REQUIRE(io::saveProject(loaded->project, project, loaded->unknown));
+        std::ifstream file{project, std::ios::binary};
+        std::ostringstream buffer;
+        buffer << file.rdbuf();
+        CHECK(buffer.str().find(R"("relativePath": "footage/clip.mov")") != std::string::npos);
+    }
+}
+
+TEST_CASE("A relinked file does not keep the old file's relative path", "[io][save][paths]") {
+    TempDir dir;
+    const std::filesystem::path first = dir.path / "footage" / "one.mov";
+    const std::string project = saveProjectPointingAt(dir.path, first);
+
+    auto opened = io::loadProject(project);
+    REQUIRE(opened);
+
+    // Relinked to a file in a different folder, the way the relink dialog
+    // does it: the path changes and nothing else does.
+    const std::filesystem::path second = dir.path / "rushes" / "two.mov";
+    std::filesystem::create_directories(second.parent_path());
+    std::ofstream{second} << "also not a movie";
+    std::vector<model::MediaRef> media = opened->project.media();
+    media.front().path = second.string();
+    opened->project.setMedia(std::move(media));
+
+    REQUIRE(io::saveProject(opened->project, project, opened->unknown));
+    auto reopened = io::loadProject(project);
+    REQUIRE(reopened);
+    CHECK(std::filesystem::equivalent(std::filesystem::path{reopened->project.media().front().path},
+                                      second));
+}
+
+TEST_CASE("A project written without a folder to be relative to writes no twins",
+          "[io][save][paths]") {
+    Fixture f;
+    auto text = io::saveProjectToString(f.project);
+    REQUIRE(text);
+    // Nothing to be relative to, so nothing is claimed. This is the shape
+    // every caller that builds a project in memory gets.
+    CHECK(text->find("relativePath") == std::string::npos);
 }

@@ -89,8 +89,150 @@ std::uint64_t fingerprint(const model::CaptionTrack& captions) {
     return hashOf(encodeCaptions(captions));
 }
 
+namespace {
+
+// --- Portable paths ---------------------------------------------------------
+//
+// Where the relative twin of each file path is spelled. Beside the absolute
+// path rather than instead of it, for the reason ProjectIo.h gives at length:
+// the two spellings survive opposite kinds of move, and only keeping both
+// survives either.
+constexpr const char* kRelativePath = "relativePath";
+constexpr const char* kRelativeProxyPath = "relativeProxyPath";
+
+/// `path` as seen from `base`, or nothing when there is no such thing.
+///
+/// Two volumes have no path between them -- `D:\` from `C:\`, a mounted share
+/// from a home directory -- and `relative` says so by returning empty. That is
+/// the honest answer and it is recorded as one: no twin is written, and the
+/// absolute path is all that file gets.
+std::string relativeFrom(const std::filesystem::path& base, const std::string& path) {
+    if (base.empty() || path.empty()) {
+        return {};
+    }
+    const std::filesystem::path target{path};
+    if (!target.is_absolute()) {
+        return {};  // already relative to something; not ours to restate
+    }
+    std::error_code code;
+    const std::filesystem::path relative = std::filesystem::relative(target, base, code);
+    if (code || relative.empty()) {
+        return {};
+    }
+    // Forward slashes whatever wrote it. A project written on Windows is
+    // opened on a Mac often enough that a backslash in the file would be a
+    // path that only resolves on the machine it came from.
+    return relative.generic_string();
+}
+
+/// Which of a saved pair of paths names a file that is actually there.
+std::string resolveFrom(const std::filesystem::path& base, const std::string& absolute,
+                        const std::string& relative) {
+    if (base.empty() || relative.empty()) {
+        return absolute;
+    }
+    std::error_code code;
+    std::filesystem::path candidate = std::filesystem::weakly_canonical(base / relative, code);
+    if (code) {
+        candidate = base / std::filesystem::path{relative};
+    }
+    if (!std::filesystem::exists(candidate, code) || code) {
+        // Nothing there. The absolute path is kept exactly as it was written,
+        // so that a file which has genuinely gone is reported under the name
+        // somebody knows it by rather than under a guess at where it might be.
+        return absolute;
+    }
+    return candidate.string();
+}
+
+/// Put the relative twin beside every file path in the document, and take away
+/// any twin that no longer belongs.
+///
+/// A walk over the encoded document rather than a line in each encoder, for
+/// two reasons. `encode` is what the fingerprints are taken over, and a hash
+/// that moved when a project was saved into a different folder would throw
+/// away every cached frame for a change the picture cannot see. And the set of
+/// things holding a path grows -- media, its proxy, a LUT -- and a walk covers
+/// the next one without being told about it.
+///
+/// A `path` that is not a string is not a file path: a mask carries its
+/// outline under the same key, as an array of points.
+void addRelativePaths(json& node, const std::filesystem::path& base) {
+    if (node.is_array()) {
+        for (json& child : node) {
+            addRelativePaths(child, base);
+        }
+        return;
+    }
+    if (!node.is_object()) {
+        return;
+    }
+    const auto twin = [&node, &base](const char* key, const char* twinKey) {
+        // Cleared first, so a path that has been relinked since the file was
+        // read cannot keep the twin that was preserved beside the old one.
+        node.erase(twinKey);
+        const auto found = node.find(key);
+        if (found == node.end() || !found->is_string()) {
+            return;
+        }
+        std::string relative = relativeFrom(base, found->get<std::string>());
+        if (!relative.empty()) {
+            node[twinKey] = std::move(relative);
+        }
+    };
+    twin("path", kRelativePath);
+    twin("proxyPath", kRelativeProxyPath);
+    for (auto& [key, value] : node.items()) {
+        addRelativePaths(value, base);
+    }
+}
+
+/// Point every file path at the file it names now, preferring the relative
+/// twin when that is the one that exists.
+void resolveRelativePaths(json& node, const std::filesystem::path& base) {
+    if (node.is_array()) {
+        for (json& child : node) {
+            resolveRelativePaths(child, base);
+        }
+        return;
+    }
+    if (!node.is_object()) {
+        return;
+    }
+    const auto resolve = [&node, &base](const char* key, const char* twinKey) {
+        const auto twin = node.find(twinKey);
+        const auto found = node.find(key);
+        if (twin == node.end() || !twin->is_string() || found == node.end() ||
+            !found->is_string()) {
+            return;
+        }
+        node[key] = resolveFrom(base, found->get<std::string>(), twin->get<std::string>());
+    };
+    resolve("path", kRelativePath);
+    resolve("proxyPath", kRelativeProxyPath);
+    for (auto& [key, value] : node.items()) {
+        resolveRelativePaths(value, base);
+    }
+}
+
+/// The folder a project file sits in, which is what its relative paths are
+/// relative to. The current directory when the path is a bare filename, since
+/// that is the folder it will land in.
+std::filesystem::path folderOf(const std::string& projectPath) {
+    const std::filesystem::path parent = std::filesystem::path{projectPath}.parent_path();
+    if (!parent.empty()) {
+        return parent;
+    }
+    std::error_code code;
+    const std::filesystem::path here = std::filesystem::current_path(code);
+    return code ? std::filesystem::path{"."} : here;
+}
+
+}  // namespace
+
 Result<std::string> saveProjectToString(const model::Project& project,
-                                        const std::shared_ptr<const UnknownFields>& unknown) {
+                                        const std::shared_ptr<const UnknownFields>& unknown,
+                                        const std::string& baseDir) {
     json media = json::array();
     for (const model::MediaRef& ref : project.media()) {
         media.push_back(encode(ref));
@@ -122,6 +264,10 @@ Result<std::string> saveProjectToString(const model::Project& project,
     if (unknown != nullptr) {
         mergePreserved(document, unknown->document());
     }
+    // After the merge, never before: a relative twin preserved from the file
+    // as it was read would otherwise be left standing beside a path that has
+    // been relinked since, and would point the next open at the old file.
+    addRelativePaths(document, std::filesystem::path{baseDir});
     return document.dump(2) + "\n";
 }
 
@@ -167,7 +313,7 @@ Status writeAtomically(const std::string& path, const std::string& text) {
 
 Status saveProject(const model::Project& project, const std::string& path,
                    const std::shared_ptr<const UnknownFields>& unknown) {
-    auto text = saveProjectToString(project, unknown);
+    auto text = saveProjectToString(project, unknown, folderOf(path).string());
     if (!text) {
         return text.error();
     }
@@ -324,7 +470,7 @@ bool hasNewerAutosave(const std::string& projectPath) {
     return recoveryTime > projectTime;
 }
 
-Result<LoadedProject> loadProjectFromString(const std::string& text) {
+Result<LoadedProject> loadProjectFromString(const std::string& text, const std::string& baseDir) {
     json document = json::parse(text, nullptr, false);
     if (document.is_discarded()) {
         return Error{ErrorCode::InvalidData, "this is not valid JSON"};
@@ -342,6 +488,11 @@ Result<LoadedProject> loadProjectFromString(const std::string& text) {
     if (version < 1) {
         return Error{ErrorCode::InvalidData, "this project file has no usable schema version"};
     }
+
+    // Before anything is decoded, so that every reader below -- and the
+    // carrier of unknown fields this document becomes -- sees the file where
+    // it is now rather than where it was when somebody last pressed save.
+    resolveRelativePaths(document, std::filesystem::path{baseDir});
 
     LoadedProject loaded;
     std::vector<model::MediaRef> media;
@@ -393,7 +544,7 @@ Result<LoadedProject> loadProject(const std::string& path) {
     }
     std::ostringstream buffer;
     buffer << file.rdbuf();
-    return loadProjectFromString(buffer.str());
+    return loadProjectFromString(buffer.str(), folderOf(path).string());
 }
 
 }  // namespace zaro::io
