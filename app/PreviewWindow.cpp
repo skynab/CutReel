@@ -1290,6 +1290,17 @@ void PreviewWindow::loudnessMenu() {
     if (liveSequence() == nullptr || media_ == nullptr) {
         return;
     }
+    // Stop the transport first. Playback decodes on a thread of its own -- see
+    // PlaybackController::pumpAudio -- through the very media source this is
+    // about to read, and nothing guards one decoder against two threads: doing
+    // both at once faults inside avcodec. `stop` joins that thread, so past
+    // this line the decoder is this thread's alone.
+    //
+    // Stopped rather than locked, and deliberately. A lock would have to be
+    // held for a whole-programme decode, which is exactly as long as the wait
+    // cursor below is up -- the realtime path would starve and the device would
+    // drop out. Nothing was going to be heard through a modal wait anyway.
+    playback_.stop();
     render::AudioGraph mixer{*media_};
     const time::TimeRange whole{time::RationalTime{0, liveSequence()->frameRate()},
                                 liveSequence()->duration()};
@@ -3282,6 +3293,17 @@ void PreviewWindow::measureProgramme() {
     if (sequence == nullptr) {
         return;
     }
+    // Stop the transport first. Playback decodes on a thread of its own -- see
+    // PlaybackController::pumpAudio -- through the very media source this is
+    // about to read, and nothing guards one decoder against two threads: doing
+    // both at once faults inside avcodec. `stop` joins that thread, so past
+    // this line the decoder is this thread's alone.
+    //
+    // Stopped rather than locked, and deliberately. A lock would have to be
+    // held for a whole-programme decode, which is exactly as long as the wait
+    // cursor below is up -- the realtime path would starve and the device would
+    // drop out. Nothing was going to be heard through a modal wait anyway.
+    playback_.stop();
     QApplication::setOverrideCursor(Qt::WaitCursor);
     render::AudioGraph graph{*media_};
     const time::TimeRange whole{time::RationalTime{0, sequence->frameRate()}, sequence->duration()};
