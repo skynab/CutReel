@@ -10,14 +10,18 @@
 # A .deb is a filesystem image: its paths are the paths on the machine, so the
 # tree has to be rooted at /usr for bin/ to become /usr/bin. An archive is not,
 # and rooting one at /usr would hand somebody a tarball that unpacks to a `usr`
-# directory they have to reach through to find anything.
+# directory they have to reach through to find anything. A .dmg is the same
+# case as an archive: what the prefix names is the root of the mounted volume,
+# and a `usr` folder there is a window with nothing in it worth double-clicking
+# and cutreel.app buried three levels down.
 #
-# Both are stated rather than left to the generator's default: which default
-# applies to which generator is exactly the kind of thing that is true until it
-# is not, and the relative RPATH in every executable depends on this being
-# bin/../lib/cutreel in both packages.
+# All three are stated rather than left to the generator's default: which
+# default applies to which generator is exactly the kind of thing that is true
+# until it is not, and the relative RPATH in every executable depends on this
+# being bin/../lib/cutreel in every package.
 if(CPACK_GENERATOR STREQUAL "DEB")
     set(CPACK_PACKAGING_INSTALL_PREFIX "/usr")
-elseif(CPACK_GENERATOR STREQUAL "TGZ" OR CPACK_GENERATOR STREQUAL "ZIP")
+elseif(CPACK_GENERATOR STREQUAL "TGZ" OR CPACK_GENERATOR STREQUAL "ZIP"
+       OR CPACK_GENERATOR STREQUAL "DragNDrop")
     set(CPACK_PACKAGING_INSTALL_PREFIX "")
 endif()

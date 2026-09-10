@@ -147,6 +147,41 @@ FCPXML for Final Cut Pro, which reads neither of the other two.
 | 8i | Folding 5.1 to stereo without losing the dialogue | **done** |
 | 8j | Exporting a graphic with its alpha, or refusing to pretend | **done** |
 
+## Installing
+
+Built packages are on the [releases page](https://github.com/skynab/CutReel/releases):
+a `.dmg` for macOS, a `.deb` for Linux, an installer `.exe` for Windows. Every
+run of CI attaches the same three to itself, so a build can be tried without
+waiting for a tag.
+
+### macOS: clearing the first launch
+
+CutReel is not signed with an Apple Developer ID and is not notarised, so macOS
+refuses the first launch and words the refusal like this:
+
+> "cutreel" is damaged and can't be opened. You should move it to the Trash.
+
+Nothing is damaged and there is no reason to trash it. A browser marks anything
+it downloads with a `com.apple.quarantine` flag, and Gatekeeper will not start a
+quarantined application it cannot trace to a paid developer account. This is the
+message it picks for that, and it is the same message you would get for a
+genuinely corrupt download, which is the unhelpful part.
+
+Drag `cutreel.app` from the disk image onto `/Applications` as usual, then clear
+the flag on the copy you installed:
+
+```
+xattr -dr com.apple.quarantine /Applications/cutreel.app
+```
+
+It launches normally from then on. An update is a new download, so it needs the
+command again. The flag lives on the bundle and nowhere else, so removing it
+leaves Gatekeeper switched on for everything else on the machine -- which is why
+this is the thing to run and `spctl --master-disable` is not.
+
+The dialog goes away for good only with a Developer ID signature and
+notarisation, which requires a paid Apple Developer account.
+
 ## Building
 
 Requires CMake 3.24+, Ninja, a C++20 compiler, FFmpeg 5.0+, SDL2, and Qt 6.6+

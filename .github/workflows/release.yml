@@ -206,6 +206,40 @@ jobs:
       - name: Package
         run: cpack --preset ${{ matrix.preset }}
 
+      # An ad-hoc signature is the most macOS will give a build with no
+      # Developer ID, and it is worth something only for as long as it is
+      # valid. macdeployqt rewrites every load path in the bundle and signs
+      # afterwards; if that order ever changes, or a later step touches a
+      # binary after signing, the image ships a signature that no longer
+      # matches its contents. On Apple silicon that is not a warning -- the
+      # kernel refuses to start the process, quarantine or no quarantine -- and
+      # the dialog it produces is the same "is damaged" one an unnotarised
+      # build already shows, so a real breakage would be invisible underneath
+      # the expected complaint until a user hit it.
+      #
+      # Run against the mounted image, so what is checked is what ships. The
+      # mount point is given explicitly because the volume name has a space in
+      # it and hdiutil's output columns do not survive that.
+      #
+      # spctl is printed and not checked: it rejects this bundle by design.
+      # Without notarisation there is no verdict it could return that would
+      # pass, and the README says so where users will read it.
+      - name: Verify the app bundle's signature (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          dmg=$(ls build/${{ matrix.preset }}/CutReel-*.dmg)
+          echo "Verifying $dmg"
+          mount=$(mktemp -d)
+          trap 'hdiutil detach "$mount" -quiet || true' EXIT
+          hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mount"
+          ls -l "$mount"
+          codesign --display --verbose=2 "$mount/cutreel.app"
+          codesign --verify --deep --strict --verbose "$mount/cutreel.app"
+          echo "--- Gatekeeper's verdict, for the record ---"
+          spctl --assess --type execute --verbose=4 "$mount/cutreel.app" || true
+
       # The MSI cannot carry an icon, so the file people actually download is a
       # Burn bundle wrapping it. See cmake/bundle.wxs.in.
       - name: Wrap the MSI in a bootstrapper
@@ -243,7 +277,7 @@ jobs:
           mkdir -p dist
           # CPack drops the archive in the build tree next to everything else.
           find "build/${{ matrix.preset }}" -maxdepth 1 \
-            \( -name 'CutReel-*.tar.gz' -o -name 'CutReel-*.exe' \
+            \( -name 'CutReel-*.dmg' -o -name 'CutReel-*.exe' \
                -o -name 'cutreel_*.deb' \) -exec cp {} dist/ \;
           ls -l dist
           # An empty upload is a green job that shipped nothing, which is worse
@@ -284,9 +318,19 @@ jobs:
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/* --clobber
           else
+            # --notes-file with --generate-notes is not a contradiction: the
+            # REST API prepends a supplied body to the notes it generates, so
+            # the draft opens with how to install each package -- and with the
+            # macOS Gatekeeper dialog explained before somebody meets it --
+            # followed by the usual generated changelog.
+            #
+            # Only on create. A re-run against an existing tag uploads the
+            # files and leaves the body alone, because by then the body may
+            # have been edited by hand.
             gh release create "$TAG" dist/* \
               --draft \
               --title "CutReel $TAG" \
+              --notes-file .github/release-notes-preamble.md \
               --generate-notes
           fi
           echo "Draft release $TAG is ready; publish it from the Releases page."
