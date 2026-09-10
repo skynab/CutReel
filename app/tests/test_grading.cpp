@@ -876,3 +876,106 @@ TEST_CASE("An adjustment layer, through the real preview", "[gui]") {
     window.monitor()->update();
     QApplication::processEvents();
 }
+
+// The source grade, end to end: a grade put on the *file* has to reach the
+// picture. That it also reaches every other cut of the same file is what makes
+// it worth having, and is the half a render-path unit test cannot see.
+TEST_CASE("A grade on the media file reaches the preview", "[gui][source]") {
+    auto& window = zaro::app::testing::gui();
+    const zaro::app::testing::Rewind rewind;
+    window.setWorkspace("Color");
+    QApplication::processEvents();
+
+    const auto& sequence = *window.sequence();
+    const auto& videoTrack = sequence.videoTracks().front();
+    REQUIRE_FALSE(videoTrack.clips().empty());
+    const model::MediaRefId mediaId = videoTrack.clips().front().activeSource();
+    REQUIRE(mediaId.isValid());
+
+    window.monitor()->update();
+    QApplication::processEvents();
+    const double plain = meanGray(settledGrab(window.monitor()));
+
+    // Two stops down, on the file rather than on the clip.
+    model::ColorCorrection darker;
+    darker.exposure = -2.0;
+    auto graded = edit::makeSetMediaGrade(window.project(), mediaId, darker, model::ColorWheels{});
+    if (!graded) {
+        zaro::app::testing::failf("%s\n", graded.error().toString().c_str());
+    }
+    window.commands().execute(window.project(), std::move(*graded));
+    window.monitor()->update();
+    QApplication::processEvents();
+    const double darkened = meanGray(settledGrab(window.monitor()));
+
+    std::printf("  source grade: %.1f plain, %.1f two stops down on the file\n", plain, darkened);
+    if (!(darkened < plain * 0.75)) {
+        zaro::app::testing::failf("the media file grade did not reach the preview\n");
+    }
+
+    // And it undoes, like every other edit.
+    window.commands().undo(window.project());
+    window.monitor()->update();
+    QApplication::processEvents();
+    const double restored = meanGray(settledGrab(window.monitor()));
+    if (!(restored > darkened * 1.2)) {
+        zaro::app::testing::failf("undoing the source grade did not restore the picture\n");
+    }
+}
+
+// The Grading selector decides where an edit lands. Getting this wrong is not
+// visible at the time -- the picture changes either way -- it shows up later,
+// when the other cut of the same shot did or did not follow.
+TEST_CASE("The grade target decides whether an edit lands on the clip or the file",
+          "[gui][source]") {
+    auto& window = zaro::app::testing::gui();
+    const zaro::app::testing::Rewind rewind;
+    window.setWorkspace("Color");
+    QApplication::processEvents();
+
+    const auto& sequence = *window.sequence();
+    const auto& videoTrack = sequence.videoTracks().front();
+    REQUIRE_FALSE(videoTrack.clips().empty());
+    const model::ClipId clipId = videoTrack.clips().front().id;
+    const model::MediaRefId mediaId = videoTrack.clips().front().activeSource();
+    REQUIRE(mediaId.isValid());
+
+    app::ColorPalette* palette = window.palette();
+    REQUIRE(palette != nullptr);
+    palette->setSelection(videoTrack.id(), clipId);
+
+    const auto clipGrade = [&] {
+        return window.project()
+            .findSequence(sequence.id())
+            ->findTrack(videoTrack.id())
+            ->find(clipId)
+            ->color;
+    };
+    const auto fileGrade = [&] { return window.project().findMedia(mediaId)->color; };
+
+    // On the file: the clip keeps whatever grade it had.
+    palette->setTarget(app::ColorPalette::GradeTarget::MediaFile);
+    const double clipBefore = clipGrade().temperature;
+    model::ColorCorrection warm;
+    warm.temperature = 40.0;
+    auto onFile = edit::makeSetMediaGrade(window.project(), mediaId, warm, model::ColorWheels{});
+    REQUIRE(onFile);
+    window.commands().execute(window.project(), std::move(*onFile));
+    CHECK(fileGrade().temperature == 40.0);
+    CHECK(clipGrade().temperature == clipBefore);
+
+    // On the clip: the file keeps the grade it was just given.
+    palette->setTarget(app::ColorPalette::GradeTarget::TimelineClip);
+    model::ColorCorrection cool;
+    cool.temperature = -30.0;
+    auto onClip = edit::makeSetColorCorrection(window.project(), {sequence.id(), videoTrack.id()},
+                                               clipId, cool);
+    REQUIRE(onClip);
+    window.commands().execute(window.project(), std::move(*onClip));
+    CHECK(clipGrade().temperature == -30.0);
+    CHECK(fileGrade().temperature == 40.0);
+
+    while (window.commands().canUndo()) {
+        window.commands().undo(window.project());
+    }
+}

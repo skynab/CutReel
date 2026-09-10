@@ -81,9 +81,14 @@ Rgba shaded(const Rgba& pixel, const ClipShading& shading) {
         }
     }
 
-    if (shading.grade != nullptr) {
-        gradePixel(*shading.grade, r, g, b, shading.curves, shading.secondary, shading.lut,
-                   shading.lutAmount, shading.hue);
+    if (shading.grade != nullptr || shading.source != nullptr || shading.sourceLut != nullptr) {
+        // A file's own grade is reason enough to run the chain even when the
+        // clip asks for nothing of its own: the picture still has to arrive
+        // graded, and an ungraded clip over graded media is not "no grade".
+        static constexpr GradeConstants kUntouched{};
+        gradePixel(shading.grade != nullptr ? *shading.grade : kUntouched, r, g, b, shading.curves,
+                   shading.secondary, shading.lut, shading.lutAmount, shading.hue, shading.source,
+                   shading.sourceLut, shading.sourceLutAmount);
     }
     return Rgba{r * alpha, g * alpha, b * alpha, alpha};
 }

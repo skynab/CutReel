@@ -25,6 +25,7 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QComboBox>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QKeyEvent>
@@ -194,6 +195,7 @@ public:
     [[nodiscard]] app::SourceMonitor* sourceMonitor() const { return source_; }
     [[nodiscard]] app::EffectControls* effects() const { return effects_; }
     [[nodiscard]] app::ScopesPanel* scopes() const { return scopes_; }
+    [[nodiscard]] app::ColorPalette* palette() const { return palette_; }
     [[nodiscard]] app::MixerPanel* mixer() const { return mixer_; }
     [[nodiscard]] app::ChannelPanel* channel() const { return channel_; }
     [[nodiscard]] app::DeliverPanel* deliver() const { return deliver_; }
@@ -1005,6 +1007,34 @@ private:
     app::ClipStrip* clipStrip_{nullptr};
     app::GradeNodes* nodes_{nullptr};
     app::ColorPalette* palette_{nullptr};
+    /// The Grading selector: whether the wheels drive this cut of the shot or
+    /// the file every cut of it reads. Color-room only, so it lives with the
+    /// node strip rather than in the shared toolbar.
+    QPushButton* gradeClipTab_{nullptr};
+    QPushButton* gradeMediaTab_{nullptr};
+    QLabel* gradeTargetLabel_{nullptr};
+    /// Point the palette, and the label under it, at one of the two grades.
+    void setGradeTarget(app::ColorPalette::GradeTarget target);
+    /// Re-read the selector and its caption from what is selected now.
+    void syncGradeTarget();
+
+    /// Colour management: what the footage is read through, and what the
+    /// sequence is delivered as.
+    ///
+    /// Three questions that sit either side of the grade rather than in it --
+    /// the input transform belongs to the file, the delivery curve and the
+    /// highlight rolloff to the sequence. They were reachable only from a menu
+    /// before; a colourist wants to see the answers while grading, because a
+    /// grade judged against the wrong delivery curve is a grade done twice.
+    QComboBox* inputLut_{nullptr};
+    QComboBox* colorSpace_{nullptr};
+    QComboBox* toneMapping_{nullptr};
+    /// True while these are being written from the model, so the writes do not
+    /// read as somebody choosing something.
+    bool syncingColorManagement_{false};
+    void syncColorManagement();
+    void applyInputLut(int index);
+    void applyDelivery();
     /// Every panel that is about a sequence, in one place. See rebindSequence.
     std::vector<ui::SequenceBound*> bound_;
     app::MediaBrowser* browser_{nullptr};

@@ -79,6 +79,9 @@ private:
     void drawClip(const model::Clip& clip, const RgbaImage& image, RgbaImage& out,
                   const model::Transform& transform, const time::RationalTime& at,
                   const model::Mask* wipe = nullptr);
+    /// The file a clip reads, for the grade that file carries. Null when there
+    /// is no project to resolve against or the clip makes its own picture.
+    [[nodiscard]] const model::MediaRef* mediaFor(const model::Clip& clip) const;
     /// The picture for one clip at one instant, whether it is read or made.
     ///
     /// Null when there is nothing to draw. Generated clips go into `scratch`,

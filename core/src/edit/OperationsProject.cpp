@@ -60,6 +60,40 @@ private:
     std::string notes_;
 };
 
+/// A grade on the file, merged by media id so a wheel drag is one undo step.
+///
+/// Merged the way the notes command is, and for the same reason: a colourist
+/// pushing a wheel emits a correction per mouse move, and an undo stack that
+/// recorded each of them would need fifty presses to get back to where the drag
+/// started.
+class MediaGradeCommand final : public ProjectCommand {
+public:
+    MediaGradeCommand(model::MediaRefId media, model::ColorCorrection color,
+                      model::ColorWheels wheels, model::LutRef lut, std::string description)
+        : ProjectCommand{std::move(description), "mediaGrade:" + std::to_string(media.value())},
+          media_{media},
+          color_{color},
+          wheels_{wheels},
+          lut_{std::move(lut)} {}
+
+protected:
+    void mutate(Project& project) override {
+        for (model::MediaRef& media : project.mediaMutable()) {
+            if (media.id == media_) {
+                media.color = color_;
+                media.wheels = wheels_;
+                media.lut = lut_;
+            }
+        }
+    }
+
+private:
+    model::MediaRefId media_;
+    model::ColorCorrection color_;
+    model::ColorWheels wheels_;
+    model::LutRef lut_;
+};
+
 class RelinkMediaCommand final : public ProjectCommand {
 public:
     RelinkMediaCommand(model::MediaRefId media, std::string path, std::string digest,
@@ -200,6 +234,33 @@ Result<CommandPtr> makeSetMediaNotes(Project& project, model::MediaRefId mediaId
     // per keystroke.
     return CommandPtr{std::make_unique<MediaNotesCommand>(
         mediaId, notes, "Note on " + (media->name.empty() ? media->path : media->name))};
+}
+
+Result<CommandPtr> makeSetMediaGrade(Project& project, model::MediaRefId mediaId,
+                                     const model::ColorCorrection& color,
+                                     const model::ColorWheels& wheels, const model::LutRef& lut) {
+    const model::MediaRef* media = project.findMedia(mediaId);
+    if (media == nullptr) {
+        return Error{ErrorCode::NotFound, "no such media in this project"};
+    }
+    for (const double value :
+         {color.temperature, color.tint, color.exposure, color.contrast, color.saturation}) {
+        if (!std::isfinite(value)) {
+            return Error{ErrorCode::InvalidData, "a colour correction has to be real numbers"};
+        }
+    }
+    for (const double value :
+         {wheels.slopeR, wheels.slopeG, wheels.slopeB, wheels.offsetR, wheels.offsetG,
+          wheels.offsetB, wheels.powerR, wheels.powerG, wheels.powerB}) {
+        if (!std::isfinite(value)) {
+            return Error{ErrorCode::InvalidData, "a colour wheel has to be real numbers"};
+        }
+    }
+    if (!std::isfinite(lut.amount)) {
+        return Error{ErrorCode::InvalidData, "a LUT amount has to be a real number"};
+    }
+    return CommandPtr{std::make_unique<MediaGradeCommand>(
+        mediaId, color, wheels, lut, "Grade " + (media->name.empty() ? media->path : media->name))};
 }
 
 Result<CommandPtr> makeRelinkMedia(Project& project, model::MediaRefId mediaId,

@@ -118,6 +118,16 @@ struct Status {
     QString toolName;
     QString workspace;
     int binItems{0};
+    /// Colour: how far through the reel the grading is.
+    ///
+    /// A colourist works shot by shot and the question between shots is "how
+    /// many left", which a strip of thumbnails answers only by being counted.
+    /// Shown in the Color workspace in place of the bin count, which is about
+    /// picture the bin holds rather than picture that has been graded.
+    int gradedClips{0};
+    int totalClips{0};
+    /// Which grade the wheels are driving, spelled out for the status line.
+    QString gradeTarget;
     bool snapEnabled{true};
     std::size_t toolIndex{0};
     double zoomFraction{0.0};

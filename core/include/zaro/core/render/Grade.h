@@ -87,16 +87,23 @@ struct SecondaryConstants {
 /// shape its tones, and only then is there something recognisable for a
 /// qualifier to select: a secondary keyed on skin tone before the shot is
 /// balanced is keyed on the wrong colour.
+/// `source` and `sourceLut` are the media file's own grade, and despite coming
+/// last they are applied *first* -- the LUT, then the source primary, and only
+/// then everything the clip asks for. A file graded once and cut in four places
+/// is four clips grading on top of the same answer; see `model::MediaRef`.
 void gradePixel(const GradeConstants& grade, float& r, float& g, float& b,
                 const CurveTable* curves = nullptr, const SecondaryConstants* secondary = nullptr,
                 const LutTable* lut = nullptr, float lutAmount = 1.0F,
-                const ColorCurveTable* hue = nullptr);
+                const ColorCurveTable* hue = nullptr, const GradeConstants* source = nullptr,
+                const LutTable* sourceLut = nullptr, float sourceLutAmount = 1.0F);
 
 /// Grade a whole image in place. The image is premultiplied, so alpha is
 /// divided out and multiplied back: grading a half-faded clip must not depend
 /// on how faded it is.
 void gradeImage(const GradeConstants& grade, RgbaImage& image, const CurveTable* curves = nullptr,
                 const SecondaryConstants* secondary = nullptr, const LutTable* lut = nullptr,
-                float lutAmount = 1.0F, const ColorCurveTable* hue = nullptr);
+                float lutAmount = 1.0F, const ColorCurveTable* hue = nullptr,
+                const GradeConstants* source = nullptr, const LutTable* sourceLut = nullptr,
+                float sourceLutAmount = 1.0F);
 
 }  // namespace zaro::render

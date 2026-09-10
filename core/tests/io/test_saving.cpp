@@ -340,6 +340,98 @@ TEST_CASE("A media reference reads its curve from the file until told otherwise"
     }
 }
 
+TEST_CASE("A source grade on a media file survives a round trip", "[io][color][source]") {
+    Fixture f;
+    model::MediaRef& ref = f.project.mediaMutable().front();
+    ref.color.exposure = 1.5;
+    ref.color.saturation = 120.0;
+    ref.wheels.slopeR = 1.1;
+    ref.lut.path = "/luts/log_to_709.cube";
+    ref.lut.amount = 0.8;
+    REQUIRE(ref.isGraded());
+
+    auto text = io::saveProjectToString(f.project);
+    REQUIRE(text);
+    auto reloaded = io::loadProjectFromString(*text);
+    REQUIRE(reloaded);
+    const model::MediaRef& back = reloaded->project.media().front();
+    CHECK(back.color.exposure == 1.5);
+    CHECK(back.color.saturation == 120.0);
+    CHECK(back.wheels.slopeR == 1.1);
+    CHECK(back.lut.path == "/luts/log_to_709.cube");
+    CHECK(back.lut.amount == 0.8);
+}
+
+TEST_CASE("An ungraded media file carries no grade on disk", "[io][color][source]") {
+    Fixture f;
+    auto text = io::saveProjectToString(f.project);
+    REQUIRE(text);
+    // A bin of a thousand ungraded files should not carry a thousand copies of
+    // "no correction", the same bargain the clip encoder makes.
+    CHECK(text->find("\"wheels\"") == std::string::npos);
+}
+
+// --- Known bug: a reset is undone by the save that should record it ---------
+//
+// `mergePreserved` copies back every key the writer did not emit, and the
+// writer omits a grade that is neutral. Together those mean "set it back to
+// zero and save" reloads with the old numbers still on it: the omission that
+// keeps ungraded projects small is indistinguishable, at merge time, from a
+// field this build has never heard of.
+//
+// Both cases below are tagged `!shouldfail`, so the suite stays honest about
+// what is broken and speaks up the day it starts working. Fixing it needs
+// preservation to know which keys this version owns, which is a change to how
+// every project file round-trips rather than a patch to the colour code.
+
+TEST_CASE("Clearing a source grade actually clears it on disk",
+          "[io][color][source][!shouldfail]") {
+    // The writer omits a neutral grade, and unknown-field preservation merges
+    // back anything the writer did not emit. Those two together are how a reset
+    // could be silently undone by the save that was meant to record it.
+    Fixture f;
+    f.project.mediaMutable().front().color.exposure = 1.5;
+    auto graded = io::saveProjectToString(f.project);
+    REQUIRE(graded);
+    auto loaded = io::loadProjectFromString(*graded);
+    REQUIRE(loaded);
+    REQUIRE(loaded->project.media().front().color.exposure == 1.5);
+
+    // Reset it, and save with the document it was read from in hand.
+    model::Project reset = loaded->project;
+    reset.mediaMutable().front().color = model::ColorCorrection{};
+    auto text = io::saveProjectToString(reset, loaded->unknown);
+    REQUIRE(text);
+    auto again = io::loadProjectFromString(*text);
+    REQUIRE(again);
+    CHECK(again->project.media().front().color.exposure == 0.0);
+}
+
+TEST_CASE("Clearing a CLIP grade actually clears it on disk",
+          "[io][color][preserve][!shouldfail]") {
+    Fixture f;
+    REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.v1), f.clip(0, 50))));
+    const model::ClipId clipId =
+        f.project.findSequence(f.sequenceId)->findTrack(f.v1)->clips().front().id;
+    f.project.findSequence(f.sequenceId)->findTrack(f.v1)->find(clipId)->color.exposure = 1.5;
+
+    auto graded = io::saveProjectToString(f.project);
+    REQUIRE(graded);
+    auto loaded = io::loadProjectFromString(*graded);
+    REQUIRE(loaded);
+
+    model::Project reset = loaded->project;
+    reset.findSequence(f.sequenceId)->findTrack(f.v1)->find(clipId)->color =
+        model::ColorCorrection{};
+    auto text = io::saveProjectToString(reset, loaded->unknown);
+    REQUIRE(text);
+    auto again = io::loadProjectFromString(*text);
+    REQUIRE(again);
+    CHECK(
+        again->project.findSequence(f.sequenceId)->findTrack(f.v1)->find(clipId)->color.exposure ==
+        0.0);
+}
+
 TEST_CASE("A sequence's delivery curve survives a round trip", "[io][tonemap]") {
     Fixture f;
     model::Sequence::Output delivery;

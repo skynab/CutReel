@@ -163,6 +163,25 @@ bool GpuRenderGraph::needsCpuFallback(const model::Sequence& sequence, const tim
             if (media != nullptr && media->info.isStill()) {
                 return true;
             }
+            // A fifth: a grade carried by the media file itself. That grade is
+            // a second full primary -- balance, exposure, a CDL and contrast --
+            // applied before the clip's own, and it does not fold into the
+            // clip's: white balance is a channel multiply and contrast is a
+            // power about middle grey, so "the file's, then the clip's" is not
+            // any single correction this shader's uniforms could carry.
+            //
+            // Sent to the CPU graph rather than given uniforms of its own, for
+            // the reason the four above give and one more that is specific to
+            // this compositor: its uniform block is 512 bytes today, and on the
+            // D3D11 backend here *any* other size -- even 528 -- renders the
+            // Y'CbCr path as garbage, transforms included. Until that is
+            // understood, growing the block is not a change that can be made
+            // safely, and the CPU graph already produces exactly the right
+            // answer and is what the export uses, so the preview and the
+            // delivered file cannot disagree.
+            if (media != nullptr && media->isGraded()) {
+                return true;
+            }
         }
     }
     return false;

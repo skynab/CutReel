@@ -1,11 +1,14 @@
 #include "ColorPalette.h"
 
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLinearGradient>
+#include <QListView>
 #include <QListWidget>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QScrollArea>
 #include <QStackedWidget>
 #include <QVBoxLayout>
 #include <algorithm>
@@ -181,7 +184,13 @@ ColorPalette::ColorPalette(QWidget* parent) : QWidget{parent} {
     palettes_ = new QListWidget(this);
     palettes_->setObjectName("palette-list");
     palettes_->setFrameShape(QFrame::NoFrame);
-    palettes_->setFixedWidth(150);
+    // A row across the top rather than a column down the side. In a 310px
+    // column a vertical list would eat half the width the wheels need, and
+    // two entries do not want a column of their own.
+    palettes_->setFlow(QListView::LeftToRight);
+    palettes_->setFixedHeight(30);
+    palettes_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    palettes_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     for (const auto& [name, glyph] : {std::pair{QStringLiteral("Wheels"), icons::Glyph::Circle},
                                       std::pair{QStringLiteral("Bars"), icons::Glyph::Rows}}) {
         auto* item = new QListWidgetItem(name, palettes_);
@@ -191,24 +200,27 @@ ColorPalette::ColorPalette(QWidget* parent) : QWidget{parent} {
 
     // --- wheels ---------------------------------------------------------
     auto* wheelRow = new QWidget(this);
-    auto* wheelLayout = new QHBoxLayout(wheelRow);
-    wheelLayout->setContentsMargins(24, 0, 0, 0);
-    wheelLayout->setSpacing(26);
+    // Two across rather than three along: the palette lives in a column now,
+    // and a 104px disc three abreast needs more width than the column has.
+    auto* wheelLayout = new QGridLayout(wheelRow);
+    wheelLayout->setContentsMargins(12, 8, 12, 8);
+    wheelLayout->setHorizontalSpacing(14);
+    wheelLayout->setVerticalSpacing(14);
     static constexpr const char* kWheelNames[] = {"Lift", "Gamma", "Gain"};
     for (std::size_t at = 0; at < wheels_.size(); ++at) {
         wheels_[at] = new ColorWheel{QString::fromUtf8(kWheelNames[at]), wheelRow};
         wheels_[at]->setObjectName(QString("wheel-%1").arg(QString::fromUtf8(kWheelNames[at])));
-        wheelLayout->addWidget(wheels_[at]);
+        wheelLayout->addWidget(wheels_[at], static_cast<int>(at) / 2, static_cast<int>(at) % 2);
         connect(wheels_[at], &ColorWheel::changed, this,
                 [this](bool committed) { pushWheels(committed); });
     }
-    wheelLayout->addStretch(1);
+    wheelLayout->setRowStretch(2, 1);
 
     // --- bars: the same nine numbers, typed one channel at a time --------
     auto* barRow = new QWidget(this);
-    auto* barLayout = new QHBoxLayout(barRow);
-    barLayout->setContentsMargins(24, 6, 0, 6);
-    barLayout->setSpacing(22);
+    auto* barLayout = new QVBoxLayout(barRow);
+    barLayout->setContentsMargins(12, 6, 12, 6);
+    barLayout->setSpacing(10);
     static constexpr const char* kChannels[] = {"R", "G", "B"};
     for (int knob = 0; knob < 3; ++knob) {
         auto* column = new QWidget(barRow);
@@ -225,7 +237,7 @@ ColorPalette::ColorPalette(QWidget* parent) : QWidget{parent} {
                                           QColor{0x7f, 0x8f, 0xd9}};
             auto* bar = new GradientSlider{QString::fromUtf8(kChannels[channel]),
                                            theme::neutral(800), QColor{}, kInk[channel], column};
-            bar->setFixedWidth(150);
+            bar->setMinimumWidth(120);
             bars_.push_back(bar);
             columnLayout->addWidget(bar);
             connect(bar, &GradientSlider::changed, this,
@@ -252,19 +264,17 @@ ColorPalette::ColorPalette(QWidget* parent) : QWidget{parent} {
     // 0..200 with 100 untouched -- not the middle of the track.
     saturation_->setNeutral(0.5);
     for (GradientSlider* slider : {temperature_, tint_, saturation_}) {
-        slider->setFixedWidth(190);
+        slider->setMinimumWidth(120);
         connect(slider, &GradientSlider::changed, this,
                 [this](bool committed) { pushCorrection(committed); });
     }
     auto* ramps = new QWidget(this);
     auto* rampColumn = new QVBoxLayout(ramps);
-    rampColumn->setContentsMargins(0, 0, 24, 0);
+    rampColumn->setContentsMargins(12, 8, 12, 8);
     rampColumn->setSpacing(8);
-    rampColumn->addStretch(1);
     rampColumn->addWidget(temperature_);
     rampColumn->addWidget(tint_);
     rampColumn->addWidget(saturation_);
-    rampColumn->addStretch(1);
 
     // The strip above, not the timeline: the Color workspace hides the timeline
     // entirely -- see `PreviewWindow::setWorkspace` -- so this was telling
@@ -273,13 +283,30 @@ ColorPalette::ColorPalette(QWidget* parent) : QWidget{parent} {
     empty_->setAlignment(Qt::AlignCenter);
     empty_->setProperty("muted", true);
 
-    auto* row = new QHBoxLayout(this);
-    row->setContentsMargins(0, 0, 0, 0);
-    row->setSpacing(0);
-    row->addWidget(palettes_);
-    row->addWidget(pages_, 1);
-    row->addWidget(ramps);
-    row->addWidget(empty_, 1);
+    // The controls stack down a column, inside a scroller: three wheels, nine
+    // bars and three ramps do not fit a short pane, and a panel that clips its
+    // last control silently is worse than one that scrolls.
+    auto* scrolled = new QWidget(this);
+    auto* scrolledColumn = new QVBoxLayout(scrolled);
+    scrolledColumn->setContentsMargins(0, 0, 0, 0);
+    scrolledColumn->setSpacing(0);
+    scrolledColumn->addWidget(pages_);
+    scrolledColumn->addWidget(ramps);
+    scrolledColumn->addStretch(1);
+
+    auto* scroller = new QScrollArea(this);
+    scroller->setObjectName("palette-scroll");
+    scroller->setWidget(scrolled);
+    scroller->setWidgetResizable(true);
+    scroller->setFrameShape(QFrame::NoFrame);
+    scroller->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+
+    auto* column = new QVBoxLayout(this);
+    column->setContentsMargins(0, 0, 0, 0);
+    column->setSpacing(0);
+    column->addWidget(palettes_);
+    column->addWidget(scroller, 1);
+    column->addWidget(empty_, 1);
 
     refresh();
 }
@@ -309,21 +336,97 @@ const model::Clip* ColorPalette::selectedClip() const {
     return track != nullptr ? track->find(clip_) : nullptr;
 }
 
-void ColorPalette::refresh() {
+const model::MediaRef* ColorPalette::selectedMedia() const {
+    if (project_ == nullptr) {
+        return nullptr;
+    }
+    // An explicit choice wins: the media pool can point this panel at a file
+    // that no clip on screen happens to be sitting on.
+    if (media_.isValid()) {
+        return project_->findMedia(media_);
+    }
     const model::Clip* clip = selectedClip();
-    const bool have = clip != nullptr;
+    if (clip == nullptr || !clip->activeSource().isValid()) {
+        return nullptr;
+    }
+    return project_->findMedia(clip->activeSource());
+}
+
+bool ColorPalette::haveTarget() const {
+    return target_ == GradeTarget::MediaFile ? selectedMedia() != nullptr
+                                             : selectedClip() != nullptr;
+}
+
+model::ColorCorrection ColorPalette::currentColor() const {
+    if (target_ == GradeTarget::MediaFile) {
+        const model::MediaRef* media = selectedMedia();
+        return media != nullptr ? media->color : model::ColorCorrection{};
+    }
+    const model::Clip* clip = selectedClip();
+    return clip != nullptr ? clip->color : model::ColorCorrection{};
+}
+
+model::ColorWheels ColorPalette::currentWheels() const {
+    if (target_ == GradeTarget::MediaFile) {
+        const model::MediaRef* media = selectedMedia();
+        return media != nullptr ? media->wheels : model::ColorWheels{};
+    }
+    const model::Clip* clip = selectedClip();
+    return clip != nullptr ? clip->wheels : model::ColorWheels{};
+}
+
+void ColorPalette::setTarget(GradeTarget target) {
+    if (target_ == target) {
+        return;
+    }
+    target_ = target;
+    refresh();
+}
+
+void ColorPalette::setMedia(model::MediaRefId media) {
+    if (media_ == media) {
+        return;
+    }
+    media_ = media;
+    if (target_ == GradeTarget::MediaFile) {
+        refresh();
+    }
+}
+
+void ColorPalette::push(Result<edit::CommandPtr> built, bool committed) {
+    if (!built) {
+        return;
+    }
+    commands_->execute(*project_, std::move(*built));
+    if (committed) {
+        // One undo step per gesture: the merge is broken when the hand comes
+        // off, not on every pixel of the drag.
+        commands_->breakMerge();
+    }
+    refresh();
+    emit edited();
+}
+
+void ColorPalette::refresh() {
+    const bool have = haveTarget();
     palettes_->setVisible(have);
     pages_->setVisible(have);
     temperature_->parentWidget()->setVisible(have);
     empty_->setVisible(!have);
     if (!have) {
+        // Which pane to look in depends on what is being graded, and telling
+        // somebody to use the strip while the bin is on screen is worse than
+        // saying nothing.
+        empty_->setText(target_ == GradeTarget::MediaFile
+                            ? tr("Open a file in the bin to grade every instance of it")
+                            : tr("Select a shot in the strip above to grade it"));
         return;
     }
 
-    // Written from the model, not remembered: after an undo the clip is the
+    // Written from the model, not remembered: after an undo the project is the
     // only thing that knows what the grade is.
     updating_ = true;
-    const model::ColorWheels& wheels = clip->wheels;
+    const model::ColorWheels wheels = currentWheels();
     const Deviation knobs[] = {
         {wheels.offsetR, wheels.offsetG, wheels.offsetB},
         {wheels.powerR - 1.0, wheels.powerG - 1.0, wheels.powerB - 1.0},
@@ -348,7 +451,7 @@ void ColorPalette::refresh() {
         }
     }
 
-    const model::ColorCorrection& colour = clip->color;
+    const model::ColorCorrection colour = currentColor();
     temperature_->setFraction(toFraction(colour.temperature, -100.0, 100.0));
     temperature_->setReadout(QString::number(colour.temperature, 'f', 0));
     tint_->setFraction(toFraction(colour.tint, -100.0, 100.0));
@@ -359,7 +462,7 @@ void ColorPalette::refresh() {
 }
 
 void ColorPalette::pushWheels(bool committed) {
-    if (updating_ || commands_ == nullptr || project_ == nullptr || !clip_.isValid()) {
+    if (updating_ || commands_ == nullptr || project_ == nullptr || !haveTarget()) {
         return;
     }
     // Which control moved decides which reading is authoritative: the wheels
@@ -392,59 +495,67 @@ void ColorPalette::pushWheels(bool committed) {
         *channels[knob][2] = std::max(floor, neutral[knob] + (scaled.b * ranges[knob]));
     }
 
-    auto built = edit::makeSetWheels(*project_, {sequenceId_, track_}, clip_, wheels);
-    if (!built) {
+    if (target_ == GradeTarget::MediaFile) {
+        const model::MediaRef* media = selectedMedia();
+        if (media == nullptr) {
+            return;
+        }
+        push(edit::makeSetMediaGrade(*project_, media->id, media->color, wheels, media->lut),
+             committed);
         return;
     }
-    commands_->execute(*project_, std::move(*built));
-    if (committed) {
-        // One undo step per gesture: the merge is broken when the hand comes
-        // off, not on every pixel of the drag.
-        commands_->breakMerge();
-    }
-    refresh();
-    emit edited();
+    push(edit::makeSetWheels(*project_, {sequenceId_, track_}, clip_, wheels), committed);
 }
 
 void ColorPalette::pushCorrection(bool committed) {
-    if (updating_ || commands_ == nullptr || project_ == nullptr || !clip_.isValid()) {
-        return;
-    }
-    const model::Clip* clip = selectedClip();
-    if (clip == nullptr) {
+    if (updating_ || commands_ == nullptr || project_ == nullptr || !haveTarget()) {
         return;
     }
     // Exposure and contrast are not on this bar, so they are carried through
-    // rather than defaulted -- a temperature drag must not silently flatten a
-    // clip's exposure.
-    model::ColorCorrection colour = clip->color;
+    // rather than defaulted -- a temperature drag must not silently flatten an
+    // exposure somebody set elsewhere.
+    model::ColorCorrection colour = currentColor();
     colour.temperature = fromFraction(temperature_->fraction(), -100.0, 100.0);
     colour.tint = fromFraction(tint_->fraction(), -100.0, 100.0);
     colour.saturation = fromFraction(saturation_->fraction(), 0.0, 200.0);
 
-    auto built = edit::makeSetColorCorrection(*project_, {sequenceId_, track_}, clip_, colour);
-    if (!built) {
+    if (target_ == GradeTarget::MediaFile) {
+        const model::MediaRef* media = selectedMedia();
+        if (media == nullptr) {
+            return;
+        }
+        push(edit::makeSetMediaGrade(*project_, media->id, colour, media->wheels, media->lut),
+             committed);
         return;
     }
-    commands_->execute(*project_, std::move(*built));
-    if (committed) {
-        commands_->breakMerge();
-    }
-    refresh();
-    emit edited();
+    push(edit::makeSetColorCorrection(*project_, {sequenceId_, track_}, clip_, colour), committed);
 }
 
 void ColorPalette::resetGrade() {
-    if (commands_ == nullptr || project_ == nullptr || !clip_.isValid()) {
+    if (commands_ == nullptr || project_ == nullptr || !haveTarget()) {
         return;
     }
-    if (auto built =
-            edit::makeSetWheels(*project_, {sequenceId_, track_}, clip_, model::ColorWheels{})) {
-        commands_->execute(*project_, std::move(*built));
-    }
-    if (auto built = edit::makeSetColorCorrection(*project_, {sequenceId_, track_}, clip_,
-                                                  model::ColorCorrection{})) {
-        commands_->execute(*project_, std::move(*built));
+    // Reset clears the grade somebody is looking at, not both of them: a file
+    // balanced last week should survive somebody resetting the shot in front of
+    // them, and the other way round.
+    if (target_ == GradeTarget::MediaFile) {
+        const model::MediaRef* media = selectedMedia();
+        if (media == nullptr) {
+            return;
+        }
+        if (auto built = edit::makeSetMediaGrade(*project_, media->id, model::ColorCorrection{},
+                                                 model::ColorWheels{}, media->lut)) {
+            commands_->execute(*project_, std::move(*built));
+        }
+    } else {
+        if (auto built = edit::makeSetWheels(*project_, {sequenceId_, track_}, clip_,
+                                             model::ColorWheels{})) {
+            commands_->execute(*project_, std::move(*built));
+        }
+        if (auto built = edit::makeSetColorCorrection(*project_, {sequenceId_, track_}, clip_,
+                                                      model::ColorCorrection{})) {
+            commands_->execute(*project_, std::move(*built));
+        }
     }
     commands_->breakMerge();
     refresh();

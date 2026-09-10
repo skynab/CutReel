@@ -767,6 +767,19 @@ Result<model::MediaRef> decodeMedia(const json& node) {
     ref.contentDigest = node.value("contentDigest", std::string{});
     ref.notes = node.value("notes", std::string{});
     ref.name = node.value("name", std::string{});
+    // The source grade, read back through the same helpers a clip's grade uses.
+    // Absent in every project written before media could carry one, which
+    // decodes to the neutral correction those projects meant.
+    if (node.contains("color")) {
+        ref.color = decodeColor(node.at("color"));
+    }
+    if (node.contains("wheels")) {
+        ref.wheels = decodeWheels(node.at("wheels"));
+    }
+    if (node.contains("lut") && node.at("lut").is_object()) {
+        ref.lut.path = node.at("lut").value("path", std::string{});
+        ref.lut.amount = node.at("lut").value("amount", 1.0);
+    }
 
     if (node.contains("cachedInfo")) {
         const json& cached = node.at("cachedInfo");

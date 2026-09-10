@@ -25,6 +25,7 @@
 #include <QDir>
 #include <QFont>
 #include <QFontDatabase>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QInputDialog>
 #include <QLabel>
@@ -219,7 +220,6 @@ void PreviewWindow::createPanels() {
     clipStrip_ = adopting(new app::ClipStrip(this));
     nodes_ = new app::GradeNodes(this);
     palette_ = adopting(new app::ColorPalette(this));
-    palette_->setFixedHeight(212);
 
     source_ = new app::SourceMonitor(this);
     // Its own row of buttons -- In, Out, Subclip, Insert, Over -- is what sets
@@ -290,6 +290,12 @@ void PreviewWindow::buildViewerLayout() {
     bars_.audioSide = leftColumn;
 
     topSplitter_->addWidget(bars_.audioSide);
+    // The grading palette is the Color room's left column: the wheels, the
+    // bars and the ramps, stacked. It used to run along the bottom, which is
+    // where the timeline belongs -- a colourist reads the cut across and the
+    // controls down, not the other way about.
+    topSplitter_->addWidget(palette_);
+    palette_->setFixedWidth(310);
     topSplitter_->addWidget(gallery_);
     topSplitter_->addWidget(bin_);
     topSplitter_->addWidget(programColumn);
@@ -307,7 +313,97 @@ void PreviewWindow::buildViewerLayout() {
     bars_.nodesBox->setObjectName("grade-nodes-box");
     auto* nodesLayout = new QVBoxLayout(bars_.nodesBox);
     nodesLayout->setContentsMargins(12, 10, 12, 10);
+
+    // Grading: which of the two grades the wheels are driving. Above the node
+    // strip because it is the question that comes first -- a node chain is a
+    // chain *on something*, and choosing the shot or the file decides what
+    // every control below this line is going to write to.
+    auto* targetRow = new QWidget(bars_.nodesBox);
+    auto* targetLayout = new QHBoxLayout(targetRow);
+    targetLayout->setContentsMargins(0, 0, 0, 6);
+    targetLayout->setSpacing(6);
+    auto* targetCaption = new QLabel(tr("Grading"), targetRow);
+    targetCaption->setObjectName("section-label");
+    targetLayout->addWidget(targetCaption);
+    auto* targetGroup = new QWidget(targetRow);
+    targetGroup->setObjectName("tab-group");
+    targetGroup->setFixedHeight(26);
+    auto* targetTabs = new QHBoxLayout(targetGroup);
+    targetTabs->setContentsMargins(2, 2, 2, 2);
+    targetTabs->setSpacing(2);
+    gradeClipTab_ = chrome::button(targetGroup, tr("Timeline clip"),
+                                   tr("Grade this instance only — other uses of "
+                                      "the same file are untouched."),
+                                   true);
+    gradeMediaTab_ = chrome::button(targetGroup, tr("Media file"),
+                                    tr("Grade the source file — every instance in "
+                                       "the timeline inherits it."),
+                                    true);
+    for (QPushButton* tab : {gradeClipTab_, gradeMediaTab_}) {
+        tab->setFixedHeight(22);
+        targetTabs->addWidget(tab);
+    }
+    targetLayout->addWidget(targetGroup);
+    targetLayout->addStretch(1);
+    nodesLayout->addWidget(targetRow);
+
+    // What the choice above resolves to right now, spelled out. "Media file"
+    // alone does not say *which* file, and grading the wrong one is not visible
+    // until somebody looks at another cut of it.
+    gradeTargetLabel_ = new QLabel(bars_.nodesBox);
+    gradeTargetLabel_->setObjectName("muted-label");
+    gradeTargetLabel_->setTextFormat(Qt::PlainText);
+    nodesLayout->addWidget(gradeTargetLabel_);
+
+    connect(gradeClipTab_, &QPushButton::clicked, this,
+            [this] { setGradeTarget(app::ColorPalette::GradeTarget::TimelineClip); });
+    connect(gradeMediaTab_, &QPushButton::clicked, this,
+            [this] { setGradeTarget(app::ColorPalette::GradeTarget::MediaFile); });
+
     nodesLayout->addWidget(nodes_);
+
+    // Colour management, under the chain rather than in it: these are what the
+    // grade is done *between* -- the transform the footage arrives through and
+    // the curve it is delivered as -- and both were previously reachable only
+    // from a menu somebody had to remember was there.
+    auto* managementCaption = new QLabel(tr("Colour management"), bars_.nodesBox);
+    managementCaption->setObjectName("section-label");
+    nodesLayout->addSpacing(8);
+    nodesLayout->addWidget(managementCaption);
+
+    auto* management = new QWidget(bars_.nodesBox);
+    auto* managementGrid = new QGridLayout(management);
+    managementGrid->setContentsMargins(0, 4, 0, 0);
+    managementGrid->setHorizontalSpacing(8);
+    managementGrid->setVerticalSpacing(4);
+    managementGrid->setColumnStretch(1, 1);
+    const auto field = [&](int row, const QString& text, const QString& tip) {
+        auto* label = chrome::mutedLabel(management, text);
+        label->setToolTip(tip);
+        managementGrid->addWidget(label, row, 0);
+        auto* box = new QComboBox(management);
+        box->setToolTip(tip);
+        box->setFocusPolicy(Qt::StrongFocus);
+        managementGrid->addWidget(box, row, 1);
+        return box;
+    };
+    inputLut_ = field(0, tr("Input LUT"),
+                      tr("The .cube this footage is read through, before any grade. "
+                         "It belongs to the file, so every clip that reads the file "
+                         "gets it. Open a folder of looks in the LUTs list to fill this."));
+    colorSpace_ = field(1, tr("Color space"),
+                        tr("The curve this sequence is delivered as. The scopes and the "
+                           "curve editor are drawn against it, so it is also what a grade "
+                           "is being judged on."));
+    toneMapping_ = field(2, tr("Tone mapping"),
+                         tr("Where highlights start rolling off, in linear light. "
+                            "Clipping is what this program did before there was a choice."));
+    nodesLayout->addWidget(management);
+
+    connect(inputLut_, &QComboBox::currentIndexChanged, this,
+            [this](int index) { applyInputLut(index); });
+    connect(colorSpace_, &QComboBox::currentIndexChanged, this, [this] { applyDelivery(); });
+    connect(toneMapping_, &QComboBox::currentIndexChanged, this, [this] { applyDelivery(); });
     gradeLayout->addWidget(bars_.nodesBox);
     gradeLayout->addWidget(effects_, 1);
 
@@ -325,7 +421,10 @@ void PreviewWindow::buildViewerLayout() {
     scopes_->setMinimumHeight(150);
     mixer_->setMinimumHeight(190);
     topSplitter_->addWidget(rightColumn);
-    topSplitter_->setStretchFactor(3, 3);
+    // By index-of rather than by a literal: the panes either side of the
+    // viewer have been reordered twice now, and a hard-coded 3 silently
+    // stretches whichever pane has drifted into that slot.
+    topSplitter_->setStretchFactor(topSplitter_->indexOf(programColumn), 3);
 }
 
 void PreviewWindow::wireWorkspacePanels() {
@@ -391,6 +490,15 @@ void PreviewWindow::wireWorkspacePanels() {
             [this](const QString& lut) { applyLookToSelection(lut); });
 
     connect(bin_, &app::ProjectBin::openRequested, this, [this](zaro::model::MediaRefId id) {
+        // In Color, with the file as the target, opening one is also choosing
+        // which file the wheels are about to grade. Elsewhere it just means
+        // "let me look at this", which is what it has always meant.
+        if (workspace_ == "Color" &&
+            palette_->target() == app::ColorPalette::GradeTarget::MediaFile) {
+            palette_->setMedia(id);
+            syncGradeTarget();
+            syncColorManagement();
+        }
         if (const model::MediaRef* ref = document_.project().findMedia(id)) {
             source_->load(*ref);
             // Opening a clip is a request to look at it.
@@ -478,11 +586,6 @@ void PreviewWindow::buildWindowLayout() {
     mainSplitter_->addWidget(topSplitter_);
     bars_.timelinePane = buildTimelinePane();
     mainSplitter_->addWidget(bars_.timelinePane);
-    // The grading palette takes the timeline's place in Color. Not beside
-    // it: the design gives that workspace no timeline at all, because what
-    // a colourist moves through is shots, and the strip under the viewer is
-    // the list of those.
-    mainSplitter_->addWidget(palette_);
     mainSplitter_->setStretchFactor(0, 3);
     mainSplitter_->setStretchFactor(1, 2);
 
@@ -533,6 +636,8 @@ void PreviewWindow::wireEditingSignals() {
                 selectedClip_ = clip;
                 palette_->setSelection(track, clip);
                 clipStrip_->setSelection(track, clip);
+                syncGradeTarget();
+                syncColorManagement();
                 refreshGradeChain();
                 maskOverlay_->setTarget(&document_.project(), sequenceId_, track, clip,
                                         &document_.commands());
@@ -2516,7 +2621,215 @@ void PreviewWindow::setProgramShown(bool on) {
 }
 
 QString PreviewWindow::layoutKey(const QString& workspace, const char* which) {
-    return QString("workspace/%1/%2-v3").arg(workspace, QString::fromUtf8(which));
+    // -v5: the grading palette moved from the bottom splitter to the left
+    // column, so a saved state restores sizes for a pane that is no longer in
+    // that splitter at all.
+    // -v4: Color gained the timeline pane. A layout saved before that was
+    // stored with the pane hidden, and restoring it over a pane that is now
+    // shown gives it zero height -- a timeline that is present, correct and
+    // invisible, which reads as the feature not being there at all. Bumping
+    // the key retires those layouts instead of restoring them.
+    return QString("workspace/%1/%2-v5").arg(workspace, QString::fromUtf8(which));
+}
+
+namespace {
+
+/// Where highlights start rolling off. The same four the delivery menu offers,
+/// so the panel and the menu cannot come to disagree about what "roll off"
+/// means. See chrome::deliveryMenu.
+struct KneePreset {
+    const char* name;
+    double value;
+};
+constexpr KneePreset kKneePresets[] = {
+    {"Clip", 1.0},
+    {"Roll off gently", 0.9},
+    {"Roll off", 0.8},
+    {"Roll off hard", 0.65},
+};
+
+}  // namespace
+
+void PreviewWindow::syncColorManagement() {
+    if (colorSpace_ == nullptr) {
+        return;
+    }
+    const model::Sequence* sequence = liveSequence();
+    // Written from the model, never remembered: after an undo the project is
+    // the only thing that knows what these say.
+    syncingColorManagement_ = true;
+
+    colorSpace_->clear();
+    int wantedCurve = 0;
+    for (const media::TransferFunction transfer : media::allTransferFunctions()) {
+        if (transfer == media::TransferFunction::Unknown) {
+            continue;  // no formula, so nothing could encode through it
+        }
+        colorSpace_->addItem(QString::fromUtf8(media::toString(transfer)),
+                             QVariant::fromValue(static_cast<int>(transfer)));
+        if (sequence != nullptr && sequence->output().transfer == transfer) {
+            wantedCurve = colorSpace_->count() - 1;
+        }
+    }
+    colorSpace_->setCurrentIndex(wantedCurve);
+
+    toneMapping_->clear();
+    int wantedKnee = 0;
+    for (const KneePreset& preset : kKneePresets) {
+        toneMapping_->addItem(QString::fromUtf8(preset.name), preset.value);
+        if (sequence != nullptr && sequence->output().highlightKnee == preset.value) {
+            wantedKnee = toneMapping_->count() - 1;
+        }
+    }
+    toneMapping_->setCurrentIndex(wantedKnee);
+
+    // The input LUT is the file's, so it follows the selection rather than the
+    // sequence. "None" is always first, and is what an unset LUT means.
+    inputLut_->clear();
+    inputLut_->addItem(tr("None"), QString{});
+    const model::MediaRef* media = nullptr;
+    if (const model::Sequence* live = sequence; live != nullptr) {
+        const model::Track* track = live->findTrack(selectedTrack_);
+        const model::Clip* clip = track != nullptr ? track->find(selectedClip_) : nullptr;
+        if (clip != nullptr && clip->activeSource().isValid()) {
+            media = document_.project().findMedia(clip->activeSource());
+        }
+    }
+    const QString current = media != nullptr ? QString::fromStdString(media->lut.path) : QString{};
+    int wantedLut = 0;
+    const QDir folder{gallery_->lutFolder()};
+    if (folder.exists()) {
+        const QStringList cubes = folder.entryList({"*.cube"}, QDir::Files, QDir::Name);
+        for (const QString& file : cubes) {
+            const QString path = folder.filePath(file);
+            inputLut_->addItem(file, path);
+            if (path == current) {
+                wantedLut = inputLut_->count() - 1;
+            }
+        }
+    }
+    // A LUT set from somewhere else, or from a folder that is no longer open,
+    // still has to be shown -- otherwise the panel says "None" over footage
+    // that is being transformed.
+    if (!current.isEmpty() && wantedLut == 0) {
+        inputLut_->addItem(QFileInfo(current).fileName(), current);
+        wantedLut = inputLut_->count() - 1;
+    }
+    inputLut_->setCurrentIndex(wantedLut);
+    inputLut_->setEnabled(media != nullptr);
+
+    syncingColorManagement_ = false;
+}
+
+void PreviewWindow::applyInputLut(int index) {
+    if (syncingColorManagement_ || index < 0) {
+        return;
+    }
+    const model::Sequence* sequence = liveSequence();
+    const model::Track* track = sequence != nullptr ? sequence->findTrack(selectedTrack_) : nullptr;
+    const model::Clip* clip = track != nullptr ? track->find(selectedClip_) : nullptr;
+    if (clip == nullptr || !clip->activeSource().isValid()) {
+        return;
+    }
+    const model::MediaRef* media = document_.project().findMedia(clip->activeSource());
+    if (media == nullptr) {
+        return;
+    }
+    model::LutRef wanted;
+    wanted.path = inputLut_->itemData(index).toString().toStdString();
+    if (wanted.path == media->lut.path) {
+        return;
+    }
+    if (auto built = edit::makeSetMediaGrade(document_.project(), media->id, media->color,
+                                             media->wheels, wanted)) {
+        document_.commands().execute(document_.project(), std::move(*built));
+        document_.commands().breakMerge();
+    }
+    renderCache_.clear();
+    monitor_->update();
+    clipStrip_->refresh();
+    refreshInstruments();
+    updateTitle();
+}
+
+void PreviewWindow::applyDelivery() {
+    if (syncingColorManagement_) {
+        return;
+    }
+    const model::Sequence* sequence = liveSequence();
+    if (sequence == nullptr) {
+        return;
+    }
+    model::Sequence::Output wanted = sequence->output();
+    wanted.transfer = static_cast<media::TransferFunction>(colorSpace_->currentData().toInt());
+    wanted.highlightKnee = toneMapping_->currentData().toDouble();
+    if (wanted == sequence->output()) {
+        return;
+    }
+    setDelivery(wanted);
+}
+
+void PreviewWindow::setGradeTarget(app::ColorPalette::GradeTarget target) {
+    palette_->setTarget(target);
+    // Which pane answers "which one" depends on the target: the shot strip
+    // names cuts, the bin names files.
+    const bool gradingFile = target == app::ColorPalette::GradeTarget::MediaFile;
+    if (workspace_ == "Color") {
+        bin_->setVisible(gradingFile);
+        clipStrip_->setVisible(!gradingFile);
+    }
+    // The chain and the scopes are reading the other grade now, so everything
+    // that shows a grade has to be asked again.
+    refreshGradeChain();
+    refreshInstruments();
+    syncGradeTarget();
+    syncColorManagement();
+    // The status line names the target, so it is stale the moment this changes.
+    updateChrome();
+}
+
+void PreviewWindow::syncGradeTarget() {
+    if (gradeClipTab_ == nullptr) {
+        return;
+    }
+    const bool onFile = palette_->target() == app::ColorPalette::GradeTarget::MediaFile;
+    // setChecked only emits when the value moves, so this does not re-enter.
+    gradeClipTab_->setChecked(!onFile);
+    gradeMediaTab_->setChecked(onFile);
+
+    QString caption;
+    const model::Sequence* sequence = liveSequence();
+    const model::Track* track = sequence != nullptr ? sequence->findTrack(selectedTrack_) : nullptr;
+    const model::Clip* clip = track != nullptr ? track->find(selectedClip_) : nullptr;
+    if (onFile) {
+        // A file can be chosen in the bin without any clip being selected, so
+        // this case does not require one: the file picked there wins, and the
+        // selected clip's own file is the fallback.
+        const model::MediaRefId wanted = palette_->media().isValid() ? palette_->media()
+                                         : clip != nullptr           ? clip->activeSource()
+                                                                     : model::MediaRefId{};
+        const model::MediaRef* media =
+            wanted.isValid() ? document_.project().findMedia(wanted) : nullptr;
+        if (media == nullptr) {
+            caption = tr("Open a file in the bin to grade it");
+        } else {
+            const QString name = media->name.empty()
+                                     ? QFileInfo(QString::fromStdString(media->path)).fileName()
+                                     : QString::fromStdString(media->name);
+            // How many cuts inherit this edit. The number is the whole reason
+            // to grade the file rather than the clip, so it is worth saying
+            // before somebody drags a wheel rather than after.
+            const int uses = edit::clipsUsingMedia(document_.project(), media->id);
+            caption = tr("%1 · source grade · %n use(s)", nullptr, std::max(1, uses)).arg(name);
+        }
+    } else if (clip == nullptr) {
+        caption = tr("Nothing selected");
+    } else {
+        caption =
+            tr("%1 · instance grade")
+                .arg(QString::fromStdString(clip->name.empty() ? std::string{"Clip"} : clip->name));
+    }
+    chrome::setElidedText(gradeTargetLabel_, caption);
 }
 
 void PreviewWindow::setWorkspace(const QString& name) {
@@ -2544,18 +2857,26 @@ void PreviewWindow::setWorkspace(const QString& name) {
     // The bin and the parameter panel are both about picture; Audio has a
     // console in the middle and a channel's chain on the right, and neither
     // of those wants a clip's motion controls beside it.
-    bin_->setVisible(!colour && !deliver && !audio);
+    // The bin comes back in Color when the target is the file: "grade the media
+    // file" needs somewhere to say *which* file, and the bin is already the
+    // place this program lists them. Picking one is a double-click, the same
+    // gesture that opens a file anywhere else.
+    const bool gradingFile =
+        colour && palette_->target() == app::ColorPalette::GradeTarget::MediaFile;
+    bin_->setVisible((!colour && !deliver && !audio) || gradingFile);
     effects_->setVisible(!deliver && !audio);
     scopes_->setVisible(colour);
     mixer_->setVisible(audio);
-    // Color is a different room: the gallery and the shot strip replace the
-    // bin and the timeline, the grade chain sits over the parameters, and
-    // the wheels take the bottom of the window.
+    // Color is a different room: the gallery replaces the bin and the grade
+    // chain sits over the parameters. The timeline stays, though -- a colourist
+    // moves through a reel shot by shot, and the cut is what says which shot
+    // comes next and how long it is. The shot strip is the quick way along it
+    // and sits under the viewer; the timeline underneath is the cut itself.
     gallery_->setVisible(colour);
-    clipStrip_->setVisible(colour);
+    clipStrip_->setVisible(colour && !gradingFile);
     bars_.nodesBox->setVisible(colour);
     palette_->setVisible(colour);
-    bars_.timelinePane->setVisible(!colour && !deliver);
+    bars_.timelinePane->setVisible(!deliver);
     // Audio is a console: the mixer takes the centre, the loudness meter
     // and the channel's chain take the sides, and the picture stands down.
     bars_.audioSide->setVisible(audio);
@@ -2570,6 +2891,8 @@ void PreviewWindow::setWorkspace(const QString& name) {
         palette_->setSelection(selectedTrack_, selectedClip_);
         clipStrip_->setSelection(selectedTrack_, selectedClip_);
         refreshGradeChain();
+        syncGradeTarget();
+        syncColorManagement();
     }
     for (auto entry = bars_.workspaceTabs.constBegin(); entry != bars_.workspaceTabs.constEnd();
          ++entry) {
@@ -2618,6 +2941,11 @@ void PreviewWindow::updateChrome() {
     status.toolName = kToolNames[status.toolIndex];
     status.workspace = workspace_;
     status.binItems = bin_->count();
+    status.gradedClips = clipStrip_->gradedCount();
+    status.totalClips = clipStrip_->count();
+    status.gradeTarget = palette_->target() == app::ColorPalette::GradeTarget::MediaFile
+                             ? tr("grading the media file")
+                             : tr("grading the timeline clip");
     status.snapEnabled = timeline_->snapEnabled();
     status.zoomFraction = timeline_->zoomFraction();
     status.trackHeightFraction = timeline_->trackHeightFraction();

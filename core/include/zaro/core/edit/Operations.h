@@ -512,6 +512,18 @@ struct PastedClip {
 [[nodiscard]] Result<CommandPtr> makeSetMediaNotes(model::Project& project, model::MediaRefId media,
                                                    const std::string& notes);
 
+/// Grade the file itself, under every clip that reads it.
+///
+/// The source grade of `model::MediaRef`: one answer to "what should this
+/// footage look like", applied before each clip's own correction rather than
+/// instead of it. Grading a file that four clips use is one edit and one undo
+/// step, where grading the four clips is four of each and four chances for them
+/// to end up saying something slightly different.
+[[nodiscard]] Result<CommandPtr> makeSetMediaGrade(model::Project& project, model::MediaRefId media,
+                                                   const model::ColorCorrection& color,
+                                                   const model::ColorWheels& wheels,
+                                                   const model::LutRef& lut = {});
+
 /// Point a media reference at a different file.
 ///
 /// The digest is recomputed from the new file, so a relink that landed on the

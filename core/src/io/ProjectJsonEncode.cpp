@@ -723,6 +723,22 @@ json encode(const model::MediaRef& ref) {
         // correctly should not carry a line asserting what it already says.
         out["transferOverride"] = media::toString(ref.transferOverride);
     }
+    // The source grade, written under the same keys a clip uses for its own, so
+    // that "what a grade looks like on disk" is one answer rather than two.
+    // Omitted when neutral, so an ungraded bin adds nothing to the file.
+    if (json color = encode(ref.color); !color.empty()) {
+        out["color"] = std::move(color);
+    }
+    if (json wheels = encode(ref.wheels); !wheels.empty()) {
+        out["wheels"] = std::move(wheels);
+    }
+    if (ref.lut.isSet() || !ref.lut.path.empty()) {
+        json lut{{"path", ref.lut.path}};
+        if (ref.lut.amount != 1.0) {
+            lut["amount"] = ref.lut.amount;
+        }
+        out["lut"] = std::move(lut);
+    }
     return out;
 }
 

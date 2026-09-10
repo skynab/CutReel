@@ -39,10 +39,30 @@ const std::vector<float>* RenderGraph::coverageFor(const model::Mask& mask, std:
     return &pathCoverage_;
 }
 
+const model::MediaRef* RenderGraph::mediaFor(const model::Clip& clip) const {
+    // A graph with no project renders everything else, the way a headless test
+    // does; a clip that reads no file -- a title, a shape, a nest -- has no
+    // source grade to inherit either.
+    if (project_ == nullptr) {
+        return nullptr;
+    }
+    const model::MediaRefId source = clip.activeSource();
+    return source.isValid() ? project_->findMedia(source) : nullptr;
+}
+
 void RenderGraph::drawClip(const model::Clip& clip, const RgbaImage& image, RgbaImage& out,
                            const model::Transform& transform, const time::RationalTime& at,
                            const model::Mask* wipe) {
     const GradeConstants grade = gradeConstantsFor(clip.colorAt(at), clip.wheels);
+    // The file's own grade, under the clip's. Resolved per draw rather than
+    // cached on the clip: the same file can be recut and regraded between two
+    // frames, and a stale copy of it would show on one clip and not the next.
+    const model::MediaRef* media = mediaFor(clip);
+    const bool sourceGraded = media != nullptr && media->isGraded();
+    const GradeConstants sourceGrade =
+        sourceGraded ? gradeConstantsFor(media->color, media->wheels) : GradeConstants{};
+    const LutTable* sourceLut =
+        sourceGraded && media->lut.isSet() ? luts_.tableFor(media->lut.path, transfer_) : nullptr;
     const CurveTable& table = curves_.tableFor(clip.id.value(), clip.curves, transfer_);
     const ColorCurveTable& hues = colorCurves_.tableFor(clip.id.value(), clip.colorCurves);
     const SecondaryConstants secondary = secondaryConstantsFor(clip.secondary, transfer_);
@@ -67,9 +87,12 @@ void RenderGraph::drawClip(const model::Clip& clip, const RgbaImage& image, Rgba
     // which changes whether they are drawn at all.
     const bool active = !grade.isIdentity() || !table.isIdentity() || secondary.isActive() ||
                         lut != nullptr || mask.isSet() || keyer.isActive() ||
-                        clip.vignette.isSet() || (wipe != nullptr && wipe->isSet());
+                        clip.vignette.isSet() || (wipe != nullptr && wipe->isSet()) || sourceGraded;
     ClipShading shading;
     shading.grade = active ? &grade : nullptr;
+    shading.source = sourceGraded ? &sourceGrade : nullptr;
+    shading.sourceLut = sourceLut;
+    shading.sourceLutAmount = sourceGraded ? static_cast<float>(media->lut.amount) : 1.0F;
     shading.curves = active ? &table : nullptr;
     shading.secondary = active ? &secondary : nullptr;
     shading.lut = lut;
