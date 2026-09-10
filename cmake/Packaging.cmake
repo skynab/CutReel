@@ -8,7 +8,7 @@
 #   cmake --build   --preset release
 #   cpack           --preset release
 #
-# produces build/release/cutreel_<version>_amd64.deb on Linux, a .tar.gz on
+# produces build/release/cutreel_<version>_amd64.deb on Linux, a .dmg on
 # macOS, and on Windows the installer described below.
 
 # Windows ships one file: the bootstrapper .exe, which is an MSI inside a
@@ -30,10 +30,13 @@
 # lib/cutreel, found through the relative RPATH set in tools/ and app/. The
 # tarball that used to sit beside it is gone; see the generator below for why.
 #
-# Known limitation: macOS. Only cutreel.app is made self-contained there,
-# so the command-line tools in bin/ still expect a machine carrying the same
-# Homebrew dependencies the archive was built against. The same treatment Linux
-# gets below would work, with @loader_path in place of $ORIGIN.
+# Known limitation: macOS. Only cutreel.app is made self-contained there, so
+# the command-line tools in bin/ still expect a machine carrying the same
+# Homebrew dependencies the disk image was built against. The same treatment
+# Linux gets below would work, with @loader_path in place of $ORIGIN. Until it
+# is done, those tools ride along on the image and are left behind on it when
+# the app is dragged to Applications -- which is the right outcome for a binary
+# that cannot start without a matching Homebrew tree anyway.
 
 include(GNUInstallDirs)
 
@@ -150,7 +153,45 @@ if(WIN32)
     configure_file("${CMAKE_CURRENT_SOURCE_DIR}/cmake/bundle.wxs.in"
                    "${CMAKE_BINARY_DIR}/bundle.wxs" @ONLY)
 elseif(APPLE)
-    set(CPACK_GENERATOR TGZ)
+    # macOS ships one file: a .dmg holding cutreel.app beside a symlink to
+    # /Applications, which is the install gesture every Mac user already knows.
+    # It replaces a .tar.gz, and the reason is not presentation. A tarball is
+    # opened by Archive Utility, which copies the quarantine flag off the
+    # download onto every file it unpacks -- and CutReel is signed by
+    # macdeployqt with an ad-hoc signature, which is not a Developer ID and
+    # carries no notarisation ticket. Gatekeeper rejects that combination with
+    # "cutreel is damaged and can't be opened", which is a lie about the
+    # bundle and reads like a corrupt download.
+    #
+    # The disk image does not fix that, and nothing here can: a file copied out
+    # of a quarantined .dmg inherits the flag exactly as one unpacked from a
+    # quarantined tarball does, so the first launch is blocked either way. Only
+    # a Developer ID signature and notarisation remove the dialog. What the
+    # image buys is a container macOS understands -- one mount, one drag, no
+    # Archive Utility -- and one place to say so; see the README for the
+    # xattr command that clears the flag until CutReel is notarised.
+    set(CPACK_GENERATOR DragNDrop)
+
+    # What Finder titles the mounted volume, and what the eject entry in the
+    # sidebar is called. CPACK_PACKAGE_FILE_NAME is the default and it is the
+    # file name -- CutReel-0.7.0-Darwin-arm64 -- which is right for a download
+    # and wrong for a window title.
+    set(CPACK_DMG_VOLUME_NAME "CutReel ${PROJECT_VERSION}")
+
+    # zlib-compressed and read-only, the format every application .dmg uses.
+    set(CPACK_DMG_FORMAT "UDZO")
+
+    # No click-through licence on mount. CPACK_RESOURCE_FILE_LICENSE is set
+    # near the top of this file, and older CPack turned any non-default
+    # value into a software licence agreement the user has to Agree to before
+    # Finder will open the volume -- built with `hdiutil udifrez`, which macOS
+    # 12 deprecated. CMP0133 already defaults this off for a project requiring
+    # CMake 3.24, but it is the difference between an image that builds and one
+    # that does not, so it is stated rather than inherited.
+    set(CPACK_DMG_SLA_USE_RESOURCE_FILE_LICENSE OFF)
+
+    # The /Applications symlink is CPack's default and is deliberately left on;
+    # without it the window has nothing to drag the app onto.
 else()
     # One file, and it is the .deb. There was a tarball beside it -- unpack it
     # anywhere, run bin/cutreel -- and it was a second Linux package to
