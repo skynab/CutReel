@@ -225,7 +225,6 @@ void PreviewWindow::createPanels() {
     channel_->setMaximumWidth(320);
 
     gallery_ = new app::GalleryPanel(this);
-    gallery_->setFixedWidth(236);
     clipStrip_ = adopting(new app::ClipStrip(this));
     nodes_ = new app::GradeNodes(this);
     palette_ = adopting(new app::ColorPalette(this));
@@ -305,7 +304,14 @@ void PreviewWindow::buildViewerLayout() {
     // controls down, not the other way about.
     topSplitter_->addWidget(palette_);
     palette_->setFixedWidth(310);
-    topSplitter_->addWidget(gallery_);
+    // The gallery is not a pane of its own: its two panels hang off the
+    // palette's tab strip, beside Wheels and Bars, so that everything a
+    // colourist reaches for while grading is in one column behind one row of
+    // tabs. The panel itself stays alive as the owner of the stills and the
+    // look folder.
+    palette_->addPage(tr("Gallery"), app::icons::Glyph::Camera, gallery_->stillsPage());
+    palette_->addPage(tr("LUTs"), app::icons::Glyph::FolderOpen, gallery_->lutsPage());
+    gallery_->hide();
     topSplitter_->addWidget(bin_);
     topSplitter_->addWidget(programColumn);
     // Scopes share the parameter column: they are read while grading, and
@@ -2716,6 +2722,8 @@ void PreviewWindow::setProgramShown(bool on) {
 }
 
 QString PreviewWindow::layoutKey(const QString& workspace, const char* which) {
+    // -v6: the gallery stopped being a pane of its own -- its panels moved
+    // into the palette's tabs -- so the top splitter has one pane fewer.
     // -v5: the grading palette moved from the bottom splitter to the left
     // column, so a saved state restores sizes for a pane that is no longer in
     // that splitter at all.
@@ -2724,7 +2732,7 @@ QString PreviewWindow::layoutKey(const QString& workspace, const char* which) {
     // shown gives it zero height -- a timeline that is present, correct and
     // invisible, which reads as the feature not being there at all. Bumping
     // the key retires those layouts instead of restoring them.
-    return QString("workspace/%1/%2-v5").arg(workspace, QString::fromUtf8(which));
+    return QString("workspace/%1/%2-v6").arg(workspace, QString::fromUtf8(which));
 }
 
 namespace {
@@ -2967,7 +2975,6 @@ void PreviewWindow::setWorkspace(const QString& name) {
     // moves through a reel shot by shot, and the cut is what says which shot
     // comes next and how long it is. The shot strip is the quick way along it
     // and sits under the viewer; the timeline underneath is the cut itself.
-    gallery_->setVisible(colour);
     clipStrip_->setVisible(colour && !gradingFile);
     bars_.nodesBox->setVisible(colour);
     palette_->setVisible(colour);

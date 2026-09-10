@@ -37,6 +37,14 @@ public:
 
     /// Fill the look list from a folder of .cube files.
     void showLutFolder(const QString& folder);
+
+    /// The two panels this owns, for whoever is going to show them.
+    ///
+    /// This class draws nothing itself any more: the pages are handed to the
+    /// grading palette's tab strip so that stills, looks and wheels share one
+    /// row of tabs. See `ColorPalette::addPage`.
+    [[nodiscard]] QWidget* stillsPage() const noexcept { return stillsPage_; }
+    [[nodiscard]] QWidget* lutsPage() const noexcept { return lutsPage_; }
     [[nodiscard]] const QString& lutFolder() const noexcept { return folder_; }
 
 signals:
@@ -57,6 +65,8 @@ private:
     };
 
     std::vector<Still> stills_;
+    QWidget* stillsPage_{nullptr};
+    QWidget* lutsPage_{nullptr};
     QListWidget* grid_{nullptr};
     QListWidget* luts_{nullptr};
     QLabel* count_{nullptr};

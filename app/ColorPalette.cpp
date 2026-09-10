@@ -250,8 +250,12 @@ ColorPalette::ColorPalette(QWidget* parent) : QWidget{parent} {
     pages_ = new QStackedWidget(this);
     pages_->addWidget(wheelRow);
     pages_->addWidget(barRow);
-    connect(palettes_, &QListWidget::currentRowChanged, this,
-            [this](int row) { pages_->setCurrentIndex(std::max(0, row)); });
+    connect(palettes_, &QListWidget::currentRowChanged, this, [this](int row) {
+        pages_->setCurrentIndex(std::max(0, row));
+        // Whether the ramps and the empty message belong on screen depends on
+        // which page is showing, so the panel has to be read again.
+        refresh();
+    });
 
     // --- temperature, tint, saturation -----------------------------------
     temperature_ = new GradientSlider{"Temperature", QColor{0x6a, 0x8f, 0xd9}, theme::neutral(600),
@@ -294,20 +298,37 @@ ColorPalette::ColorPalette(QWidget* parent) : QWidget{parent} {
     scrolledColumn->addWidget(ramps);
     scrolledColumn->addStretch(1);
 
-    auto* scroller = new QScrollArea(this);
-    scroller->setObjectName("palette-scroll");
-    scroller->setWidget(scrolled);
-    scroller->setWidgetResizable(true);
-    scroller->setFrameShape(QFrame::NoFrame);
-    scroller->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroller_ = new QScrollArea(this);
+    scroller_->setObjectName("palette-scroll");
+    scroller_->setWidget(scrolled);
+    scroller_->setWidgetResizable(true);
+    scroller_->setFrameShape(QFrame::NoFrame);
+    scroller_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    ramps_ = ramps;
+    // Everything built so far is a grading control. Anything after this came
+    // through `addPage` and lives by different rules.
+    gradingPages_ = pages_->count();
 
     auto* column = new QVBoxLayout(this);
     column->setContentsMargins(0, 0, 0, 0);
     column->setSpacing(0);
     column->addWidget(palettes_);
-    column->addWidget(scroller, 1);
+    column->addWidget(scroller_, 1);
     column->addWidget(empty_, 1);
 
+    refresh();
+}
+
+bool ColorPalette::onGradingPage() const {
+    return pages_->currentIndex() < gradingPages_;
+}
+
+void ColorPalette::addPage(const QString& name, icons::Glyph glyph, QWidget* page) {
+    // Into the same stack and the same tab strip as the wheels, so the panel
+    // has one row of tabs rather than one row per thing that wanted a tab.
+    pages_->addWidget(page);
+    auto* item = new QListWidgetItem(name, palettes_);
+    item->setIcon(icons::toolIcon(glyph, 14));
     refresh();
 }
 
@@ -409,11 +430,18 @@ void ColorPalette::push(Result<edit::CommandPtr> built, bool committed) {
 
 void ColorPalette::refresh() {
     const bool have = haveTarget();
-    palettes_->setVisible(have);
-    pages_->setVisible(have);
-    temperature_->parentWidget()->setVisible(have);
-    empty_->setVisible(!have);
-    if (!have) {
+    const bool grading = onGradingPage();
+    // The tabs never go away: the Gallery and the LUTs are reachable with
+    // nothing selected, and a strip that vanished would take them with it.
+    palettes_->setVisible(true);
+    // The ramps belong to the grade, so they follow the grading pages.
+    ramps_->setVisible(grading);
+    // Only the grading pages need something selected. A page that came through
+    // `addPage` is shown whatever the timeline is doing.
+    const bool blocked = grading && !have;
+    scroller_->setVisible(!blocked);
+    empty_->setVisible(blocked);
+    if (blocked) {
         // Which pane to look in depends on what is being graded, and telling
         // somebody to use the strip while the bin is on screen is worse than
         // saying nothing.
@@ -421,6 +449,9 @@ void ColorPalette::refresh() {
                             ? tr("Open a file in the bin to grade every instance of it")
                             : tr("Select a shot in the strip above to grade it"));
         return;
+    }
+    if (!grading) {
+        return;  // nothing on this page reads a grade
     }
 
     // Written from the model, not remembered: after an undo the project is the

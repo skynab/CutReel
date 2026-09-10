@@ -10,6 +10,7 @@
 #include <QPainter>
 #include <QPixmap>
 #include <QPushButton>
+#include <QTabWidget>
 #include <QVBoxLayout>
 
 #include "Icons.h"
@@ -43,8 +44,11 @@ QPixmap swatchFor(const QString& name) {
     return pixmap;
 }
 
-/// A section heading with a button on the end of it, as the design draws both
-/// the Gallery and the LUTs rows.
+/// The action row above a list: whatever it wants to say about itself, and the
+/// one button that fills it.
+///
+/// No title any more. These two lists are tabs now, and a tab that says
+/// "Gallery" over a heading that also says "Gallery" is one of them wasted.
 QWidget* heading(QWidget* parent, const QString& title, QLabel** note, QPushButton** action,
                  icons::Glyph glyph, const QString& tip) {
     auto* bar = new QFrame(parent);
@@ -53,9 +57,11 @@ QWidget* heading(QWidget* parent, const QString& title, QLabel** note, QPushButt
     auto* row = new QHBoxLayout(bar);
     row->setContentsMargins(10, 0, 6, 0);
     row->setSpacing(8);
-    auto* label = new QLabel(title, bar);
-    label->setObjectName("gallery-title");
-    row->addWidget(label);
+    if (!title.isEmpty()) {
+        auto* label = new QLabel(title, bar);
+        label->setObjectName("gallery-title");
+        row->addWidget(label);
+    }
     if (note != nullptr) {
         *note = new QLabel(bar);
         (*note)->setProperty("muted", true);
@@ -78,8 +84,8 @@ GalleryPanel::GalleryPanel(QWidget* parent) : QWidget{parent} {
     setAttribute(Qt::WA_StyledBackground, true);
 
     QPushButton* grab = nullptr;
-    QWidget* stillsHeading = heading(this, "Gallery", &count_, &grab, icons::Glyph::Camera,
-                                     "Grab a still of this frame");
+    QWidget* stillsHeading =
+        heading(this, {}, &count_, &grab, icons::Glyph::Camera, "Grab a still of this frame");
     connect(grab, &QPushButton::clicked, this, [this] { emit grabRequested(); });
 
     // An icon grid rather than hand-drawn tiles: two columns of thumbnails is
@@ -94,7 +100,6 @@ GalleryPanel::GalleryPanel(QWidget* parent) : QWidget{parent} {
     grid_->setMovement(QListView::Static);
     grid_->setSpacing(4);
     grid_->setWordWrap(true);
-    grid_->setFixedHeight(238);
     connect(grid_, &QListWidget::itemClicked, this, [this](QListWidgetItem* item) {
         const auto at = static_cast<std::size_t>(grid_->row(item));
         if (at < stills_.size()) {
@@ -103,7 +108,7 @@ GalleryPanel::GalleryPanel(QWidget* parent) : QWidget{parent} {
     });
 
     QPushButton* browse = nullptr;
-    QWidget* lutHeading = heading(this, "LUTs", nullptr, &browse, icons::Glyph::FolderOpen,
+    QWidget* lutHeading = heading(this, {}, nullptr, &browse, icons::Glyph::FolderOpen,
                                   "Choose a folder of .cube looks");
     connect(browse, &QPushButton::clicked, this, [this] { chooseLutFolder(); });
 
@@ -116,21 +121,31 @@ GalleryPanel::GalleryPanel(QWidget* parent) : QWidget{parent} {
 
     // Both lists say what they are for while they are empty.
     //
-    // The gallery's band is a fixed height by design, so on a project with no
-    // stills and no looks the rail was a heading, 238 pixels of nothing, a
-    // second heading, and the rest of the panel of nothing again -- which reads
-    // as a layout that did not finish rather than as two lists waiting to be
-    // given something. The bands stay; they just say what they are now.
+    // They used to be stacked, and on a project with no stills and no looks
+    // that read as a layout that had not finished: a heading, a fixed band of
+    // nothing, a second heading, and the rest of the panel of nothing again.
+    // As tabs only one is on screen at a time, and it gets the whole panel.
     chrome::setEmptyText(grid_, "Grab a still to compare a grade against it.");
     chrome::setEmptyText(luts_, "No looks loaded.\n\nOpen a folder of .cube files.");
 
-    auto* column = new QVBoxLayout(this);
-    column->setContentsMargins(0, 0, 0, 0);
-    column->setSpacing(0);
-    column->addWidget(stillsHeading);
-    column->addWidget(grid_);
-    column->addWidget(lutHeading);
-    column->addWidget(luts_, 1);
+    // Two pages, and no tab strip of its own to put them in.
+    //
+    // They are hung off the grading palette's tabs instead -- see
+    // `ColorPalette::addPage`. A colourist reaching for a still is reaching for
+    // the same column the wheels are in, and a second row of tabs beside the
+    // first is two places to look for one kind of thing. This panel keeps the
+    // stills, the folder and the signals; what it no longer keeps is a frame.
+    const auto page = [this](QWidget* actions, QWidget* list) {
+        auto* holder = new QWidget(this);
+        auto* stack = new QVBoxLayout(holder);
+        stack->setContentsMargins(0, 0, 0, 0);
+        stack->setSpacing(0);
+        stack->addWidget(actions);
+        stack->addWidget(list, 1);
+        return holder;
+    };
+    stillsPage_ = page(stillsHeading, grid_);
+    lutsPage_ = page(lutHeading, luts_);
 
     count_->setText("no stills");
 }

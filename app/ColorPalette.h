@@ -12,9 +12,12 @@
 
 class QLabel;
 class QListWidget;
+class QScrollArea;
 class QStackedWidget;
 
 #include "zaro/ui/SequenceBinding.h"
+
+#include "Icons.h"
 
 namespace zaro::app {
 
@@ -113,6 +116,16 @@ public:
     /// also a button in the node panel, and both should be the same action.
     void resetGrade();
 
+    /// Hang another panel off the same tab strip the wheels and bars use.
+    ///
+    /// The Gallery and the LUTs arrive this way. They are not grading controls
+    /// -- neither writes to a correction -- but they are the same kind of thing
+    /// to reach for while grading, and a colourist should not have to learn
+    /// that stills are behind a second row of tabs somewhere else. Pages added
+    /// here are left alone when there is nothing selected: a still can be
+    /// grabbed and a look folder opened with no clip in hand.
+    void addPage(const QString& name, icons::Glyph glyph, QWidget* page);
+
 signals:
     /// The grade changed, so the monitor and the scopes must be redrawn.
     void edited();
@@ -150,6 +163,15 @@ private:
     GradientSlider* saturation_{nullptr};
     QListWidget* palettes_{nullptr};
     QStackedWidget* pages_{nullptr};
+    /// The scroller holding the grading controls, and the ramps inside it.
+    /// Both step aside for the empty message when there is nothing to grade.
+    QScrollArea* scroller_{nullptr};
+    QWidget* ramps_{nullptr};
+    /// How many of the pages are grading controls. The ones after these came
+    /// through `addPage` and do not need a selection to be useful.
+    int gradingPages_{0};
+    /// Whether the page on screen is one of those grading controls.
+    [[nodiscard]] bool onGradingPage() const;
     std::vector<GradientSlider*> bars_;
     QLabel* empty_{nullptr};
 };
