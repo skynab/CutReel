@@ -30,6 +30,7 @@
 #include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMimeData>
 #include <QProgressDialog>
 #include <QRegularExpression>
 #include <QSlider>
@@ -38,9 +39,12 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include <zaro/Version.h>
+
+#include "MediaDrag.h"
 
 namespace zaro::app {
 namespace {
@@ -83,6 +87,11 @@ PreviewWindow::PreviewWindow(model::Project project, io::LoadedProject loaded, s
     buildWindowLayout();
     wireEditingSignals();
     startTimers();
+
+    // Last, so that nothing can be let go of over a window that is still being
+    // put together. A project dropped anywhere on it opens, which is the
+    // shortest route there is from "this is the cut" to having it on screen.
+    setAcceptDrops(true);
 }
 
 void PreviewWindow::createPanels() {
@@ -567,6 +576,9 @@ void PreviewWindow::wireWorkspacePanels() {
     // without it.
     connect(bin_, &app::ProjectBin::addTitleRequested, this,
             [this](const QString& presetId) { addTitle(presetId.toStdString()); });
+    // Either pane may be the one a project lands on; both hand it here.
+    connect(bin_, &app::ProjectBin::projectDropped, this,
+            [this](const QString& path) { openDropped(path); });
     connect(bin_, &app::ProjectBin::mediaImported, this, [this] {
         if (Status reopened = openMedia(); !reopened) {
             app::warn(this, "Import", QString::fromStdString(reopened.error().toString()));
@@ -681,6 +693,10 @@ void PreviewWindow::wireEditingSignals() {
     connect(timeline_, &app::TimelineWidget::addTitleRequested, this, [this] { addTitle(); });
     connect(timeline_, &app::TimelineWidget::detectScenesRequested, this,
             [this] { static_cast<void>(detectScenes()); });
+    connect(timeline_, &app::TimelineWidget::projectDropped, this,
+            [this](const QString& path) { openDropped(path); });
+    connect(timeline_, &app::TimelineWidget::mediaDropped, this,
+            [this](const QStringList& paths, const QPoint& at) { importDropped(paths, at); });
     connect(timeline_, &app::TimelineWidget::toolChanged, this, [this] { updateChrome(); });
     connect(timeline_, &app::TimelineWidget::snapChanged, this, [this] { updateChrome(); });
     connect(timeline_, &app::TimelineWidget::edited, this, [this] {
@@ -2104,7 +2120,10 @@ void PreviewWindow::openDialog() {
     if (chosen.isEmpty()) {
         return;
     }
-    const std::string path = chosen.toStdString();
+    openChosen(chosen.toStdString());
+}
+
+void PreviewWindow::openChosen(const std::string& path) {
     // Somebody else's lock is a question, not a refusal: often enough the
     // answer is "let me look at it anyway", and often enough the other
     // machine went home hours ago.
@@ -2357,6 +2376,82 @@ bool PreviewWindow::eventFilter(QObject* watched, QEvent* event) {
         return true;
     }
     return QWidget::eventFilter(watched, event);
+}
+
+void PreviewWindow::dragEnterEvent(QDragEnterEvent* event) {
+    if (droppedProjectPath(event->mimeData()).empty()) {
+        // Footage let go of over the window's furniture rather than over the
+        // bin. Refused rather than imported: the bin is where files go, it is
+        // the largest thing on the left of the window, and a drop that landed
+        // on the tool bar by half a pixel should miss rather than do something
+        // slightly different.
+        event->ignore();
+        return;
+    }
+    // Copy rather than move: the project file stays where it is. A move would
+    // ask the file manager to delete it once this returns.
+    event->setDropAction(Qt::CopyAction);
+    event->acceptProposedAction();
+}
+
+void PreviewWindow::dragMoveEvent(QDragMoveEvent* event) {
+    if (droppedProjectPath(event->mimeData()).empty()) {
+        event->ignore();
+        return;
+    }
+    event->setDropAction(Qt::CopyAction);
+    event->acceptProposedAction();
+}
+
+void PreviewWindow::dropEvent(QDropEvent* event) {
+    const std::string path = droppedProjectPath(event->mimeData());
+    if (path.empty()) {
+        event->ignore();
+        return;
+    }
+    event->setDropAction(Qt::CopyAction);
+    event->accept();
+    openDropped(QString::fromStdString(path));
+}
+
+void PreviewWindow::openDropped(const QString& path) {
+    // On the next turn of the event loop, never inside the handler. This runs
+    // in the middle of the window system's drag session -- the file manager is
+    // blocked waiting for the drop to come back -- and opening a project tears
+    // down and rebinds every panel in the window, one of which is very often
+    // the widget whose handler is still on the stack.
+    QTimer::singleShot(0, this, [this, path] { openChosen(path.toStdString()); });
+}
+
+void PreviewWindow::importDropped(const QStringList& paths, const QPoint& at) {
+    // Past the end of the drag session, like a project. More so, in fact: an
+    // import probes every file, and the file manager is blocked until this
+    // handler comes back.
+    QTimer::singleShot(0, this, [this, paths, at] {
+        // The import and the placement under one group: letting go of a folder
+        // of rushes is one gesture, and a person who did it and changed their
+        // mind should press undo once, not once per file plus once per import.
+        //
+        // It still comes out as two steps rather than one, and that is a
+        // property of the history rather than of this call: importing snapshots
+        // the project, placing snapshots the sequence, and two different kinds
+        // of snapshot cannot fold into each other. Two is the floor; without
+        // the group it was two per file.
+        const edit::CommandStack::Group step{document_.commands()};
+        const app::ProjectBin::Imported brought = bin_->importMedia(paths);
+        if (brought.media.empty()) {
+            // Nothing readable in what was let go of. Said where an import
+            // says everything else, rather than in a dialog: it is the answer
+            // to a gesture, and a gesture does not deserve a box to dismiss.
+            bin_->note(QStringLiteral("Nothing to import"));
+            return;
+        }
+        timeline_->placeImported(brought.media, at);
+        // The set of media changed, so which of it is missing has to be
+        // recomputed -- quietly, as an import does from the pane.
+        checkMissingMedia();
+        updateTitle();
+    });
 }
 
 void PreviewWindow::closeEvent(QCloseEvent* event) {

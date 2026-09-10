@@ -1362,9 +1362,10 @@ void ProjectBin::importFiles() {
     static_cast<void>(importPaths(chosen));
 }
 
-int ProjectBin::importPaths(const QStringList& paths) {
+ProjectBin::Imported ProjectBin::importMedia(const QStringList& paths) {
+    Imported brought;
     if (project_ == nullptr || commands_ == nullptr) {
-        return 0;
+        return brought;
     }
 
     // A folder stands for the media in it. One level down, not a walk of the
@@ -1393,7 +1394,6 @@ int ProjectBin::importPaths(const QStringList& paths) {
     // header, not a stream -- it takes milliseconds -- and every background
     // thread added is another lifetime to get right, which is what caused the
     // abort-on-quit bug.
-    int added = 0;
     for (const QString& path : files) {
         const std::string where = path.toStdString();
 
@@ -1403,11 +1403,13 @@ int ProjectBin::importPaths(const QStringList& paths) {
         // key rather than by string, because a project holds paths written by
         // older imports as well as this one.
         const QString key = pathKey(path);
-        const bool known = std::any_of(project_->media().begin(), project_->media().end(),
+        const auto here = std::find_if(project_->media().begin(), project_->media().end(),
                                        [&key](const model::MediaRef& ref) {
                                            return pathKey(QString::fromStdString(ref.path)) == key;
                                        });
-        if (known) {
+        if (here != project_->media().end()) {
+            // Named all the same: the caller may have somewhere to put it.
+            brought.media.push_back(here->id);
             continue;
         }
 
@@ -1429,46 +1431,29 @@ int ProjectBin::importPaths(const QStringList& paths) {
             ref.contentDigest = *digest;
         }
 
+        // Taken here rather than left to the command, so that the caller is
+        // told which entry the file became. A drop that lands on the timeline
+        // has to put a clip on the one it just made.
+        ref.id = project_->ids().next<model::MediaRefTag>();
+        const model::MediaRefId id = ref.id;
+
         auto built = edit::makeImportMedia(*project_, std::move(ref));
         if (built) {
             commands_->execute(*project_, std::move(*built));
-            ++added;
+            brought.media.push_back(id);
+            ++brought.added;
         }
     }
     commands_->breakMerge();
     refresh();
     emit edited();
-    if (added > 0) {
+    if (brought.added > 0) {
         emit mediaImported();
     }
-    return added;
+    return brought;
 }
 
 namespace {
-
-/// The local files in a drag, if it carries any this pane would take.
-///
-/// By extension, like the browser lists by extension: the answer is needed
-/// while the pointer is moving, and opening every file under the cursor to be
-/// sure is not something that can happen at that speed. A folder counts,
-/// because a folder of rushes is the usual thing to let go of here.
-QStringList droppedMedia(const QMimeData* mime) {
-    QStringList paths;
-    if (mime == nullptr || !mime->hasUrls()) {
-        return paths;
-    }
-    for (const QUrl& url : mime->urls()) {
-        if (!url.isLocalFile()) {
-            continue;  // a URL is not a file this program can open
-        }
-        const QString path = url.toLocalFile();
-        const QFileInfo info{path};
-        if (info.isDir() || io::looksLikeMedia(path.toStdString())) {
-            paths.push_back(path);
-        }
-    }
-    return paths;
-}
 
 /// The border that says the pane will take what is over it.
 ///
@@ -1496,7 +1481,26 @@ protected:
 }  // namespace
 
 void ProjectBin::dragEnterEvent(QDragEnterEvent* event) {
-    if (project_ == nullptr || commands_ == nullptr || droppedMedia(event->mimeData()).isEmpty()) {
+    // A project on its way in is taken here rather than refused, because
+    // refusing it does nothing useful: Qt stops at the widget under the
+    // pointer, so an ignored drag does not reach the window behind this pane.
+    // The pane covers most of the left of the window, which makes it one of
+    // likeliest places for one to land.
+    if (!droppedProjectPath(event->mimeData()).empty()) {
+        event->setDropAction(Qt::CopyAction);
+        event->acceptProposedAction();
+        dropHover_ = true;
+        footer_->setText(QStringLiteral("Drop to open this project"));
+        if (dropHint_ == nullptr) {
+            dropHint_ = new DropHint{this};
+        }
+        dropHint_->setGeometry(pages_->geometry());
+        dropHint_->raise();
+        dropHint_->show();
+        return;
+    }
+    if (project_ == nullptr || commands_ == nullptr ||
+        droppedMediaPaths(event->mimeData()).isEmpty()) {
         event->ignore();
         return;
     }
@@ -1537,7 +1541,18 @@ void ProjectBin::dropEvent(QDropEvent* event) {
     if (dropHint_ != nullptr) {
         dropHint_->hide();
     }
-    const QStringList paths = droppedMedia(event->mimeData());
+    if (const std::string project = droppedProjectPath(event->mimeData()); !project.empty()) {
+        event->setDropAction(Qt::CopyAction);
+        event->accept();
+        applyFilter();  // this pane is about to be rebound; put its summary back
+        // Said, not done. The window defers the open past the end of this
+        // drag session, which it has to: opening a project rebinds every
+        // panel in the window, this one included, and this one's drop handler
+        // is still on the stack.
+        emit projectDropped(QString::fromStdString(project));
+        return;
+    }
+    const QStringList paths = droppedMediaPaths(event->mimeData());
     if (paths.isEmpty()) {
         applyFilter();
         event->ignore();
@@ -1564,7 +1579,7 @@ void ProjectBin::dropEvent(QDropEvent* event) {
         // remarking on -- files that could not be read, or were here already
         // -- says anything more.
         if (added == 0) {
-            footer_->setText(QStringLiteral("Nothing to import"));
+            note(QStringLiteral("Nothing to import"));
         }
     });
 }
@@ -1644,6 +1659,12 @@ void ProjectBin::interpretMenu() {
     }
     refresh();
     emit colorChanged();
+}
+
+void ProjectBin::note(const QString& text) {
+    if (footer_ != nullptr) {
+        footer_->setText(text);
+    }
 }
 
 void ProjectBin::appendSelectedToTimeline() {

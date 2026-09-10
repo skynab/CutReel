@@ -32,13 +32,35 @@ struct LoadedProject {
     std::shared_ptr<const UnknownFields> unknown;
 };
 
-[[nodiscard]] Result<LoadedProject> loadProjectFromString(const std::string& text);
+/// Every file a project points at is written twice: once as the absolute path
+/// it had when it was saved, and once as where it sits relative to the project
+/// file itself.
+///
+/// **Both, because there are two ways to lose a file and they are opposites.**
+/// A project carried to another machine, or into another folder, with its
+/// footage beside it has absolute paths that name nothing there. A project
+/// moved on its own, away from footage that stayed where it was, has a
+/// relative path that names nothing. Writing only one of the two picks which
+/// of those to be bad at; writing both costs a line per file and covers each.
+///
+/// **The relative one wins when it names a file that is really there.** That
+/// is what makes a duplicated project folder edit its own copies rather than
+/// reach back into the folder it was copied from -- and a relative path can
+/// only be reproduced by a folder that was copied wholesale, so there is no
+/// other way for it to resolve by accident.
+///
+/// `baseDir` is the folder the project file is in, and is what these paths are
+/// relative to. Empty means there is no file yet: nothing relative is written,
+/// and nothing relative is read, which is the old behaviour exactly.
+[[nodiscard]] Result<LoadedProject> loadProjectFromString(const std::string& text,
+                                                          const std::string& baseDir = {});
 [[nodiscard]] Result<LoadedProject> loadProject(const std::string& path);
 
 /// Pass back the `unknown` from a load to preserve anything this build does not
 /// understand. Omit it when writing a project built in memory.
 [[nodiscard]] Result<std::string> saveProjectToString(
-    const model::Project& project, const std::shared_ptr<const UnknownFields>& unknown = nullptr);
+    const model::Project& project, const std::shared_ptr<const UnknownFields>& unknown = nullptr,
+    const std::string& baseDir = {});
 /// Writes beside the file and renames over it, so an interrupted save leaves
 /// the previous version intact rather than half of each.
 [[nodiscard]] Status saveProject(const model::Project& project, const std::string& path,

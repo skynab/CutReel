@@ -69,6 +69,20 @@ public:
     /// Neither is owned; both must outlive the widget.
     void bind(const ui::SequenceBinding& binding) override;
 
+    /// Put these files on the cut, at the point they were let go of.
+    ///
+    /// The second half of a drop of footage from the file manager. The first
+    /// half is the import, which lives in the media pane because that is where
+    /// the probe is, so the window does the importing and hands the media back
+    /// here to be placed -- the timeline being the only thing that knows what
+    /// a point on it means.
+    ///
+    /// End to end from the drop point, in the order the files arrived. One
+    /// undo step for all of them: letting go of a folder of rushes is one
+    /// gesture, and taking it back one file at a time is not what anybody
+    /// means by undo.
+    void placeImported(const std::vector<model::MediaRefId>& media, const QPoint& at);
+
     [[nodiscard]] const time::RationalTime& playhead() const noexcept { return playhead_; }
     void setPlayhead(const time::RationalTime& position);
 
@@ -215,6 +229,22 @@ signals:
     /// and a length, and none of the transform, grade or mask the clips it
     /// joins have.
     void transitionSelected(zaro::model::TrackId track, zaro::model::TransitionId transition);
+    /// Footage was let go of over the timeline, straight from the file manager.
+    ///
+    /// A request, not the import: importing means probing every file, which is
+    /// the media pane's job and the media pane's dependency. The timeline says
+    /// what landed and where, and gets the media handed back to `placeImported`.
+    void mediaDropped(const QStringList& paths, const QPoint& at);
+
+    /// A project file was let go of over the timeline.
+    ///
+    /// A request rather than the open, on the same terms as everything else
+    /// here: what the window is showing is the window's to change. The
+    /// timeline's part is noticing that what landed was a project rather than
+    /// a clip, which it has to do because Qt gives the drop to the widget
+    /// under the pointer and does not pass a refused one to the parent.
+    void projectDropped(const QString& path);
+
     /// The tool or the snap setting changed, including from the keyboard --
     /// so the toolbar showing them can follow rather than only lead.
     void toolChanged();
@@ -338,7 +368,14 @@ private:
     /// The top edge of the sound block, or -- with `past` -- the empty space
     /// under the last row of all, which is where a new sound row would open.
     [[nodiscard]] std::int32_t soundBlockTop(bool past = false) const;
-    [[nodiscard]] std::optional<DropSpot> dropSpotFor(const MediaDrag& dragged, const QPoint& at);
+    /// `startAt` overrides where the clip begins, for placing a run of files
+    /// end to end: only the first of them lands where the pointer was, and the
+    /// rest follow it. Everything else the spot decides -- which row, whether
+    /// a new one is needed, where the other half of the take goes -- is worked
+    /// out against that start rather than against the pointer's.
+    [[nodiscard]] std::optional<DropSpot> dropSpotFor(
+        const MediaDrag& dragged, const QPoint& at,
+        const std::optional<time::RationalTime>& startAt = std::nullopt);
     /// Which track of its kind a clip of this length would land on at this
     /// time: the one asked for, or a new one when that is taken or locked.
     [[nodiscard]] DropSpot::Landing landingFor(model::TrackKind kind, model::TrackId wanted,
@@ -354,6 +391,13 @@ private:
     /// Make the edit a drop asks for: a track first if it needs one, then the
     /// clip, both inside one undo step.
     void placeDropped(const MediaDrag& dragged, const DropSpot& where);
+
+    /// Let an empty sequence take the shape of the first thing put on it.
+    ///
+    /// Before anything reads the rate: conforming changes the rate a start
+    /// time is counted in, so a spot worked out first would be expressed in
+    /// units the sequence no longer uses.
+    void conformToFirst(model::MediaRefId media);
 
     /// Keep the playhead on screen, paging when it leaves.
     void followPlayhead();

@@ -400,6 +400,12 @@ struct PastedClip {
 /// is shorter than the clip: at that point there is no honest answer, and
 /// silently shortening the clip would ripple a cut somebody did not ask to
 /// change.
+///
+/// **A still is never too short.** One picture can be held for as long as
+/// somebody wants, so a length is not a thing it can fail to have -- and
+/// swapping a placeholder for the finished artwork is exactly what this is
+/// for. Its in point goes to zero, since there is no frame 500 of a
+/// photograph, and the clip keeps its length.
 [[nodiscard]] Result<CommandPtr> makeReplaceSource(model::Project& project,
                                                    const EditTarget& target, model::ClipId clip,
                                                    model::MediaRefId media);

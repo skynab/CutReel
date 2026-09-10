@@ -11,12 +11,15 @@
 #include <QListWidget>
 #include <QMimeData>
 #include <QMouseEvent>
+#include <QUrl>
 #include <QWheelEvent>
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
 #include <memory>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -1296,6 +1299,125 @@ zaro::model::TrackId onPictureTrack(zaro::app::PreviewWindow& window, zaro::mode
 // used to throw away. What this covers is the wiring and the two rules on it:
 // a clip may only join a row of its own kind, and whatever is linked to it
 // follows the same shift in time while staying on its own track.
+// Footage let go of over the timeline, straight from the file manager.
+//
+// The shortcut past the media pane: the same drag that imports when it lands
+// on the bin should import *and* cut when it lands on the timeline. Delivered
+// as Qt delivers it -- an enter to ask, then the drop -- because what this
+// covers is the wiring between three things that do not know about each other:
+// the timeline that took the drop, the pane that owns the probe, and the
+// window that joins them.
+TEST_CASE("Footage dropped on the timeline is imported and placed", "[gui]") {
+    auto& window = zaro::app::testing::gui();
+    const zaro::app::testing::Rewind rewind;
+    auto* timeline = window.timeline();
+
+    const std::filesystem::path dropRoot =
+        std::filesystem::temp_directory_path() / "zaro-selftest-timeline-drop";
+    zaro::app::testing::discard(dropRoot);
+    std::filesystem::create_directories(dropRoot);
+    // Two, so that "they land end to end" is a check that can fail. Named so
+    // they sort the way they are dropped.
+    std::filesystem::copy_file(zaro::app::testing::mediaFixture("shaky_texture.mov"),
+                               dropRoot / "A001.mov");
+    std::filesystem::copy_file(zaro::app::testing::mediaFixture("wide_texture.mp4"),
+                               dropRoot / "A002.mp4");
+
+    // Zoomed out, so there is empty timeline to the right of the fixture's
+    // clip for these to land in.
+    timeline->zoomToFit();
+    timeline->zoomBy(0.4);
+    QApplication::processEvents();
+
+    const auto pictureRow = timeline->rowFor(window.sequence()->videoTracks().front().id());
+    REQUIRE(pictureRow.has_value());
+    const int dropX = timeline->width() - 60;
+    const int dropY = pictureRow->top + pictureRow->height / 2;
+
+    QList<QUrl> urls{QUrl::fromLocalFile(QString::fromStdString((dropRoot / "A001.mov").string())),
+                     QUrl::fromLocalFile(QString::fromStdString((dropRoot / "A002.mp4").string()))};
+
+    const std::size_t mediaBefore = window.project().media().size();
+    const std::size_t clipsBefore = window.sequence()->videoTracks().front().clips().size();
+    const std::size_t stepsBefore = window.commands().position();
+
+    QMimeData mime;
+    mime.setUrls(urls);
+    QDragEnterEvent entering{QPoint{dropX, dropY}, Qt::CopyAction, &mime, Qt::LeftButton,
+                             Qt::NoModifier};
+    QCoreApplication::sendEvent(timeline, &entering);
+    if (!entering.isAccepted()) {
+        zaro::app::testing::failf("the timeline refused footage from the file manager\n");
+    }
+    QDropEvent dropping{QPointF{static_cast<double>(dropX), static_cast<double>(dropY)},
+                        Qt::CopyAction, &mime, Qt::LeftButton, Qt::NoModifier};
+    QCoreApplication::sendEvent(timeline, &dropping);
+    // Twice: the timeline defers to the window, and the window defers past the
+    // end of the drag session before it probes anything.
+    QApplication::processEvents();
+    QApplication::processEvents();
+
+    if (window.project().media().size() != mediaBefore + 2) {
+        zaro::app::testing::failf("the drop imported %zu files, not two\n",
+                                  window.project().media().size() - mediaBefore);
+    }
+
+    // On the cut, not merely in the bin: going through the pane is exactly
+    // what this is meant to save.
+    const auto& picture = window.sequence()->videoTracks();
+    std::size_t placed = 0;
+    std::vector<zaro::model::Clip> landed;
+    for (const auto& track : picture) {
+        for (const auto& clip : track.clips()) {
+            const zaro::model::MediaRef* ref = window.project().findMedia(clip.source);
+            if (ref != nullptr && ref->path.find("A00") != std::string::npos) {
+                ++placed;
+                landed.push_back(clip);
+            }
+        }
+    }
+    if (placed != 2) {
+        zaro::app::testing::failf("%zu of the two dropped files reached the timeline\n", placed);
+    }
+    std::sort(landed.begin(), landed.end(),
+              [](const zaro::model::Clip& a, const zaro::model::Clip& b) {
+                  return a.start() < b.start();
+              });
+    // End to end: a pile on top of each other is not a cut.
+    if (landed.front().timelineRange.endExclusive() != landed.back().start()) {
+        zaro::app::testing::failf(
+            "the two files did not land end to end (%lld..%lld, then %lld)\n",
+            static_cast<long long>(landed.front().start().frames()),
+            static_cast<long long>(landed.front().timelineRange.endExclusive().frames()),
+            static_cast<long long>(landed.back().start().frames()));
+    }
+    std::printf("  dropped two files onto the timeline at %lld and %lld\n",
+                static_cast<long long>(landed.front().start().frames()),
+                static_cast<long long>(landed.back().start().frames()));
+
+    // Two steps for the whole drop, whatever it held: the import is one and the
+    // placement is another, because a snapshot of the project and a snapshot of
+    // a sequence cannot fold into each other. What must not happen is a step
+    // per file -- undoing a folder of rushes one clip at a time.
+    const std::size_t steps = window.commands().position() - stepsBefore;
+    if (steps > 2) {
+        zaro::app::testing::failf("a drop of two files took %zu undo steps\n", steps);
+    }
+
+    static_cast<void>(clipsBefore);
+
+    while (window.commands().canUndo()) {
+        window.commands().undo(window.project());
+    }
+    if (Status reopened = window.reopenMedia(); !reopened) {
+        zaro::app::testing::failf("%s\n", reopened.error().toString().c_str());
+    }
+    // After the undo and the reopen: while the project still names these
+    // files, the media source holds a decoder on each one.
+    zaro::app::testing::discard(dropRoot);
+    QApplication::processEvents();
+}
+
 TEST_CASE("A clip drags to another row of its own kind", "[gui]") {
     auto& window = zaro::app::testing::gui();
     const zaro::app::testing::Rewind rewind;

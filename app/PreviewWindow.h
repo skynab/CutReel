@@ -524,6 +524,38 @@ public:
 
     void openDialog();
 
+    /// Open this project, asking about somebody else's lock first if there is
+    /// one.
+    ///
+    /// The whole of Open apart from choosing the file, which is why it is
+    /// separate: a project let go of over the window arrives already chosen,
+    /// and it should be opened on exactly the terms the dialog opens one on
+    /// -- the same question about a lock, the same sentence when it will not
+    /// load. A second path that skipped either would be a second way to open
+    /// a project that behaves differently for no reason anybody could see.
+    void openChosen(const std::string& path);
+
+    /// Open a project that was let go of over the window, once the drag that
+    /// brought it is over.
+    ///
+    /// The deferral is the whole reason this exists, and it is not optional.
+    /// A drop handler runs inside the window system's drag session, with the
+    /// program that started the drag waiting on it; opening a project rebinds
+    /// every panel in the window, and the panel it rebinds is often the one
+    /// whose handler is still on the stack. The three places a project can
+    /// land all end up here so that none of them can forget.
+    void openDropped(const QString& path);
+
+    /// Import footage let go of over the timeline, and put it on the cut.
+    ///
+    /// Split between the two panels because the two halves belong to
+    /// different ones: importing means probing every file, which is the media
+    /// pane's job, and a point on the timeline is only meaningful to the
+    /// timeline. Neither knows about the other, so the window joins them --
+    /// and it is the window that has to wait for the drag to finish first,
+    /// exactly as it does for a project.
+    void importDropped(const QStringList& paths, const QPoint& at);
+
     bool saveAs();
 
     /// Write the recovery file, if there is anything to recover.
@@ -630,6 +662,15 @@ protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
 
     void closeEvent(QCloseEvent* event) override;
+
+    // A project file let go of over the window opens it, the way letting go
+    // of footage over the bin imports it. Handled on the window as well as on
+    // the panes that fill it because a drop lands on whatever is under the
+    // pointer and goes no further: the panes cover most of the window, and the
+    // window covers the rest -- the tool bar, the transport, the gaps.
+    void dragEnterEvent(QDragEnterEvent* event) override;
+    void dragMoveEvent(QDragMoveEvent* event) override;
+    void dropEvent(QDropEvent* event) override;
 
 private:
     // --- The chrome ---------------------------------------------------------

@@ -4,9 +4,14 @@
 // for what is shared and why.
 
 #include <QComboBox>
+#include <QDragEnterEvent>
+#include <QDropEvent>
 #include <QElapsedTimer>
+#include <QList>
+#include <QMimeData>
 #include <QPoint>
 #include <QThread>
+#include <QUrl>
 #include <cstdint>
 
 #include <catch2/catch_test_macros.hpp>
@@ -1248,6 +1253,99 @@ TEST_CASE("New and Open, through the real window", "[gui]") {
     if (std::filesystem::exists(zaro::io::lockPath(originalPath))) {
         zaro::app::testing::failf("closing left a lock behind\n");
     }
+}
+
+// A project let go of over the window opens it.
+//
+// Three targets, because a drop lands on whatever is under the pointer and
+// goes no further: Qt walks up from the child under the cursor to the first
+// widget that takes drops and stops there, so a project let go of over the
+// timeline never reaches the window behind it. The bin and the timeline cover
+// nearly all of the window between them; the window itself covers the rest.
+TEST_CASE("A project file dropped on the window opens it", "[gui]") {
+    auto& window = zaro::app::testing::gui();
+    const zaro::app::testing::Rewind rewind;
+
+    const std::string originalPath = window.projectPath();
+    if (originalPath.empty()) {
+        zaro::app::testing::failf("the fixture project has no path to drop\n");
+    }
+
+    // A copy rather than the file that is already open, so that "it opened"
+    // is a check that can fail.
+    const std::filesystem::path dropped =
+        std::filesystem::path{ZARO_SCRATCH_DIR} / "dropped.cutreel";
+    zaro::app::testing::discard(dropped);
+    if (Status copied = zaro::io::saveProject(window.project(), dropped.string()); !copied) {
+        zaro::app::testing::failf("%s\n", copied.error().toString().c_str());
+    }
+
+    const QUrl url = QUrl::fromLocalFile(QString::fromStdString(dropped.string()));
+
+    // Sent to the widget itself rather than posted at the window, which is
+    // what the window system does once it has decided which widget the pointer
+    // is over.
+    const auto letGo = [&url](QWidget* target, const QList<QUrl>& urls) {
+        QMimeData mime;
+        mime.setUrls(urls);
+        static_cast<void>(url);
+        const QPoint at{target->width() / 2, target->height() / 2};
+        QDragEnterEvent entering{at, Qt::CopyAction, &mime, Qt::LeftButton, Qt::NoModifier};
+        QApplication::sendEvent(target, &entering);
+        if (!entering.isAccepted()) {
+            return false;
+        }
+        QDropEvent dropping{QPointF{at}, Qt::CopyAction, &mime, Qt::LeftButton, Qt::NoModifier};
+        QApplication::sendEvent(target, &dropping);
+        QApplication::processEvents();
+        return dropping.isAccepted();
+    };
+
+    struct Target {
+        const char* what;
+        QWidget* widget;
+    };
+    const Target targets[] = {{"the window", &window},
+                              {"the bin", static_cast<QWidget*>(window.bin())},
+                              {"the timeline", static_cast<QWidget*>(window.timeline())}};
+
+    for (const Target& target : targets) {
+        // Back to the original first, so each target is asked to make the
+        // same change rather than confirming one already made.
+        if (Status back = window.openProject(originalPath); !back) {
+            zaro::app::testing::failf("%s\n", back.error().toString().c_str());
+        }
+        if (!letGo(target.widget, {url})) {
+            zaro::app::testing::failf("%s refused a project file\n", target.what);
+        }
+        // The open is deferred past the end of the drag session, so the queued
+        // call has to be let through before anything has happened.
+        QApplication::processEvents();
+        // Compared as paths, not as text: a drop arrives as a URL, and
+        // `QUrl::toLocalFile` spells a Windows path with forward slashes.
+        if (!std::filesystem::exists(window.projectPath()) ||
+            !std::filesystem::equivalent(window.projectPath(), dropped)) {
+            zaro::app::testing::failf("dropping a project on %s did not open it (still %s)\n",
+                                      target.what, window.projectPath().c_str());
+        }
+        std::printf("  %s opened a dropped project\n", target.what);
+    }
+
+    // Two projects at once is not an answer to anything, and a project among
+    // a pile of rushes is somebody importing footage.
+    if (Status back = window.openProject(originalPath); !back) {
+        zaro::app::testing::failf("%s\n", back.error().toString().c_str());
+    }
+    const QUrl second =
+        QUrl::fromLocalFile(QString::fromStdString(std::filesystem::path{originalPath}.string()));
+    if (letGo(&window, {url, second})) {
+        zaro::app::testing::failf("the window took two projects at once\n");
+    }
+    if (!std::filesystem::equivalent(window.projectPath(), originalPath)) {
+        zaro::app::testing::failf("a refused drop still changed the project\n");
+    }
+
+    zaro::app::testing::discard(dropped);
 }
 
 // Switching sequence while a workspace other than Edit is up.
