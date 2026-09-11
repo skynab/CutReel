@@ -209,6 +209,23 @@ if(WIN32 OR APPLE)
     install(SCRIPT "${zaro_deploy_script}" COMPONENT runtime)
 endif()
 
+# macdeployqt does not finish the job on macOS: a library Homebrew links
+# through @rpath is copied into the bundle and then left with a dependency the
+# loader cannot resolve and a signature that no longer matches the file. The
+# script says which library, and what it looks like when it ships. It has to
+# run after the deployment above, which is why it is installed from here rather
+# than from cmake/Packaging.cmake.
+if(APPLE)
+    # The directory macOS opens when the .app is double-clicked, named the way
+    # the bundle is named -- target name plus .app, because nothing sets
+    # OUTPUT_NAME. The script is given it rather than looking for one, so that
+    # a bundle missing entirely is an error rather than a silent no-op.
+    set(ZARO_APP_BUNDLE_NAME "cutreel.app")
+    configure_file("${CMAKE_SOURCE_DIR}/cmake/RepairMacBundle.cmake.in"
+                   "${CMAKE_BINARY_DIR}/RepairMacBundle.cmake" @ONLY)
+    install(SCRIPT "${CMAKE_BINARY_DIR}/RepairMacBundle.cmake" COMPONENT runtime)
+endif()
+
 # --- Linux ---------------------------------------------------------------------
 # Linux has no deployment tool of Qt's, so the two halves are done by hand: the
 # shared libraries come from the runtime dependency set in cmake/Packaging.cmake,
