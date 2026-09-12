@@ -75,6 +75,11 @@ public:
 private:
     [[nodiscard]] Status drawClips(const model::Sequence& sequence, const time::RationalTime& at);
 
+    /// Adapts this graph to `render::walkVideo`, so that the preview and the
+    /// export agree about what is on a frame by construction rather than by two
+    /// traversals being kept in step by hand. See core's VideoWalk.h.
+    class Sink;
+
     /// Baked tone curves, kept between frames for the same reason the CPU
 
     /// graph keeps them: building one is thousands of spline evaluations.

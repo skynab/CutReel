@@ -10,7 +10,7 @@
 #include "zaro/core/render/RenderCache.h"
 #include "zaro/core/render/ShapeRaster.h"
 #include "zaro/core/render/TextRasterizer.h"
-#include "zaro/core/render/TransitionShape.h"
+#include "zaro/core/render/VideoWalk.h"
 
 namespace zaro::render {
 
@@ -247,9 +247,8 @@ const RgbaImage* RenderGraph::nestedImage(const model::Clip& clip, const time::R
     return composed ? &buffer : nullptr;
 }
 
-const RgbaImage* RenderGraph::transitionSideImage(const model::Clip& clip,
-                                                  const time::RationalTime& at, int side,
-                                                  std::int32_t width, std::int32_t height) {
+const RgbaImage* RenderGraph::clipPicture(const model::Clip& clip, const time::RationalTime& at,
+                                          int side, std::int32_t width, std::int32_t height) {
     // A nest is the one kind `clipImage` cannot answer for -- see `nestedImage`
     // -- and it was the last kind a transition could not draw. Phase 6o put
     // generated clips behind one function for exactly this reason, and left a
@@ -261,15 +260,49 @@ const RgbaImage* RenderGraph::transitionSideImage(const model::Clip& clip,
     return clipImage(clip, at, side == 0 ? generated_ : generatedB_, width, height);
 }
 
-bool RenderGraph::compositeNested(const model::Sequence& sequence, const model::Clip& clip,
-                                  RgbaImage& out, const time::RationalTime& at) {
-    const RgbaImage* buffer = nestedImage(clip, at, 0);
-    if (buffer == nullptr) {
-        return false;
+/// This graph, as something `walkVideo` can drive.
+///
+/// Every method here is only the drawing: which clips there are, in what order,
+/// and what a transition does to their transforms is decided once, in
+/// VideoWalk.cpp, for this backend and the GPU one alike.
+class RenderGraph::Sink final : public VideoSink {
+public:
+    Sink(RenderGraph& graph, RgbaImage& out) : graph_{graph}, out_{out} {}
+
+    void draw(const model::Clip& clip, const model::Transform& transform,
+              const time::RationalTime& at, int side, const model::Mask* wipe) override {
+        const RgbaImage* image = graph_.clipPicture(clip, at, side, out_.width(), out_.height());
+        if (image == nullptr) {
+            // A gap. `clipPicture` has already counted a title it could not
+            // rasterise; unreadable media and a missing nest are counted by
+            // their absence from the frame.
+            return;
+        }
+        graph_.drawClip(clip, *image, out_, transform, at, wipe);
+        ++graph_.lastClipCount_;
     }
-    drawClip(clip, *buffer, out, pinnedTransformAt(sequence, clip, at), at);
-    return true;
-}
+
+    void adjustment(const model::Clip& clip, const time::RationalTime& at) override {
+        graph_.applyAdjustment(clip, out_, at);
+        ++graph_.lastClipCount_;
+    }
+
+    void caption(const model::Graphic& graphic) override {
+        if (graph_.generated_.width() != out_.width() ||
+            graph_.generated_.height() != out_.height()) {
+            graph_.generated_ = RgbaImage{out_.width(), out_.height()};
+        }
+        if (drawText(graphic, graph_.text_, graph_.generated_)) {
+            drawOver(graph_.generated_, out_);
+        } else {
+            ++graph_.skippedText_;
+        }
+    }
+
+private:
+    RenderGraph& graph_;
+    RgbaImage& out_;
+};
 
 Status RenderGraph::compositeInto(const model::Sequence& sequence, const time::RationalTime& at,
                                   RgbaImage& out) {
@@ -310,171 +343,11 @@ Status RenderGraph::compositeInto(const model::Sequence& sequence, const time::R
     // eventually be told something different from its parent.
     transfer_ = sequence.output().transfer;
 
-    // Bottom-up. Index 0 is V1, the lowest track, and each later track
-    // composites over what is already there.
-    for (const model::Track& track : sequence.videoTracks()) {
-        if (!sequence.isAudible(track)) {
-            continue;
-        }
-        // A transition shows both of its clips at once. The clips themselves
-        // never overlap on the timeline, so this is the only place two clips
-        // from one track contribute to the same frame.
-        if (const model::Transition* transition = track.transitionAt(at)) {
-            const model::Clip* outgoing = track.find(transition->from);
-            const model::Clip* incoming = track.find(transition->to);
-
-            // A span with one side empty is a fade against whatever is below --
-            // black, where this is the bottom track. The one clip is drawn at
-            // the fade's opacity and nothing is composited under it, which is
-            // what makes a fade out on V1 go to black and one on V2 reveal the
-            // track beneath instead of punching a hole in it.
-            if (transition->isFadeIn() || transition->isFadeOut()) {
-                const model::Clip* only = transition->isFadeIn() ? incoming : outgoing;
-                if (only != nullptr && only->enabled) {
-                    const double progress = transition->progressAt(at);
-                    // A fade out is a fade in played backwards, so one shape
-                    // serves both: the shot arrives at `progress` or departs at
-                    // what is left of it. The incoming side is the one used
-                    // either way, because there is only ever one clip here.
-                    //
-                    // Through `transitionShapeFor` rather than an opacity of
-                    // its own, so a kind means the same thing at the end of a
-                    // run as it does across a cut -- a wipe uncovers the shot
-                    // against black, a slide brings it on from off screen.
-                    // This branch used to ramp the opacity itself, which made
-                    // every kind look like a dissolve and made the panel's Type
-                    // control a lie wherever a span had one side empty.
-                    //
-                    // A dissolve is unchanged by that: its shape *is* an
-                    // opacity of exactly this ramp. Linear, not equal power --
-                    // this is coverage against a background, and the eye reads
-                    // a straight ramp as an even fade. The sound version is
-                    // equal power for the opposite reason: see AudioGraph.
-                    const TransitionShape shape = transitionShapeFor(
-                        *transition, transition->isFadeIn() ? progress : 1.0 - progress,
-                        out.width(), out.height());
-                    if (const RgbaImage* image =
-                            transitionSideImage(*only, at, 0, out.width(), out.height())) {
-                        drawClip(
-                            *only, *image, out,
-                            shapedTransform(pinnedTransformAt(sequence, *only, at), shape.incoming),
-                            at, shape.incoming.mask.isSet() ? &shape.incoming.mask : nullptr);
-                        ++lastClipCount_;
-                    }
-                }
-                continue;
-            }
-
-            if (outgoing != nullptr && incoming != nullptr) {
-                const auto progress = transition->progressAt(at);
-                // One function decides what a transition looks like part way
-                // through, and both render paths call it -- for both clips.
-                const TransitionShape shape =
-                    transitionShapeFor(*transition, progress, out.width(), out.height());
-
-                // The outgoing clip is read past its out point and the incoming
-                // one before its in point, both reaching into the handles
-                // either side of the cut. sourceTimeAt extrapolates linearly,
-                // which is exactly the mapping wanted here.
-                if (outgoing->enabled) {
-                    if (const RgbaImage* image =
-                            transitionSideImage(*outgoing, at, 0, out.width(), out.height())) {
-                        drawClip(*outgoing, *image, out,
-                                 shapedTransform(pinnedTransformAt(sequence, *outgoing, at),
-                                                 shape.outgoing),
-                                 at, shape.outgoing.mask.isSet() ? &shape.outgoing.mask : nullptr);
-                        ++lastClipCount_;
-                    }
-                }
-                if (incoming->enabled) {
-                    if (const RgbaImage* image =
-                            transitionSideImage(*incoming, at, 1, out.width(), out.height())) {
-                        // Drawn over the outgoing clip at the dissolve's
-                        // progress: with premultiplied `over` and an opaque
-                        // source that gives out*(1-p) + in*p.
-                        drawClip(*incoming, *image, out,
-                                 shapedTransform(pinnedTransformAt(sequence, *incoming, at),
-                                                 shape.incoming),
-                                 at, shape.incoming.mask.isSet() ? &shape.incoming.mask : nullptr);
-                        ++lastClipCount_;
-                    }
-                }
-                continue;
-            }
-        }
-
-        const model::Clip* clip = track.clipAt(at);
-        if (clip == nullptr || !clip->enabled) {
-            continue;
-        }
-
-        if (clip->adjustment) {
-            applyAdjustment(*clip, out, at);
-            ++lastClipCount_;
-            continue;
-        }
-
-        if (clip->nested.isValid()) {
-            if (!compositeNested(sequence, *clip, out, at)) {
-                continue;
-            }
-            ++lastClipCount_;
-            continue;
-        }
-
-        if (clip->graphic.isSet()) {
-            // Generated rather than read. Drawn at the sequence's size, so the
-            // transform that follows means the same thing it does for a clip
-            // whose media happens to be that size.
-            if (generated_.width() != out.width() || generated_.height() != out.height()) {
-                generated_ = RgbaImage{out.width(), out.height()};
-            }
-            if (clip->graphic.kind == model::GraphicKind::Text) {
-                if (!drawText(clip->graphic, text_, generated_,
-                              clip->parameterAt(model::Param::TextReveal, at))) {
-                    // No rasteriser, or it failed. Counted rather than
-                    // ignored, so a caller can say "this render had no font
-                    // engine" instead of leaving someone to notice the missing
-                    // title in the delivered file.
-                    ++skippedText_;
-                    continue;
-                }
-            } else {
-                drawShape(clip->graphic, generated_);
-            }
-            drawClip(*clip, generated_, out, pinnedTransformAt(sequence, *clip, at), at);
-            ++lastClipCount_;
-            continue;
-        }
-
-        auto image = source_->imageFor(clip->activeSource(), clip->activeSourceTimeAt(at));
-        if (!image) {
-            // One unreadable clip must not take the whole frame with it. A gap
-            // where a clip should be is a visible, diagnosable problem; a failed
-            // render is a stalled edit.
-            continue;
-        }
-        drawClip(*clip, **image, out, pinnedTransformAt(sequence, *clip, at), at);
-        ++lastClipCount_;
-    }
-
-    // Captions last, over everything: they are a deliverable laid on top of the
-    // picture rather than a layer in it, and a caption a later track could
-    // cover is a caption nobody can read.
-    if (sequence.captions().isBurnedIn()) {
-        for (const model::Caption* caption : sequence.captions().at(at)) {
-            if (generated_.width() != out.width() || generated_.height() != out.height()) {
-                generated_ = RgbaImage{out.width(), out.height()};
-            }
-            const model::Graphic graphic = captionGraphic(sequence.captions().style(),
-                                                          caption->text, out.width(), out.height());
-            if (drawText(graphic, text_, generated_)) {
-                drawOver(generated_, out);
-            } else {
-                ++skippedText_;
-            }
-        }
-    }
+    // What is on this frame, and in what order, is decided by `walkVideo` --
+    // once, for this backend and the GPU one alike. See VideoWalk.h for why
+    // that is not each backend's business any more.
+    Sink sink{*this, out};
+    walkVideo(sequence, at, sink);
 
     if (cacheable) {
         cache_->insert(sequence.id(), at, recipe, out.clone(), lastClipCount_, skippedText_);

@@ -3,10 +3,9 @@
 #include "zaro/core/render/Grade.h"
 #include "zaro/core/render/ShapeRaster.h"
 #include "zaro/core/render/TextRasterizer.h"
+#include "zaro/core/render/VideoWalk.h"
 
 namespace zaro::platform::qrhi {
-
-using model::pinnedTransformAt;
 
 /// Draw one clip, with everything that applies to it.
 ///
@@ -88,28 +87,32 @@ bool GpuRenderGraph::drawTransitionSide(const model::Clip& clip, const model::Se
         return drawClipImage(clip, scratch, transform, at, wipe);
     }
     if (clip.nested.isValid()) {
-        // The same sub-render the ordinary path does, and the last kind of clip
-        // a transition could not draw: before this, a dissolve onto a nested
-        // sequence drew nothing, silently, because a clip whose picture cannot
-        // be resolved is treated as a gap rather than an error.
+        // A nest is composited on the CPU and uploaded: this compositor has no
+        // way to render a whole sequence into a texture mid-pass.
+        //
+        // It was the last kind of clip a transition could not draw -- a dissolve
+        // onto a nested sequence drew nothing, silently, because a clip whose
+        // picture cannot be resolved is treated as a gap rather than an error.
+        // That cannot recur by this route now: every clip on the frame comes
+        // through here, so a kind this function cannot answer for is a kind
+        // nothing can draw, which is a visible gap rather than a case that
+        // works on one path and not the other.
         //
         // `composite` hands back a frame by value, so the two halves of a
         // transition do not need separate buffers here the way they do on the
         // CPU side -- each call owns what it returns.
-        if (nestedSource_ == nullptr || project_ == nullptr) {
+        if (project_ == nullptr) {
             return false;
         }
         const model::Sequence* inner = project_->findSequence(clip.nested);
         if (inner == nullptr) {
             return false;
         }
-        if (nested_ == nullptr) {
-            nested_ = std::make_unique<render::RenderGraph>(*nestedSource_);
-            nested_->setProject(project_);
-            nested_->setTextRasterizer(text_);
-            nested_->setRenderCache(cache_);
+        render::RenderGraph* innerGraph = cpuGraph();
+        if (innerGraph == nullptr) {
+            return false;
         }
-        auto composed = nested_->composite(*inner, clip.sourceTimeAt(at));
+        auto composed = innerGraph->composite(*inner, clip.sourceTimeAt(at));
         if (!composed) {
             return false;
         }
@@ -187,6 +190,55 @@ bool GpuRenderGraph::needsCpuFallback(const model::Sequence& sequence, const tim
     return false;
 }
 
+/// This graph, as something `walkVideo` can drive.
+///
+/// Only the drawing. Track order, transition dispatch, the shape a transition
+/// makes and how it folds into a clip's transform are core's, and the CPU graph
+/// gets its answers from the same place.
+class GpuRenderGraph::Sink final : public render::VideoSink {
+public:
+    Sink(GpuRenderGraph& graph, const model::Sequence& sequence)
+        : graph_{graph}, sequence_{sequence} {}
+
+    void draw(const model::Clip& clip, const model::Transform& transform,
+              const time::RationalTime& at, int side, const model::Mask* wipe) override {
+        // Both halves of a dissolve are resolved before either is composited,
+        // so a generated picture needs a buffer per side. A nest does not --
+        // `drawTransitionSide` composites one into a frame it owns.
+        render::RgbaImage& scratch = side == 0 ? graph_.generated_ : graph_.generatedB_;
+        if (graph_.drawTransitionSide(clip, sequence_, transform, at, scratch, wipe)) {
+            ++graph_.lastClipCount_;
+        }
+    }
+
+    void adjustment(const model::Clip& /*clip*/, const time::RationalTime& /*at*/) override {
+        // Unreachable, and deliberately silent rather than asserting: a
+        // sequence with an adjustment layer anywhere live never gets here,
+        // because `needsCpuFallback` sends the whole frame down the CPU path
+        // before the walk starts. If that guard is ever narrowed, the symptom
+        // is an adjustment layer that does nothing on the preview and works on
+        // export -- so the guard is the thing to change, not this.
+    }
+
+    void caption(const model::Graphic& graphic) override {
+        if (graph_.text_ == nullptr) {
+            return;
+        }
+        if (graph_.generated_.width() != sequence_.width() ||
+            graph_.generated_.height() != sequence_.height()) {
+            graph_.generated_ = render::RgbaImage{sequence_.width(), sequence_.height()};
+        }
+        if (render::drawText(graphic, graph_.text_, graph_.generated_)) {
+            static_cast<void>(graph_.compositor_->draw(graph_.generated_, model::Transform{},
+                                                       model::BlendMode::Normal));
+        }
+    }
+
+private:
+    GpuRenderGraph& graph_;
+    const model::Sequence& sequence_;
+};
+
 Status GpuRenderGraph::drawClips(const model::Sequence& sequence, const time::RationalTime& at) {
     lastClipCount_ = 0;
 
@@ -201,178 +253,28 @@ Status GpuRenderGraph::drawClips(const model::Sequence& sequence, const time::Ra
     // The result is not merely close to the export: it is the same code. The
     // cost is a slow frame wherever an adjustment layer is, and that is a
     // trade worth stating rather than hiding.
-    if (needsCpuFallback(sequence, at, project_) && nestedSource_ != nullptr) {
-        if (nested_ == nullptr) {
-            nested_ = std::make_unique<render::RenderGraph>(*nestedSource_);
-            nested_->setProject(project_);
-            nested_->setTextRasterizer(text_);
-            nested_->setRenderCache(cache_);
-        }
-        auto frame = nested_->composite(sequence, at);
+    if (render::RenderGraph* whole =
+            needsCpuFallback(sequence, at, project_) ? cpuGraph() : nullptr;
+        whole != nullptr) {
+        auto frame = whole->composite(sequence, at);
         if (!frame) {
             return frame.error();
         }
-        lastClipCount_ = nested_->lastClipCount();
+        lastClipCount_ = whole->lastClipCount();
         return compositor_->draw(*frame, model::Transform{}, model::BlendMode::Normal);
     }
 
-    // The same curve the CPU path reads, from the same place: these two
-    // traversals have to agree, and a display curve taken from different
-    // sources is exactly the kind of disagreement that only shows up in an
-    // export somebody has already signed off.
+    // The same curve the CPU path reads, from the same place. A display curve
+    // taken from different sources is the kind of disagreement that only shows
+    // up in an export somebody has already signed off.
     transfer_ = sequence.output().transfer;
 
-    // Bottom-up. Index 0 is V1, the lowest track, and each later track
-    // composites over what is already there.
-    for (const model::Track& track : sequence.videoTracks()) {
-        if (!sequence.isAudible(track)) {
-            continue;
-        }
-        // A transition shows both of its clips at once, reading each into the
-        // handles beyond the cut. Mirrors render::RenderGraph exactly; the two
-        // traversals have to agree or the preview and the export disagree.
-        if (const model::Transition* transition = track.transitionAt(at)) {
-            const model::Clip* outgoing = track.find(transition->from);
-            const model::Clip* incoming = track.find(transition->to);
-
-            // A span with one side empty is a fade against whatever is below.
-            // The CPU path's twin, and it has to stay its twin: a preview that
-            // faded differently from the export is the disagreement this whole
-            // traversal is written to avoid.
-            if (transition->isFadeIn() || transition->isFadeOut()) {
-                const model::Clip* only = transition->isFadeIn() ? incoming : outgoing;
-                if (only != nullptr && only->enabled) {
-                    const double progress = transition->progressAt(at);
-                    // The CPU path's twin, and it has to stay its twin -- see
-                    // there for why a fade out is a fade in played backwards
-                    // and why this goes through the shape rather than ramping
-                    // an opacity of its own.
-                    const render::TransitionShape shape = render::transitionShapeFor(
-                        *transition, transition->isFadeIn() ? progress : 1.0 - progress,
-                        sequence.width(), sequence.height());
-                    if (drawTransitionSide(
-                            *only, sequence,
-                            render::shapedTransform(pinnedTransformAt(sequence, *only, at),
-                                                    shape.incoming),
-                            at, generated_,
-                            shape.incoming.mask.isSet() ? &shape.incoming.mask : nullptr)) {
-                        ++lastClipCount_;
-                    }
-                }
-                continue;
-            }
-
-            if (outgoing != nullptr && incoming != nullptr) {
-                const double progress = transition->progressAt(at);
-                // The same function the CPU path calls, so the two cannot come
-                // to different answers about where a wipe's edge is -- and the
-                // same composition helper, so they cannot differ about how a
-                // side lands on a clip's own transform either.
-                const render::TransitionShape shape = render::transitionShapeFor(
-                    *transition, progress, sequence.width(), sequence.height());
-
-                if (outgoing->enabled &&
-                    drawTransitionSide(
-                        *outgoing, sequence,
-                        render::shapedTransform(pinnedTransformAt(sequence, *outgoing, at),
-                                                shape.outgoing),
-                        at, generated_,
-                        shape.outgoing.mask.isSet() ? &shape.outgoing.mask : nullptr)) {
-                    ++lastClipCount_;
-                }
-                if (incoming->enabled &&
-                    drawTransitionSide(
-                        *incoming, sequence,
-                        render::shapedTransform(pinnedTransformAt(sequence, *incoming, at),
-                                                shape.incoming),
-                        at, generatedB_,
-                        shape.incoming.mask.isSet() ? &shape.incoming.mask : nullptr)) {
-                    ++lastClipCount_;
-                }
-                continue;
-            }
-        }
-
-        const model::Clip* clip = track.clipAt(at);
-        if (clip == nullptr || !clip->enabled) {
-            continue;
-        }
-
-        if (clip->nested.isValid()) {
-            if (nestedSource_ == nullptr || project_ == nullptr) {
-                continue;
-            }
-            const model::Sequence* inner = project_->findSequence(clip->nested);
-            if (inner == nullptr) {
-                continue;
-            }
-            if (nested_ == nullptr) {
-                nested_ = std::make_unique<render::RenderGraph>(*nestedSource_);
-                nested_->setProject(project_);
-                nested_->setTextRasterizer(text_);
-                nested_->setRenderCache(cache_);
-            }
-            auto frame = nested_->composite(*inner, clip->sourceTimeAt(at));
-            if (!frame) {
-                continue;
-            }
-            if (drawClipImage(*clip, *frame, pinnedTransformAt(sequence, *clip, at), at)) {
-                ++lastClipCount_;
-            }
-            continue;
-        }
-
-        if (clip->graphic.isSet()) {
-            // Rasterised on the CPU and uploaded through the compositor's
-            // existing RGBA path. A shader for shapes would be faster, and
-            // would be a second implementation of the geometry to keep in step
-            // with the first -- for a buffer that only changes when somebody
-            // edits the shape.
-            if (generated_.width() != sequence.width() ||
-                generated_.height() != sequence.height()) {
-                generated_ = render::RgbaImage{sequence.width(), sequence.height()};
-            }
-            if (clip->graphic.kind == model::GraphicKind::Text) {
-                if (!render::drawText(clip->graphic, text_, generated_,
-                                      clip->parameterAt(model::Param::TextReveal, at))) {
-                    continue;
-                }
-            } else {
-                render::drawShape(clip->graphic, generated_);
-            }
-            if (drawClipImage(*clip, generated_, pinnedTransformAt(sequence, *clip, at), at)) {
-                ++lastClipCount_;
-            }
-            continue;
-        }
-
-        auto frame = provider_->sourceFrameFor(clip->activeSource(), clip->activeSourceTimeAt(at));
-        if (!frame) {
-            // One unreadable clip must not take the whole frame with it, the
-            // same as on the CPU path.
-            continue;
-        }
-        if (!drawClip(*clip, **frame, pinnedTransformAt(sequence, *clip, at), at)) {
-            continue;
-        }
-        ++lastClipCount_;
-    }
-    // Captions over everything, the same as the CPU path. The two have to put
-    // them in the same place, which is why the graphic is built by shared code
-    // rather than by each of them.
-    if (sequence.captions().isBurnedIn() && text_ != nullptr) {
-        for (const model::Caption* caption : sequence.captions().at(at)) {
-            if (generated_.width() != sequence.width() ||
-                generated_.height() != sequence.height()) {
-                generated_ = render::RgbaImage{sequence.width(), sequence.height()};
-            }
-            const model::Graphic graphic = render::captionGraphic(
-                sequence.captions().style(), caption->text, sequence.width(), sequence.height());
-            if (render::drawText(graphic, text_, generated_)) {
-                (void)compositor_->draw(generated_, model::Transform{}, model::BlendMode::Normal);
-            }
-        }
-    }
+    // What is on this frame, and in what order, is decided by `walkVideo` --
+    // the same walk the CPU graph runs. The two used to traverse the sequence
+    // separately and had to be kept agreeing by hand; see core's VideoWalk.h
+    // for the two bugs that cost.
+    Sink sink{*this, sequence};
+    render::walkVideo(sequence, at, sink);
     return {};
 }
 

@@ -73,7 +73,7 @@ FCPXML for Final Cut Pro, which reads neither of the other two.
 | 5k | Shape layers: generated rectangles and ellipses | **done** |
 | 5l | Text layers: Qt font engine behind a core interface | **done** |
 | 5m | Captions: SubRip and WebVTT, burn-in | **done** |
-| 5n | OpenTimelineIO interchange, `zaro-otio` | **done** |
+| 5n | OpenTimelineIO interchange, `cutreel-otio` | **done** |
 | 5o | Masks: shape mattes with feather and invert | **done** |
 | 5p | Speed and reverse, with retimed audio | **done** |
 | 5q | Track EQ and compression, before the fader | **done** |
@@ -131,8 +131,8 @@ FCPXML for Final Cut Pro, which reads neither of the other two.
 | 7s | Timeline alignment: snap guides, and a blade that shows its cut | **done** |
 | 7t | Cutting a linked pair, and a clip that says it is linked | **done** |
 | 7u | The Deliver workspace: presets, settings and a render queue | **done** |
-| 7v | Premiere interchange: FCP7 XML in and out, `zaro-premiere` | **done** |
-| 7w | Final Cut interchange: FCPXML in and out, `zaro-finalcut` | **done** |
+| 7v | Premiere interchange: FCP7 XML in and out, `cutreel-premiere` | **done** |
+| 7w | Final Cut interchange: FCPXML in and out, `cutreel-finalcut` | **done** |
 | 7x | The design's third pass: the inspector's sliders and tabs | **done** |
 | 7y | An inspector per kind of clip: titles, shapes, adjustments, speed | **done** |
 | 7z | Angles, nested sequences, and per-clip filtering and compression | **done** |
@@ -212,20 +212,20 @@ it under `xvfb-run`, which is what CI does.
 ## Tools
 
 ```
-zaro-probe <file>                        what we believe about a file
-zaro-frame <file> <index> <out.png>      extract one frame, exactly
-zaro-frame <file> --benchmark 150        decode throughput
-zaro-cut out.cutreel a.mov b.mov            build a project from media
-zaro-render project.cutreel out.mov         render it, headless
-zaro-play project.cutreel --seconds 10       play it on the GPU, and report sync
-zaro-otio export project.cutreel out.otio   hand the cut to any other NLE
-zaro-premiere import cut.xml out.cutreel    take one back from Premiere
-zaro-finalcut export p.cutreel out.fcpxml   hand it to Final Cut Pro
+cutreel-probe <file>                        what we believe about a file
+cutreel-frame <file> <index> <out.png>      extract one frame, exactly
+cutreel-frame <file> --benchmark 150        decode throughput
+cutreel-cut out.cutreel a.mov b.mov            build a project from media
+cutreel-render project.cutreel out.mov         render it, headless
+cutreel-play project.cutreel --seconds 10       play it on the GPU, and report sync
+cutreel-otio export project.cutreel out.otio   hand the cut to any other NLE
+cutreel-premiere import cut.xml out.cutreel    take one back from Premiere
+cutreel-finalcut export p.cutreel out.fcpxml   hand it to Final Cut Pro
 ```
 
-`zaro-premiere` speaks FCP7 XML (`xmeml`), which is what Premiere Pro's
+`cutreel-premiere` speaks FCP7 XML (`xmeml`), which is what Premiere Pro's
 File ▸ Import and File ▸ Export ▸ Final Cut Pro XML read and write.
-`zaro-finalcut` speaks FCPXML, which is what Final Cut Pro's File ▸ Import ▸ XML
+`cutreel-finalcut` speaks FCPXML, which is what Final Cut Pro's File ▸ Import ▸ XML
 and File ▸ Export XML read and write. Despite the names, these are two unrelated
 formats that share a vendor: Final Cut has not read `xmeml` since version 10,
 and Premiere has never read `.fcpxml`, so both tools exist. Neither `.prproj`
@@ -235,7 +235,7 @@ version.
 
 Two verification scripts back the claims the tests cannot make on their own:
 
-- `scripts/verify-frame-exact.sh` compares `zaro-frame`'s raw output against
+- `scripts/verify-frame-exact.sh` compares `cutreel-frame`'s raw output against
   FFmpeg's own decoder, byte for byte, in each file's native pixel format.
 - `scripts/verify-av-sync.sh` renders the flash-and-click fixture, then pulls
   picture and sound back out of the *output file* independently and reports the
@@ -258,8 +258,8 @@ platform/
   ffmpeg/   the only place libav* headers are included
   qrhi/     GPU compositor and its shaders
   sdl/      audio output device
-tools/      zaro-probe, zaro-frame, zaro-cut, zaro-render, zaro-play,
-            zaro-otio, zaro-premiere, zaro-finalcut
+tools/      cutreel-probe, cutreel-frame, cutreel-cut, cutreel-render, cutreel-play,
+            cutreel-otio, cutreel-premiere, cutreel-finalcut
 testdata/   fixture generator
 cmake/      warning policy, find modules
 docs/       plan and architecture decision records

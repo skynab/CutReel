@@ -455,7 +455,7 @@ jobs:
           echo "checked $checked ELF objects"
           test "$checked" -gt 0
           # And then actually run the tools, with the environment emptied.
-          for tool in zaro-probe zaro-render zaro-cut zaro-otio; do
+          for tool in cutreel-probe cutreel-render cutreel-cut cutreel-otio; do
             env -i "PATH=$PATH" "HOME=$HOME" "/tmp/unpacked/usr/bin/$tool" --version || status=1
           done
           exit $status
@@ -530,7 +530,7 @@ jobs:
           # exists to test. Xvfb with llvmpipe behind it is the same recipe the
           # GUI job uses, and xcb is named rather than left to Qt so that the
           # plugin under test is the one that gets used.
-          zaro-cut /tmp/smoke.cutreel testdata/media/ladder_prores.mov
+          cutreel-cut /tmp/smoke.cutreel testdata/media/ladder_prores.mov
           xvfb-run -a --server-args="-screen 0 1280x800x24" \
             cutreel /tmp/smoke.cutreel --selftest --capture /tmp/smoke.png
           # --selftest prints what it measured, but an exit code can be zero
@@ -562,13 +562,13 @@ jobs:
       # platform-specific enough to be worth porting them for.
       - name: Verify frame exactness against FFmpeg
         if: runner.os != 'Windows'
-        run: ZARO_FRAME=build/${{ matrix.preset }}/bin/zaro-frame ./scripts/verify-frame-exact.sh
+        run: CUTREEL_FRAME=build/${{ matrix.preset }}/bin/cutreel-frame ./scripts/verify-frame-exact.sh
 
       - name: Verify audio/video sync in a rendered file
         if: runner.os != 'Windows'
         run: |
-          ZARO_CUT=build/${{ matrix.preset }}/bin/zaro-cut \
-          ZARO_RENDER=build/${{ matrix.preset }}/bin/zaro-render \
+          CUTREEL_CUT=build/${{ matrix.preset }}/bin/cutreel-cut \
+          CUTREEL_RENDER=build/${{ matrix.preset }}/bin/cutreel-render \
           ./scripts/verify-av-sync.sh
 
   format:

@@ -355,7 +355,7 @@ private:
         /// Where the other half of the take goes.
         ///
         /// A file with both streams arrives as two clips, linked -- the
-        /// arrangement `zaro-cut` writes and the one the mixer can hear, since
+        /// arrangement `cutreel-cut` writes and the one the mixer can hear, since
         /// the audio graph reads clips on audio tracks and nothing else. So a
         /// take dropped on a picture row puts its sound on a sound row, and a
         /// take dropped on a sound row puts its picture on a picture row: the

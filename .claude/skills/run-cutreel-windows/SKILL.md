@@ -66,7 +66,7 @@ cd build/windows-release/bin && cmd //c start "" cutreel.exe <project.cutreel> -
 Make a project from the test media:
 
 ```bash
-./build/windows-release/bin/zaro-cut.exe "$SCRATCH/demo.cutreel" \
+./build/windows-release/bin/cutreel-cut.exe "$SCRATCH/demo.cutreel" \
   testdata/media/shaky_texture.mov testdata/media/wide_texture.mp4
 ```
 

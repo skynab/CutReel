@@ -79,7 +79,7 @@ Notes that cost time to discover:
 Make a project from the test media:
 
 ```bash
-./build/debug/bin/zaro-cut "$SCRATCH/demo.cutreel" \
+./build/debug/bin/cutreel-cut "$SCRATCH/demo.cutreel" \
   testdata/media/shaky_texture.mov testdata/media/ladder_prores.mov
 ```
 

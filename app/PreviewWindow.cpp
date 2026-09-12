@@ -44,7 +44,29 @@
 
 #include <zaro/Version.h>
 
+#include "ChannelPanel.h"
+#include "ClipStrip.h"
+#include "ColorManagement.h"
+#include "DeliverPanel.h"
+#include "EffectControls.h"
+#include "FrameThumb.h"
+#include "GalleryPanel.h"
+#include "GradeNodes.h"
+#include "Hotkeys.h"
+#include "LoudnessPanel.h"
+#include "MaskOverlay.h"
+#include "MediaBrowser.h"
 #include "MediaDrag.h"
+#include "MixerPanel.h"
+#include "ProgramMonitor.h"
+#include "ProjectBin.h"
+#include "ScopesPanel.h"
+#include "StemsPanel.h"
+#include "ThumbnailCache.h"
+#include "TimelineWidget.h"
+#include "TitleOverlay.h"
+#include "Transcript.h"
+#include "ViewerOverlay.h"
 
 namespace zaro::app {
 namespace {
@@ -386,39 +408,15 @@ void PreviewWindow::buildViewerLayout() {
     nodesLayout->addSpacing(8);
     nodesLayout->addWidget(managementCaption);
 
-    auto* management = new QWidget(bars_.nodesBox);
-    auto* managementGrid = new QGridLayout(management);
-    managementGrid->setContentsMargins(0, 4, 0, 0);
-    managementGrid->setHorizontalSpacing(8);
-    managementGrid->setVerticalSpacing(4);
-    managementGrid->setColumnStretch(1, 1);
-    const auto field = [&](int row, const QString& text, const QString& tip) {
-        auto* label = chrome::mutedLabel(management, text);
-        label->setToolTip(tip);
-        managementGrid->addWidget(label, row, 0);
-        auto* box = new QComboBox(management);
-        box->setToolTip(tip);
-        box->setFocusPolicy(Qt::StrongFocus);
-        managementGrid->addWidget(box, row, 1);
-        return box;
-    };
-    inputLut_ = field(0, tr("Input LUT"),
-                      tr("The .cube this footage is read through, before any grade. "
-                         "It belongs to the file, so every clip that reads the file "
-                         "gets it. Open a folder of looks in the LUTs list to fill this."));
-    colorSpace_ = field(1, tr("Color space"),
-                        tr("The curve this sequence is delivered as. The scopes and the "
-                           "curve editor are drawn against it, so it is also what a grade "
-                           "is being judged on."));
-    toneMapping_ = field(2, tr("Tone mapping"),
-                         tr("Where highlights start rolling off, in linear light. "
-                            "Clipping is what this program did before there was a choice."));
-    nodesLayout->addWidget(management);
+    colorManagement_ = new app::ColorManagement(bars_.nodesBox);
+    nodesLayout->addWidget(colorManagement_);
 
-    connect(inputLut_, &QComboBox::currentIndexChanged, this,
-            [this](int index) { applyInputLut(index); });
-    connect(colorSpace_, &QComboBox::currentIndexChanged, this, [this] { applyDelivery(); });
-    connect(toneMapping_, &QComboBox::currentIndexChanged, this, [this] { applyDelivery(); });
+    // The panel reports what was picked; turning that into a command needs the
+    // project, the selection and four panels to redraw, which are the window's.
+    connect(colorManagement_, &app::ColorManagement::inputLutChosen, this,
+            &PreviewWindow::applyInputLut);
+    connect(colorManagement_, &app::ColorManagement::deliveryChosen, this,
+            [this](const model::Sequence::Output& wanted) { setDelivery(wanted); });
     gradeLayout->addWidget(bars_.nodesBox);
     gradeLayout->addWidget(effects_, 1);
 
@@ -810,91 +808,27 @@ void PreviewWindow::exportDialog() {
 }
 
 void PreviewWindow::exportOtio() {
-    if (liveSequence() == nullptr) {
-        return;
-    }
-    // Export only, from the window. Importing an OTIO file produces a
-    // project of its own, and replacing the open one needs a "save first?"
-    // that does not exist yet -- so that direction lives in zaro-otio,
-    // where there is nothing to lose.
-    const QString path = QFileDialog::getSaveFileName(this, "Export OpenTimelineIO",
-                                                      "timeline.otio", "OpenTimelineIO (*.otio)");
-    if (path.isEmpty()) {
-        return;
-    }
-    if (Status saved = io::saveOtio(document_.project(), liveSequence()->id(), path.toStdString());
-        !saved) {
-        app::warn(this, "OpenTimelineIO", QString::fromStdString(saved.error().toString()));
-    }
+    interchange::exportOtio(this, document_.project(), sequenceId_);
 }
 
 void PreviewWindow::exportPremiere() {
-    if (liveSequence() == nullptr) {
-        return;
-    }
-    // Named for the program rather than for the format. "FCP7 XML" is what the
-    // file is; "the one Premiere opens" is what somebody came here for, and the
-    // menu already said Premiere.
-    const QString path = QFileDialog::getSaveFileName(this, "Export Premiere XML", "timeline.xml",
-                                                      "FCP7 XML (*.xml)");
-    if (path.isEmpty()) {
-        return;
-    }
-    if (Status saved =
-            io::savePremiereXml(document_.project(), liveSequence()->id(), path.toStdString());
-        !saved) {
-        app::warn(this, "Premiere XML", QString::fromStdString(saved.error().toString()));
-    }
+    interchange::exportPremiere(this, document_.project(), sequenceId_);
 }
 
 void PreviewWindow::importPremiere() {
-    const QString path =
-        QFileDialog::getOpenFileName(this, "Import Premiere XML", {}, "FCP7 XML (*.xml)");
-    if (path.isEmpty()) {
-        return;
+    if (auto read = interchange::importPremiere(this)) {
+        adoptImported(std::move(read->project), read->format, read->lost);
     }
-    auto imported = io::loadPremiereXml(path.toStdString());
-    if (!imported) {
-        app::warn(this, "Premiere XML", QString::fromStdString(imported.error().toString()));
-        return;
-    }
-    adoptImported(std::move(*imported), "Premiere XML",
-                  "Grades, effects, transitions and keyframes");
 }
 
 void PreviewWindow::exportFinalCut() {
-    if (liveSequence() == nullptr) {
-        return;
-    }
-    const QString path = QFileDialog::getSaveFileName(
-        this, "Export Final Cut Pro XML", "timeline.fcpxml", "Final Cut Pro XML (*.fcpxml)");
-    if (path.isEmpty()) {
-        return;
-    }
-    if (Status saved =
-            io::saveFcpXml(document_.project(), liveSequence()->id(), path.toStdString());
-        !saved) {
-        app::warn(this, "Final Cut Pro XML", QString::fromStdString(saved.error().toString()));
-    }
+    interchange::exportFinalCut(this, document_.project(), sequenceId_);
 }
 
 void PreviewWindow::importFinalCut() {
-    // The bundle as well as the file. Final Cut 10.6.6 began writing a
-    // `.fcpxmld` directory whose `Info.fcpxml` is the document, and what
-    // somebody picks in this dialog is the bundle -- so it has to be offered,
-    // and `loadFcpXml` looks inside.
-    const QString path = QFileDialog::getOpenFileName(this, "Import Final Cut Pro XML", {},
-                                                      "Final Cut Pro XML (*.fcpxml *.fcpxmld)");
-    if (path.isEmpty()) {
-        return;
+    if (auto read = interchange::importFinalCut(this)) {
+        adoptImported(std::move(read->project), read->format, read->lost);
     }
-    auto imported = io::loadFcpXml(path.toStdString());
-    if (!imported) {
-        app::warn(this, "Final Cut Pro XML", QString::fromStdString(imported.error().toString()));
-        return;
-    }
-    adoptImported(std::move(*imported), "Final Cut Pro XML",
-                  "Grades, effects, transitions, keyframes and track mute and lock");
 }
 
 void PreviewWindow::adoptImported(model::Project imported, const QString& format,
@@ -2751,109 +2685,33 @@ namespace {
 /// Where highlights start rolling off. The same four the delivery menu offers,
 /// so the panel and the menu cannot come to disagree about what "roll off"
 /// means. See chrome::deliveryMenu.
-struct KneePreset {
-    const char* name;
-    double value;
-};
-constexpr KneePreset kKneePresets[] = {
-    {"Clip", 1.0},
-    {"Roll off gently", 0.9},
-    {"Roll off", 0.8},
-    {"Roll off hard", 0.65},
-};
-
 }  // namespace
 
 void PreviewWindow::syncColorManagement() {
-    if (colorSpace_ == nullptr) {
+    if (colorManagement_ == nullptr) {
         return;
     }
-    const model::Sequence* sequence = liveSequence();
-    // Written from the model, never remembered: after an undo the project is
-    // the only thing that knows what these say.
-    syncingColorManagement_ = true;
-
-    colorSpace_->clear();
-    int wantedCurve = 0;
-    for (const media::TransferFunction transfer : media::allTransferFunctions()) {
-        if (transfer == media::TransferFunction::Unknown) {
-            continue;  // no formula, so nothing could encode through it
-        }
-        colorSpace_->addItem(QString::fromUtf8(media::toString(transfer)),
-                             QVariant::fromValue(static_cast<int>(transfer)));
-        if (sequence != nullptr && sequence->output().transfer == transfer) {
-            wantedCurve = colorSpace_->count() - 1;
-        }
-    }
-    colorSpace_->setCurrentIndex(wantedCurve);
-
-    toneMapping_->clear();
-    int wantedKnee = 0;
-    for (const KneePreset& preset : kKneePresets) {
-        toneMapping_->addItem(QString::fromUtf8(preset.name), preset.value);
-        if (sequence != nullptr && sequence->output().highlightKnee == preset.value) {
-            wantedKnee = toneMapping_->count() - 1;
-        }
-    }
-    toneMapping_->setCurrentIndex(wantedKnee);
-
-    // The input LUT is the file's, so it follows the selection rather than the
-    // sequence. "None" is always first, and is what an unset LUT means.
-    inputLut_->clear();
-    inputLut_->addItem(tr("None"), QString{});
-    const model::MediaRef* media = nullptr;
-    if (const model::Sequence* live = sequence; live != nullptr) {
-        const model::Track* track = live->findTrack(selectedTrack_);
-        const model::Clip* clip = track != nullptr ? track->find(selectedClip_) : nullptr;
-        if (clip != nullptr && clip->activeSource().isValid()) {
-            media = document_.project().findMedia(clip->activeSource());
-        }
-    }
-    const QString current = media != nullptr ? QString::fromStdString(media->lut.path) : QString{};
-    int wantedLut = 0;
-    const QDir folder{gallery_->lutFolder()};
-    if (folder.exists()) {
-        const QStringList cubes = folder.entryList({"*.cube"}, QDir::Files, QDir::Name);
-        for (const QString& file : cubes) {
-            const QString path = folder.filePath(file);
-            inputLut_->addItem(file, path);
-            if (path == current) {
-                wantedLut = inputLut_->count() - 1;
-            }
-        }
-    }
-    // A LUT set from somewhere else, or from a folder that is no longer open,
-    // still has to be shown -- otherwise the panel says "None" over footage
-    // that is being transformed.
-    if (!current.isEmpty() && wantedLut == 0) {
-        inputLut_->addItem(QFileInfo(current).fileName(), current);
-        wantedLut = inputLut_->count() - 1;
-    }
-    inputLut_->setCurrentIndex(wantedLut);
-    inputLut_->setEnabled(media != nullptr);
-
-    syncingColorManagement_ = false;
+    colorManagement_->showState(liveSequence(), selectedMedia(), gallery_->lutFolder());
 }
 
-void PreviewWindow::applyInputLut(int index) {
-    if (syncingColorManagement_ || index < 0) {
-        return;
-    }
+/// The file under the selection, or null when what is selected reads no file.
+const model::MediaRef* PreviewWindow::selectedMedia() const {
     const model::Sequence* sequence = liveSequence();
     const model::Track* track = sequence != nullptr ? sequence->findTrack(selectedTrack_) : nullptr;
     const model::Clip* clip = track != nullptr ? track->find(selectedClip_) : nullptr;
     if (clip == nullptr || !clip->activeSource().isValid()) {
-        return;
+        return nullptr;
     }
-    const model::MediaRef* media = document_.project().findMedia(clip->activeSource());
+    return document_.project().findMedia(clip->activeSource());
+}
+
+void PreviewWindow::applyInputLut(const QString& path) {
+    const model::MediaRef* media = selectedMedia();
     if (media == nullptr) {
         return;
     }
     model::LutRef wanted;
-    wanted.path = inputLut_->itemData(index).toString().toStdString();
-    if (wanted.path == media->lut.path) {
-        return;
-    }
+    wanted.path = path.toStdString();
     if (auto built = edit::makeSetMediaGrade(document_.project(), media->id, media->color,
                                              media->wheels, wanted)) {
         document_.commands().execute(document_.project(), std::move(*built));
@@ -2864,23 +2722,6 @@ void PreviewWindow::applyInputLut(int index) {
     clipStrip_->refresh();
     refreshInstruments();
     updateTitle();
-}
-
-void PreviewWindow::applyDelivery() {
-    if (syncingColorManagement_) {
-        return;
-    }
-    const model::Sequence* sequence = liveSequence();
-    if (sequence == nullptr) {
-        return;
-    }
-    model::Sequence::Output wanted = sequence->output();
-    wanted.transfer = static_cast<media::TransferFunction>(colorSpace_->currentData().toInt());
-    wanted.highlightKnee = toneMapping_->currentData().toDouble();
-    if (wanted == sequence->output()) {
-        return;
-    }
-    setDelivery(wanted);
 }
 
 void PreviewWindow::setGradeTarget(app::ColorPalette::GradeTarget target) {

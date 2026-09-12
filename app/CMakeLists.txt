@@ -14,6 +14,8 @@ add_library(zaro_app_ui STATIC
     ChannelPanel.h
     ClipStrip.cpp
     ClipStrip.h
+    ColorManagement.cpp
+    ColorManagement.h
     ColorPalette.cpp
     ColorPalette.h
     ColorWheel.cpp
@@ -43,6 +45,8 @@ add_library(zaro_app_ui STATIC
     HueBand.h
     Icons.cpp
     Icons.h
+    Interchange.cpp
+    Interchange.h
     LoudnessPanel.cpp
     LoudnessPanel.h
     MaskOverlay.cpp
@@ -125,6 +129,17 @@ target_link_libraries(zaro_app_ui
 target_include_directories(zaro_app_ui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 set_target_properties(zaro_app_ui PROPERTIES AUTOMOC ON)
+
+# Qt's widget headers, parsed once instead of once per file. See Precompiled.h
+# for what is in it and, more importantly, what is deliberately left out.
+#
+# PUBLIC rather than PRIVATE so that the two things which link this library get
+# it too: `cutreel` below, and the GUI tests in app/tests, which are the eleven
+# translation units that each pull in the whole window through GuiFixture.h and
+# therefore had the most to gain. CMake gives each consumer its own precompiled
+# header rather than sharing one, which is what makes this safe across targets
+# whose compile flags differ.
+target_precompile_headers(zaro_app_ui PUBLIC Precompiled.h)
 
 # --- Branding -------------------------------------------------------------------
 # One directory of artwork, three platforms that each want it in their own
@@ -219,7 +234,7 @@ if(UNIX AND NOT APPLE)
     set_target_properties(cutreel PROPERTIES INSTALL_RPATH "${ZARO_PRIVATE_RPATH}")
 
     # xcb is what a desktop session wants and offscreen is what a render farm,
-    # a container and an ssh session want -- zaro-render selects the second for
+    # a container and an ssh session want -- cutreel-render selects the second for
     # itself when there is no display. Missing either one is a program that
     # aborts on startup with "could not load the Qt platform plugin", which
     # says nothing about a file having been left out of a package.

@@ -14,7 +14,7 @@
 namespace {
 
 void printUsage() {
-    std::puts("usage: zaro-probe <file> [options]");
+    std::puts("usage: cutreel-probe <file> [options]");
     std::puts("");
     std::puts("  --verbose   include the full stream detail");
     std::puts("  --version   print the version and exit");
@@ -30,7 +30,7 @@ std::string describeRate(const zaro::time::Rational& rate) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (zaro::tools::handledVersion(argc, argv, "zaro-probe")) {
+    if (zaro::tools::handledVersion(argc, argv, "cutreel-probe")) {
         return 0;
     }
     if (argc < 2) {
@@ -48,7 +48,7 @@ int main(int argc, char** argv) {
 
     const auto probed = zaro::platform::ffmpeg::probe(path);
     if (!probed) {
-        std::fprintf(stderr, "zaro-probe: %s\n", probed.error().toString().c_str());
+        std::fprintf(stderr, "cutreel-probe: %s\n", probed.error().toString().c_str());
         return 1;
     }
     const zaro::media::MediaInfo& info = *probed;

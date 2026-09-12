@@ -22,8 +22,13 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "../CurveEditor.h"
+#include "../EffectControls.h"
 #include "../FrameGrab.h"
+#include "ChannelPanel.h"
+#include "EffectControls.h"
 #include "GuiFixture.h"
+#include "ProgramMonitor.h"
+#include "TimelineWidget.h"
 
 // The suite was written inside main(), which had this at file scope; the
 // bodies still say `model::` and `Status` unqualified.

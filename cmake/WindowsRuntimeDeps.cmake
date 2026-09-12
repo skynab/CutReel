@@ -7,7 +7,7 @@
 # copying the same avcodec.dll and avutil.dll over each other -- and one of
 # them loses the file to another's open handle:
 #
-#   vcpkg z-applocal --target-binary=.../bin/zaro-probe.exe
+#   vcpkg z-applocal --target-binary=.../bin/cutreel-probe.exe
 #   Access is denied.
 #
 # The windows-* presets turn that off and this replaces it: one target, one

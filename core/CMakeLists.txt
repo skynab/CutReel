@@ -80,6 +80,7 @@ add_library(zaro_core
     src/render/ShotMatch.cpp
     src/render/ToneMap.cpp
     src/render/TransitionShape.cpp
+    src/render/VideoWalk.cpp
     src/render/RgbaImage.cpp
     src/model/Animation.cpp
     src/model/Caption.cpp

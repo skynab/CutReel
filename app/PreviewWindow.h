@@ -58,9 +58,6 @@
 #include "zaro/core/edit/Operations.h"
 #include "zaro/core/edit/Sync.h"
 #include "zaro/core/io/CubeLut.h"
-#include "zaro/core/io/FinalCutXml.h"
-#include "zaro/core/io/OtioIo.h"
-#include "zaro/core/io/PremiereXml.h"
 #include "zaro/core/io/ProjectIo.h"
 #include "zaro/core/io/ProjectLock.h"
 #include "zaro/core/io/Relink.h"
@@ -92,37 +89,17 @@
 #include "zaro/ui/SequenceBinding.h"
 
 #include "ActionRouter.h"
-#include "ChannelPanel.h"
-#include "ClipStrip.h"
 #include "ColorPalette.h"
 #include "CurveEditor.h"
-#include "DeliverPanel.h"
 #include "Document.h"
-#include "EffectControls.h"
 #include "ExportDialog.h"
-#include "FrameThumb.h"
-#include "GalleryPanel.h"
-#include "GradeNodes.h"
-#include "Hotkeys.h"
 #include "Icons.h"
-#include "LoudnessPanel.h"
-#include "MaskOverlay.h"
-#include "MediaBrowser.h"
-#include "MixerPanel.h"
+#include "Interchange.h"
 #include "PlaybackController.h"
-#include "ProgramMonitor.h"
-#include "ProjectBin.h"
 #include "Say.h"
-#include "ScopesPanel.h"
 #include "SourceMonitor.h"
-#include "StemsPanel.h"
 #include "SupportButton.h"
 #include "Theme.h"
-#include "ThumbnailCache.h"
-#include "TimelineWidget.h"
-#include "TitleOverlay.h"
-#include "Transcript.h"
-#include "ViewerOverlay.h"
 #include "chrome/Bars.h"
 #include "chrome/Choices.h"
 #include "chrome/Menus.h"
@@ -137,6 +114,41 @@
 #include "commands/Templates.h"
 
 namespace zaro::app {
+
+// The panels the window owns, by name only.
+//
+// Every one of these is held as a bare pointer, is created by createPanels and
+// is deleted by Qt with the window, and nothing in this header does more with
+// one than pass it along -- so a name is all this file needs. The full headers
+// are included by PreviewWindow.cpp, which is the only place that calls into
+// them.
+//
+// This matters more here than it would anywhere else: app/tests reaches the
+// whole program through GuiFixture.h, so every one of these headers used to be
+// parsed by twelve test translation units as well as by the window itself. A
+// change to any panel rebuilt all of them.
+class ChannelPanel;
+class ClipStrip;
+class ColorManagement;
+class DeliverPanel;
+class EffectControls;
+class FrameThumb;
+class GalleryPanel;
+class GradeNodes;
+class Hotkeys;
+class LoudnessPanel;
+class MaskOverlay;
+class MediaBrowser;
+class MixerPanel;
+class ProgramMonitor;
+class ProjectBin;
+class ScopesPanel;
+class StemsPanel;
+class ThumbnailCache;
+class TimelineWidget;
+class TitleOverlay;
+class Transcript;
+class ViewerOverlay;
 
 // Transport glyphs. Characters rather than an icon font: nothing is vendored
 // here, and a glyph that renders as a colour emoji on one platform and an
@@ -1067,15 +1079,13 @@ private:
     /// highlight rolloff to the sequence. They were reachable only from a menu
     /// before; a colourist wants to see the answers while grading, because a
     /// grade judged against the wrong delivery curve is a grade done twice.
-    QComboBox* inputLut_{nullptr};
-    QComboBox* colorSpace_{nullptr};
-    QComboBox* toneMapping_{nullptr};
-    /// True while these are being written from the model, so the writes do not
-    /// read as somebody choosing something.
-    bool syncingColorManagement_{false};
+    app::ColorManagement* colorManagement_{nullptr};
+    /// Put what the project says in front of the colourist again.
     void syncColorManagement();
-    void applyInputLut(int index);
-    void applyDelivery();
+    /// The file under the selection, or null when what is selected reads none.
+    [[nodiscard]] const model::MediaRef* selectedMedia() const;
+    /// Put a .cube on the file the selection reads. Empty path clears it.
+    void applyInputLut(const QString& path);
     /// Every panel that is about a sequence, in one place. See rebindSequence.
     std::vector<ui::SequenceBound*> bound_;
     app::MediaBrowser* browser_{nullptr};

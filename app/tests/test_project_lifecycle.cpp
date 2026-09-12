@@ -18,7 +18,14 @@
 
 #include "../AudioStrip.h"
 #include "../FrameGrab.h"
+#include "DeliverPanel.h"
+#include "EffectControls.h"
 #include "GuiFixture.h"
+#include "Hotkeys.h"
+#include "MixerPanel.h"
+#include "ProgramMonitor.h"
+#include "ProjectBin.h"
+#include "TimelineWidget.h"
 
 // The suite was written inside main(), which had this at file scope; the
 // bodies still say `model::` and `Status` unqualified.

@@ -11,8 +11,8 @@
 set -uo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cut_tool="${ZARO_CUT:-$root/build/release/bin/zaro-cut}"
-render_tool="${ZARO_RENDER:-$root/build/release/bin/zaro-render}"
+cut_tool="${CUTREEL_CUT:-$root/build/release/bin/cutreel-cut}"
+render_tool="${CUTREEL_RENDER:-$root/build/release/bin/cutreel-render}"
 fixture="$root/testdata/media/sync_click_flash.mov"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT

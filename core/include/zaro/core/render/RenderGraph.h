@@ -73,6 +73,14 @@ public:
     [[nodiscard]] RenderCache* renderCache() const noexcept { return cache_; }
 
 private:
+    /// Adapts this graph to `render::walkVideo`.
+    ///
+    /// Holds the frame being composited, which the walk does not carry: the walk
+    /// decides *what* is on the frame and this turns each of those into pixels.
+    /// Defined in the .cpp -- a nested class already reaches this one's private
+    /// members, so none of the drawing has to be widened for it.
+    class Sink;
+
     /// Baked tone curves, kept between frames: building one is thousands of
     /// spline evaluations, and a grade that is not being edited changes on no
     /// frames at all.
@@ -96,10 +104,6 @@ private:
                                              RgbaImage& scratch, std::int32_t width,
                                              std::int32_t height);
 
-    /// Composite a nested sequence and draw it. False when it cannot be
-    /// resolved, which the caller treats as a clip that drew nothing.
-    [[nodiscard]] bool compositeNested(const model::Sequence& sequence, const model::Clip& clip,
-                                       RgbaImage& out, const time::RationalTime& at);
     /// The picture a nested clip resolves to, in a buffer of its own.
     ///
     /// Separate from `clipImage`, which cannot answer for a nest: compositing
@@ -117,11 +121,17 @@ private:
     /// How deep nesting is allowed to go. A backstop against a project that
     /// arrived with a cycle in it; the edit refuses to make one.
     static constexpr std::int32_t kMaxNestDepth = 8;
-    /// The picture one side of a transition resolves to, whatever kind of clip
-    /// it is. The transition path's `clipImage`, with the nest case added.
-    [[nodiscard]] const RgbaImage* transitionSideImage(const model::Clip& clip,
-                                                       const time::RationalTime& at, int side,
-                                                       std::int32_t width, std::int32_t height);
+    /// The picture a clip resolves to, whatever kind of clip it is: read from
+    /// media, generated as a shape or a title, or composited from a nest.
+    ///
+    /// The one resolver for every clip on the frame. It was reached only from
+    /// the transition path -- the ordinary path open-coded the same graphic and
+    /// media branches beside it -- and that split is how a dissolve onto a nest
+    /// came to draw nothing while the same clip drew fine on its own. One
+    /// function now, called once per clip by `Sink::draw`.
+    [[nodiscard]] const RgbaImage* clipPicture(const model::Clip& clip,
+                                               const time::RationalTime& at, int side,
+                                               std::int32_t width, std::int32_t height);
     /// Grade what has already been composited, in place.
     void applyAdjustment(const model::Clip& clip, RgbaImage& out, const time::RationalTime& at);
 

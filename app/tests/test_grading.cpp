@@ -3,15 +3,25 @@
 // Driven through the real window against the real compositor. See GuiFixture.h
 // for what is shared and why.
 
+#include <QApplication>
 #include <QCheckBox>
+#include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QToolButton>
 #include <cstdint>
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "../ColorManagement.h"
+#include "../EffectControls.h"
 #include "../FrameGrab.h"
+#include "../ScopesPanel.h"
+#include "ColorManagement.h"
+#include "EffectControls.h"
 #include "GuiFixture.h"
+#include "ProgramMonitor.h"
+#include "ScopesPanel.h"
+#include "TimelineWidget.h"
 
 // The suite was written inside main(), which had this at file scope; the
 // bodies still say `model::` and `Status` unqualified.
@@ -978,4 +988,84 @@ TEST_CASE("The grade target decides whether an edit lands on the clip or the fil
     while (window.commands().canUndo()) {
         window.commands().undo(window.project());
     }
+}
+
+// The colour-management boxes, driven the way a colourist drives them.
+//
+// These three had no test while they were anonymous members of PreviewWindow.
+// They are the controls that say what the grade is being judged against, and a
+// delivery curve that silently fails to reach the sequence is a grade done
+// twice -- so the wiring is worth pinning down rather than assuming.
+TEST_CASE("Colour management, from the panel", "[gui][color]") {
+    auto& window = zaro::app::testing::gui();
+    const zaro::app::testing::Rewind rewind;
+
+    // The Color workspace is what fills these: they are colour-room controls,
+    // and the window populates them when that room is entered rather than on
+    // every selection change in every workspace.
+    window.setWorkspace("Color");
+    // Pumped until quiescent, not once: entering a workspace queues panel
+    // refreshes, and one of them re-fills these boxes. A single pass left the
+    // repopulation racing the change this test then makes, which showed up as
+    // a test that passed or failed depending on timing.
+    for (int settle = 0; settle < 10; ++settle) {
+        QApplication::sendPostedEvents();
+        QApplication::processEvents();
+    }
+
+    auto* management = window.findChild<app::ColorManagement*>();
+    REQUIRE(management != nullptr);
+    auto* toneMapping = management->findChild<QComboBox*>("tone-mapping");
+    auto* colorSpace = management->findChild<QComboBox*>("color-space");
+    REQUIRE(toneMapping != nullptr);
+    REQUIRE(colorSpace != nullptr);
+
+    // Filled from the model rather than left empty until something happens.
+    REQUIRE(toneMapping->count() > 1);
+    REQUIRE(colorSpace->count() > 1);
+
+    // The sequence the *window* is showing, which is what the panel is bound to
+    // and what setDelivery writes through. Not project().activeSequence(): an
+    // earlier test in this shared fixture opens a nested sequence, and reading
+    // the wrong one here made this pass alone and fail in the suite.
+    REQUIRE(window.sequence() != nullptr);
+    const auto sequenceId = window.sequence()->id();
+    const auto outputNow = [&] { return window.project().findSequence(sequenceId)->output(); };
+
+    // What is shown is what the sequence says, not whatever was there before.
+    const double knee = outputNow().highlightKnee;
+    CHECK(toneMapping->currentData().toDouble() == knee);
+
+    // Picking a different rolloff reaches the sequence.
+    int other = 0;
+    for (int i = 0; i < toneMapping->count(); ++i) {
+        if (toneMapping->itemData(i).toDouble() != knee) {
+            other = i;
+            break;
+        }
+    }
+    REQUIRE(other != 0);
+    const double wanted = toneMapping->itemData(other).toDouble();
+    toneMapping->setCurrentIndex(other);
+    QApplication::processEvents();
+    CHECK(outputNow().highlightKnee == wanted);
+
+    // And it still renders through it rather than refusing.
+    window.monitor()->update();
+    QApplication::processEvents();
+    CHECK(window.monitor()->lastError().isEmpty());
+
+    // Writing the boxes back from the model must not read as somebody choosing
+    // something: re-showing the same state leaves the sequence alone and puts
+    // nothing more on the undo stack.
+    const std::size_t steps = window.commands().history().size();
+    management->showState(window.project().findSequence(sequenceId), nullptr, {});
+    QApplication::processEvents();
+    CHECK(outputNow().highlightKnee == wanted);
+    CHECK(window.commands().history().size() == steps);
+
+    while (window.commands().canUndo()) {
+        window.commands().undo(window.project());
+    }
+    window.setWorkspace("Edit");
 }

@@ -3,7 +3,7 @@
 #include <cstring>
 #include <string>
 
-#include "zaro/core/io/OtioIo.h"
+#include "zaro/core/io/PremiereXml.h"
 #include "zaro/core/io/ProjectIo.h"
 
 #include "Cli.h"
@@ -12,21 +12,27 @@ namespace {
 
 void usage() {
     std::printf(
-        "zaro-otio — convert between CutReel projects and OpenTimelineIO\n"
+        "cutreel-premiere — convert between CutReel projects and Adobe Premiere\n"
         "\n"
-        "  zaro-otio export <project.cutreel> <out.otio> [--sequence <id>]\n"
-        "  zaro-otio import <in.otio> <project.cutreel>\n"
-        "  zaro-otio --version\n"
+        "  cutreel-premiere export <project.cutreel> <out.xml> [--sequence <id>]\n"
+        "  cutreel-premiere import <in.xml> <project.cutreel>\n"
+        "  cutreel-premiere --version\n"
+        "\n"
+        "The file is FCP7 XML (xmeml), which is what Premiere Pro reads and\n"
+        "writes: File > Import for one this wrote, File > Export > Final Cut\n"
+        "Pro XML for one to bring back. A .prproj is Premiere's own memory in\n"
+        "an undocumented schema that moves with the application version, and\n"
+        "is not an interchange format in either direction.\n"
         "\n"
         "Importing writes a project of its own rather than merging into one:\n"
-        "an OTIO file names its media by URL, and matching those against media\n"
+        "the file names its media by path, and matching those against media\n"
         "already in a project is a different decision from reading the file.\n");
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (zaro::tools::handledVersion(argc, argv, "zaro-otio")) {
+    if (zaro::tools::handledVersion(argc, argv, "cutreel-premiere")) {
         return 0;
     }
     if (argc < 4) {
@@ -40,11 +46,11 @@ int main(int argc, char** argv) {
     if (mode == "export") {
         auto loaded = zaro::io::loadProject(from);
         if (!loaded) {
-            std::fprintf(stderr, "zaro-otio: %s\n", loaded.error().toString().c_str());
+            std::fprintf(stderr, "cutreel-premiere: %s\n", loaded.error().toString().c_str());
             return 1;
         }
         if (loaded->project.sequences().empty()) {
-            std::fprintf(stderr, "zaro-otio: that project has no sequences\n");
+            std::fprintf(stderr, "cutreel-premiere: that project has no sequences\n");
             return 1;
         }
         zaro::model::SequenceId sequence = loaded->project.sequences().front().id();
@@ -54,8 +60,8 @@ int main(int argc, char** argv) {
                     zaro::model::SequenceId{static_cast<std::uint64_t>(std::stoull(argv[i + 1]))};
             }
         }
-        if (const auto status = zaro::io::saveOtio(loaded->project, sequence, to); !status) {
-            std::fprintf(stderr, "zaro-otio: %s\n", status.error().toString().c_str());
+        if (const auto status = zaro::io::savePremiereXml(loaded->project, sequence, to); !status) {
+            std::fprintf(stderr, "cutreel-premiere: %s\n", status.error().toString().c_str());
             return 1;
         }
         std::printf("%s\n", to.c_str());
@@ -63,13 +69,13 @@ int main(int argc, char** argv) {
     }
 
     if (mode == "import") {
-        auto loaded = zaro::io::loadOtio(from);
+        auto loaded = zaro::io::loadPremiereXml(from);
         if (!loaded) {
-            std::fprintf(stderr, "zaro-otio: %s\n", loaded.error().toString().c_str());
+            std::fprintf(stderr, "cutreel-premiere: %s\n", loaded.error().toString().c_str());
             return 1;
         }
         if (const auto status = zaro::io::saveProject(*loaded, to); !status) {
-            std::fprintf(stderr, "zaro-otio: %s\n", status.error().toString().c_str());
+            std::fprintf(stderr, "cutreel-premiere: %s\n", status.error().toString().c_str());
             return 1;
         }
         const auto& sequence = loaded->sequences().front();

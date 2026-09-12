@@ -12,11 +12,11 @@ namespace {
 
 void usage() {
     std::printf(
-        "zaro-finalcut — convert between CutReel projects and Final Cut Pro\n"
+        "cutreel-finalcut — convert between CutReel projects and Final Cut Pro\n"
         "\n"
-        "  zaro-finalcut export <project.cutreel> <out.fcpxml> [--sequence <id>]\n"
-        "  zaro-finalcut import <in.fcpxml> <project.cutreel>\n"
-        "  zaro-finalcut --version\n"
+        "  cutreel-finalcut export <project.cutreel> <out.fcpxml> [--sequence <id>]\n"
+        "  cutreel-finalcut import <in.fcpxml> <project.cutreel>\n"
+        "  cutreel-finalcut --version\n"
         "\n"
         "The file is FCPXML, which is what Final Cut Pro reads and writes:\n"
         "File > Import > XML for one this wrote, File > Export XML for one to\n"
@@ -24,7 +24,7 @@ void usage() {
         "databases that moves with the application version, and is not an\n"
         "interchange format in either direction.\n"
         "\n"
-        "This is not the FCP7 XML zaro-premiere writes. The two formats share a\n"
+        "This is not the FCP7 XML cutreel-premiere writes. The two formats share a\n"
         "vendor and nothing else: Final Cut cannot read xmeml and Premiere\n"
         "cannot read .fcpxml, so both tools exist.\n"
         "\n"
@@ -37,7 +37,7 @@ void usage() {
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (zaro::tools::handledVersion(argc, argv, "zaro-finalcut")) {
+    if (zaro::tools::handledVersion(argc, argv, "cutreel-finalcut")) {
         return 0;
     }
     if (argc < 4) {
@@ -51,11 +51,11 @@ int main(int argc, char** argv) {
     if (mode == "export") {
         auto loaded = zaro::io::loadProject(from);
         if (!loaded) {
-            std::fprintf(stderr, "zaro-finalcut: %s\n", loaded.error().toString().c_str());
+            std::fprintf(stderr, "cutreel-finalcut: %s\n", loaded.error().toString().c_str());
             return 1;
         }
         if (loaded->project.sequences().empty()) {
-            std::fprintf(stderr, "zaro-finalcut: that project has no sequences\n");
+            std::fprintf(stderr, "cutreel-finalcut: that project has no sequences\n");
             return 1;
         }
         zaro::model::SequenceId sequence = loaded->project.sequences().front().id();
@@ -66,7 +66,7 @@ int main(int argc, char** argv) {
             }
         }
         if (const auto status = zaro::io::saveFcpXml(loaded->project, sequence, to); !status) {
-            std::fprintf(stderr, "zaro-finalcut: %s\n", status.error().toString().c_str());
+            std::fprintf(stderr, "cutreel-finalcut: %s\n", status.error().toString().c_str());
             return 1;
         }
         std::printf("%s\n", to.c_str());
@@ -76,11 +76,11 @@ int main(int argc, char** argv) {
     if (mode == "import") {
         auto loaded = zaro::io::loadFcpXml(from);
         if (!loaded) {
-            std::fprintf(stderr, "zaro-finalcut: %s\n", loaded.error().toString().c_str());
+            std::fprintf(stderr, "cutreel-finalcut: %s\n", loaded.error().toString().c_str());
             return 1;
         }
         if (const auto status = zaro::io::saveProject(*loaded, to); !status) {
-            std::fprintf(stderr, "zaro-finalcut: %s\n", status.error().toString().c_str());
+            std::fprintf(stderr, "cutreel-finalcut: %s\n", status.error().toString().c_str());
             return 1;
         }
         const auto& sequence = loaded->sequences().front();

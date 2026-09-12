@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Compares zaro-frame's decoded output against FFmpeg's, byte for byte.
+# Compares cutreel-frame's decoded output against FFmpeg's, byte for byte.
 #
 # This is the Phase 1 exit criterion. The frame ladder fixture proves seeks land
 # on the right frame using nothing but our own code; this proves the pixels we
@@ -11,12 +11,12 @@
 set -uo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-frame_tool="${ZARO_FRAME:-$root/build/debug/bin/zaro-frame}"
+frame_tool="${CUTREEL_FRAME:-$root/build/debug/bin/cutreel-frame}"
 media="$root/testdata/media"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
-[[ -x "$frame_tool" ]] || { echo "build zaro-frame first (looked in $frame_tool)"; exit 2; }
+[[ -x "$frame_tool" ]] || { echo "build cutreel-frame first (looked in $frame_tool)"; exit 2; }
 
 # file : native pixel format : frame indices to check
 cases=(
