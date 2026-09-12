@@ -54,7 +54,24 @@ endif()
 install(FILES
         "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
         "${CMAKE_CURRENT_SOURCE_DIR}/README.md"
+        "${CMAKE_CURRENT_SOURCE_DIR}/THIRD-PARTY.md"
     DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/doc/CutReel"
+    COMPONENT runtime)
+
+# The licence texts themselves, beside the notice that indexes them.
+#
+# This is not tidiness, it is the condition on shipping the binary at all. The
+# GPL asks that whoever is handed one is handed its terms with it, and Qt's
+# LGPL asks the same -- and a person who downloaded an installer has nowhere
+# else to look. The About box carries THIRD-PARTY.md so it is readable without
+# finding any file; this is the full text behind it.
+#
+# Copied from the repository rather than gathered from wherever each dependency
+# was built: the text of GPL-3.0 is the same text on all three platforms, while
+# the path it sits at is different on each and absent on machines that took
+# FFmpeg from a distribution. See licenses/README.md.
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/licenses/"
+    DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/doc/CutReel/licenses"
     COMPONENT runtime)
 
 # The product and who publishes it, which are two different things and were
@@ -133,12 +150,18 @@ if(WIN32)
     set(CPACK_WIX_UI_BANNER "${CMAKE_CURRENT_SOURCE_DIR}/resources/branding/installer-banner.bmp")
     set(CPACK_WIX_UI_DIALOG "${CMAKE_CURRENT_SOURCE_DIR}/resources/branding/installer-dialog.bmp")
 
-    # WiX reads a licence as .txt or .rtf and ours is extensionless, so it is
-    # copied to a name the installer's licence page will accept. COPYONLY: the
-    # text of a licence is not something to run through a substitution pass.
-    configure_file("${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
-                   "${CMAKE_BINARY_DIR}/License.txt" COPYONLY)
-    set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_BINARY_DIR}/License.txt")
+    # The licence page shows GPL-3.0, not Apache-2.0.
+    #
+    # Apache-2.0 is the licence of this repository's source and it is the wrong
+    # thing to put in front of somebody installing a binary: what they are being
+    # handed links x264, x265 and a GPL build of FFmpeg, and is therefore
+    # conveyed under GPL-3.0. An installer that presents the permissive licence
+    # while installing the copyleft one misstates the terms at the exact moment
+    # the user is asked to accept them. See THIRD-PARTY.md.
+    #
+    # Already a .txt, so unlike the extensionless LICENSE it needs no copy to
+    # give the licence page a name it will accept.
+    set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/licenses/GPL-3.0.txt")
 
     # --- The .exe around the MSI -----------------------------------------------
     # An .msi cannot carry its own icon -- see cmake/bundle.wxs.in for why -- so
@@ -154,7 +177,7 @@ if(WIN32)
     set(ZARO_BUNDLE_ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/branding/CutReel-Installer.ico")
     set(ZARO_BUNDLE_LOGO "${CMAKE_CURRENT_SOURCE_DIR}/resources/branding/CutReel-Installer-64.png")
     set(ZARO_BUNDLE_LICENSE_URL
-        "https://github.com/skynab/Zaro-Video/blob/dev/LICENSE")
+        "https://github.com/skynab/CutReel/blob/dev/THIRD-PARTY.md")
     # The name cpack gives the MSI, spelled the same way it spells it. Absolute,
     # because light.exe resolves a relative SourceFile against its own working
     # directory and that is not necessarily this one.
@@ -224,7 +247,7 @@ else()
     set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
     set(CPACK_DEBIAN_PACKAGE_SECTION "video")
     set(CPACK_DEBIAN_PACKAGE_MAINTAINER "${CPACK_PACKAGE_VENDOR}")
-    set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "https://github.com/skynab/Zaro-Video")
+    set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "https://github.com/skynab/CutReel")
 
     # Four, and only four. The package carries its own Qt, FFmpeg and SDL, so
     # the only things it needs from the distribution are the ones no program can

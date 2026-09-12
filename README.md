@@ -269,3 +269,36 @@ docs/       plan and architecture decision records
 headless is what makes it testable in CI, scriptable, and renderable without a
 window server — and it means a second decoder backend can be dropped in without
 touching a caller.
+
+## Licence
+
+**The source in this repository is Apache-2.0. The binaries on the releases
+page are GPL-3.0-or-later.**
+
+Those are two different answers to two different questions, and the difference
+is not a technicality. The code here is permissively licensed and can be used as
+such. A built CutReel links x264, x265 and a GPL-enabled build of FFmpeg, whose
+authors allow that only if the whole combined work is offered under the GPL — so
+the thing you download is copyleft even though the thing you clone is not.
+GPL-3.0 rather than 2.0 because Apache-2.0 and Qt 6's LGPL-3.0 are both
+incompatible with GPLv2, and because x264, x265 and FFmpeg are all
+"GPL-2.0-**or later**", which is what makes version 3 available.
+
+In practice:
+
+- **Cloning, reading, and reusing this source**: Apache-2.0. See `LICENSE`.
+- **Redistributing a binary you built or downloaded**: GPL-3.0-or-later, which
+  means passing on the complete corresponding source. Every release links it
+  from the page it is downloaded from.
+- **Contributing**: Apache-2.0 inbound, certified with a `Signed-off-by` line.
+  See [CONTRIBUTING.md](CONTRIBUTING.md) for why it has to be that way round.
+
+[THIRD-PARTY.md](THIRD-PARTY.md) is the full picture: every component, its
+version, its licence, and who holds the copyright. It ships inside the
+application too — Help ▸ About shows it — because somebody handed only a binary
+has nowhere else to look. The full licence texts are in [licenses/](licenses/)
+and in `share/doc/CutReel/licenses` once installed.
+
+H.264 and HEVC are covered by patent pools whose terms are independent of any of
+the above. Nothing in this repository's licensing resolves them, and anyone
+redistributing CutReel commercially should take their own advice.

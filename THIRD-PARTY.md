@@ -74,9 +74,9 @@ distribution respectively, so their versions are whatever those ship.
 - **zlib** — Copyright (C) 1995-2026 Jean-loup Gailly and Mark Adler.
 
 Each project's own full licence text is the authoritative one, and each ships it
-in its own `COPYING` or `LICENSE` file alongside the source linked above. The
-full texts are not yet reproduced inside the installed packages; doing so is
-part of the packaging work this notice is the first half of.
+in its own `COPYING` or `LICENSE` file alongside the source linked above. Those
+texts are reproduced verbatim in the `licenses/` directory of this repository,
+and every package installs them to `share/doc/CutReel/licenses`.
 
 ## Used to build and test, but not shipped
 
