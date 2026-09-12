@@ -44,6 +44,7 @@
 
 #include <zaro/Version.h>
 
+#include "About.h"
 #include "ChannelPanel.h"
 #include "ClipStrip.h"
 #include "ColorManagement.h"
@@ -2579,10 +2580,8 @@ void PreviewWindow::bindCommands() {
     actions_.bind("reset-panels", [this] { setWorkspace(workspace_); });
     actions_.bind("hotkeys", [this] { showHotkeys(); });
     actions_.bind("about", [this] {
-        QMessageBox::about(this, QString("About %1").arg(appName()),
-                           QString("%1 %2 — a non-linear editor.\n\n"
-                                   "C++20, Qt 6, FFmpeg, GPU compositing on Qt RHI.")
-                               .arg(appName(), versionText()));
+        app::About about{this};
+        about.exec();
     });
 }
 
@@ -2924,12 +2923,66 @@ void PreviewWindow::goToEnd() {
     setPosition(liveSequence()->duration());
 }
 
+namespace {
+
+/// Who publishes this, and what it is called.
+///
+/// The two arguments QSettings files everything under, and two different
+/// things: Zaro is the publisher -- the same name the installer's Publisher
+/// field and the .deb's Maintainer carry -- and CutReel is the product.
+///
+/// Kept here rather than taken from `kAppName`: that follows the CMake project
+/// name, and a release that renamed the project would silently move every
+/// user's settings. This is a storage location, and a storage location should
+/// only move when somebody decides to move it.
+constexpr const char* kOrganisation = "Zaro";
+constexpr const char* kApplication = "CutReel";
+
+/// Move a previous version's settings across, once, if they are still the only
+/// ones there are.
+///
+/// The organisation these are filed under is the publisher, and it was spelled
+/// with the product's name until the publisher became Zaro. Qt derives the
+/// storage location from that string -- `HKCU\Software\<org>\<app>` on Windows,
+/// `~/.config/<org>/<app>.conf` on Linux, a `com.<org>.<app>` plist on macOS --
+/// so renaming it points the application at somewhere empty, and somebody who
+/// had arranged their panels would find the window back at its default size
+/// with no explanation.
+///
+/// Copied rather than moved: the old keys are left where they are, so a build
+/// from before this change still finds what it wrote. Only when the new
+/// location is empty, so this cannot undo a later change by overwriting it with
+/// a stale one.
+void migrateSettingsOrganisation() {
+    static bool done = false;
+    if (done) {
+        return;
+    }
+    done = true;
+
+    QSettings current{kOrganisation, kApplication};
+    if (!current.allKeys().isEmpty()) {
+        return;
+    }
+    QSettings previous{kApplication, kApplication};
+    const QStringList keys = previous.allKeys();
+    if (keys.isEmpty()) {
+        return;
+    }
+    for (const QString& key : keys) {
+        current.setValue(key, previous.value(key));
+    }
+}
+
+}  // namespace
+
 QSettings PreviewWindow::makeSettings() {
     // Two returns rather than a ternary: QSettings is a QObject and so is
     // neither copyable nor movable, and only a returned prvalue elides into
     // the caller's object.
     if (settingsPath_.isEmpty()) {
-        return QSettings("CutReel", "CutReel");
+        migrateSettingsOrganisation();
+        return QSettings(kOrganisation, kApplication);
     }
     return QSettings(settingsPath_, QSettings::IniFormat);
 }

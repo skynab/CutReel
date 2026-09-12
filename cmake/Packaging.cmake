@@ -57,8 +57,17 @@ install(FILES
     DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/doc/CutReel"
     COMPONENT runtime)
 
+# The product and who publishes it, which are two different things and were
+# spelled the same until now. The name is what somebody launches; the vendor is
+# who they are installing software from -- the Publisher column in Add/Remove
+# Programs, the Manufacturer in the MSI and in the Burn bundle that wraps it,
+# and the Maintainer of the .deb.
+#
+# Not the install directory, which stays under the product's name: an installed
+# path is something people have shortcuts and scripts pointing at, and moving it
+# to group by publisher would strand both for no gain when there is one product.
 set(CPACK_PACKAGE_NAME "CutReel")
-set(CPACK_PACKAGE_VENDOR "CutReel")
+set(CPACK_PACKAGE_VENDOR "Zaro")
 set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "${PROJECT_DESCRIPTION}")
 set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")

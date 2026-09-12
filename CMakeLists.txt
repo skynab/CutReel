@@ -59,6 +59,29 @@ add_library(zaro::version ALIAS zaro_version)
 target_include_directories(zaro_version
     INTERFACE $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/generated/include>)
 
+# The third-party attribution, as a header, for the same reason the version is
+# one: the About box has to say what is in the binary, and the answer has to
+# come from the file that is the answer rather than from a second copy of it
+# that somebody remembers to update. Anything that wants it links zaro::notices
+# and includes <zaro/Notices.h>.
+#
+# configure_file tracks its own template, but not a file merely read into a
+# variable, so THIRD-PARTY.md is listed as a configure dependency by hand.
+# Without that line, editing the notice changes nothing until someone happens to
+# re-run CMake for an unrelated reason -- which is the failure mode where the
+# binary quietly ships last month's attribution.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/THIRD-PARTY.md")
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/THIRD-PARTY.md" ZARO_THIRD_PARTY_TEXT)
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/Notices.h.in"
+    "${CMAKE_BINARY_DIR}/generated/include/zaro/Notices.h"
+    @ONLY)
+add_library(zaro_notices INTERFACE)
+add_library(zaro::notices ALIAS zaro_notices)
+target_include_directories(zaro_notices
+    INTERFACE $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/generated/include>)
+
 add_subdirectory(core)
 add_subdirectory(ui-core)
 add_subdirectory(platform)

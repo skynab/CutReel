@@ -6,6 +6,8 @@ qt_standard_project_setup()
 # main(), and the GUI tests in app/tests link it in front of Catch2's. A test
 # cannot drive a window that only exists inside an executable.
 add_library(zaro_app_ui STATIC
+    About.cpp
+    About.h
     ActionRouter.cpp
     ActionRouter.h
     AudioStrip.cpp
@@ -117,6 +119,7 @@ add_library(zaro_app_ui STATIC
 target_link_libraries(zaro_app_ui
     PUBLIC
         zaro::version
+        zaro::notices
         zaro::ui_core
         zaro::platform_qrhi
         zaro::platform_qtext

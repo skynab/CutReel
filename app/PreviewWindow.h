@@ -166,7 +166,7 @@ inline const QString kPlatformLabel = QSysInfo::prettyProductName();
 /// the button should not have to be found again when it does. Until there is a
 /// funding page this is the project's own, which is at least somewhere a person
 /// who wants to help can start.
-inline const QString kSupportUrl = "https://github.com/skynab/Zaro-Video";
+inline const QString kSupportUrl = "https://github.com/skynab/CutReel";
 
 // No Q_OBJECT: this declares no signals or slots of its own, and
 // QMetaObject::invokeMethod with a lambda needs only a QObject to bind the
