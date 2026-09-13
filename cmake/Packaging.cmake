@@ -8,7 +8,7 @@
 #   cmake --build   --preset release
 #   cpack           --preset release
 #
-# produces build/release/cutreel_<version>_amd64.deb on Linux, a .tar.gz on
+# produces build/release/cutreel_<version>_amd64.deb on Linux, a .dmg on
 # macOS, and on Windows the installer described below.
 
 # Windows ships one file: the bootstrapper .exe, which is an MSI inside a
@@ -30,10 +30,13 @@
 # lib/cutreel, found through the relative RPATH set in tools/ and app/. The
 # tarball that used to sit beside it is gone; see the generator below for why.
 #
-# Known limitation: macOS. Only cutreel.app is made self-contained there,
-# so the command-line tools in bin/ still expect a machine carrying the same
-# Homebrew dependencies the archive was built against. The same treatment Linux
-# gets below would work, with @loader_path in place of $ORIGIN.
+# Known limitation: macOS. Only cutreel.app is made self-contained there, so
+# the command-line tools in bin/ still expect a machine carrying the same
+# Homebrew dependencies the disk image was built against. The same treatment
+# Linux gets below would work, with @loader_path in place of $ORIGIN. Until it
+# is done, those tools ride along on the image and are left behind on it when
+# the app is dragged to Applications -- which is the right outcome for a binary
+# that cannot start without a matching Homebrew tree anyway.
 
 include(GNUInstallDirs)
 
@@ -51,11 +54,37 @@ endif()
 install(FILES
         "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
         "${CMAKE_CURRENT_SOURCE_DIR}/README.md"
+        "${CMAKE_CURRENT_SOURCE_DIR}/THIRD-PARTY.md"
     DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/doc/CutReel"
     COMPONENT runtime)
 
+# The licence texts themselves, beside the notice that indexes them.
+#
+# This is not tidiness, it is the condition on shipping the binary at all. The
+# GPL asks that whoever is handed one is handed its terms with it, and Qt's
+# LGPL asks the same -- and a person who downloaded an installer has nowhere
+# else to look. The About box carries THIRD-PARTY.md so it is readable without
+# finding any file; this is the full text behind it.
+#
+# Copied from the repository rather than gathered from wherever each dependency
+# was built: the text of GPL-3.0 is the same text on all three platforms, while
+# the path it sits at is different on each and absent on machines that took
+# FFmpeg from a distribution. See licenses/README.md.
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/licenses/"
+    DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/doc/CutReel/licenses"
+    COMPONENT runtime)
+
+# The product and who publishes it, which are two different things and were
+# spelled the same until now. The name is what somebody launches; the vendor is
+# who they are installing software from -- the Publisher column in Add/Remove
+# Programs, the Manufacturer in the MSI and in the Burn bundle that wraps it,
+# and the Maintainer of the .deb.
+#
+# Not the install directory, which stays under the product's name: an installed
+# path is something people have shortcuts and scripts pointing at, and moving it
+# to group by publisher would strand both for no gain when there is one product.
 set(CPACK_PACKAGE_NAME "CutReel")
-set(CPACK_PACKAGE_VENDOR "CutReel")
+set(CPACK_PACKAGE_VENDOR "Zaro")
 set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "${PROJECT_DESCRIPTION}")
 set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
@@ -121,12 +150,18 @@ if(WIN32)
     set(CPACK_WIX_UI_BANNER "${CMAKE_CURRENT_SOURCE_DIR}/resources/branding/installer-banner.bmp")
     set(CPACK_WIX_UI_DIALOG "${CMAKE_CURRENT_SOURCE_DIR}/resources/branding/installer-dialog.bmp")
 
-    # WiX reads a licence as .txt or .rtf and ours is extensionless, so it is
-    # copied to a name the installer's licence page will accept. COPYONLY: the
-    # text of a licence is not something to run through a substitution pass.
-    configure_file("${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
-                   "${CMAKE_BINARY_DIR}/License.txt" COPYONLY)
-    set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_BINARY_DIR}/License.txt")
+    # The licence page shows GPL-3.0, not Apache-2.0.
+    #
+    # Apache-2.0 is the licence of this repository's source and it is the wrong
+    # thing to put in front of somebody installing a binary: what they are being
+    # handed links x264, x265 and a GPL build of FFmpeg, and is therefore
+    # conveyed under GPL-3.0. An installer that presents the permissive licence
+    # while installing the copyleft one misstates the terms at the exact moment
+    # the user is asked to accept them. See THIRD-PARTY.md.
+    #
+    # Already a .txt, so unlike the extensionless LICENSE it needs no copy to
+    # give the licence page a name it will accept.
+    set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/licenses/GPL-3.0.txt")
 
     # --- The .exe around the MSI -----------------------------------------------
     # An .msi cannot carry its own icon -- see cmake/bundle.wxs.in for why -- so
@@ -142,7 +177,7 @@ if(WIN32)
     set(ZARO_BUNDLE_ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/branding/CutReel-Installer.ico")
     set(ZARO_BUNDLE_LOGO "${CMAKE_CURRENT_SOURCE_DIR}/resources/branding/CutReel-Installer-64.png")
     set(ZARO_BUNDLE_LICENSE_URL
-        "https://github.com/skynab/Zaro-Video/blob/dev/LICENSE")
+        "https://github.com/skynab/CutReel/blob/dev/THIRD-PARTY.md")
     # The name cpack gives the MSI, spelled the same way it spells it. Absolute,
     # because light.exe resolves a relative SourceFile against its own working
     # directory and that is not necessarily this one.
@@ -150,7 +185,45 @@ if(WIN32)
     configure_file("${CMAKE_CURRENT_SOURCE_DIR}/cmake/bundle.wxs.in"
                    "${CMAKE_BINARY_DIR}/bundle.wxs" @ONLY)
 elseif(APPLE)
-    set(CPACK_GENERATOR TGZ)
+    # macOS ships one file: a .dmg holding cutreel.app beside a symlink to
+    # /Applications, which is the install gesture every Mac user already knows.
+    # It replaces a .tar.gz, and the reason is not presentation. A tarball is
+    # opened by Archive Utility, which copies the quarantine flag off the
+    # download onto every file it unpacks -- and CutReel is signed by
+    # macdeployqt with an ad-hoc signature, which is not a Developer ID and
+    # carries no notarisation ticket. Gatekeeper rejects that combination with
+    # "cutreel is damaged and can't be opened", which is a lie about the
+    # bundle and reads like a corrupt download.
+    #
+    # The disk image does not fix that, and nothing here can: a file copied out
+    # of a quarantined .dmg inherits the flag exactly as one unpacked from a
+    # quarantined tarball does, so the first launch is blocked either way. Only
+    # a Developer ID signature and notarisation remove the dialog. What the
+    # image buys is a container macOS understands -- one mount, one drag, no
+    # Archive Utility -- and one place to say so; see the README for the
+    # xattr command that clears the flag until CutReel is notarised.
+    set(CPACK_GENERATOR DragNDrop)
+
+    # What Finder titles the mounted volume, and what the eject entry in the
+    # sidebar is called. CPACK_PACKAGE_FILE_NAME is the default and it is the
+    # file name -- CutReel-0.7.1-Darwin-arm64 -- which is right for a download
+    # and wrong for a window title.
+    set(CPACK_DMG_VOLUME_NAME "CutReel ${PROJECT_VERSION}")
+
+    # zlib-compressed and read-only, the format every application .dmg uses.
+    set(CPACK_DMG_FORMAT "UDZO")
+
+    # No click-through licence on mount. CPACK_RESOURCE_FILE_LICENSE is set
+    # near the top of this file, and older CPack turned any non-default
+    # value into a software licence agreement the user has to Agree to before
+    # Finder will open the volume -- built with `hdiutil udifrez`, which macOS
+    # 12 deprecated. CMP0133 already defaults this off for a project requiring
+    # CMake 3.24, but it is the difference between an image that builds and one
+    # that does not, so it is stated rather than inherited.
+    set(CPACK_DMG_SLA_USE_RESOURCE_FILE_LICENSE OFF)
+
+    # The /Applications symlink is CPack's default and is deliberately left on;
+    # without it the window has nothing to drag the app onto.
 else()
     # One file, and it is the .deb. There was a tarball beside it -- unpack it
     # anywhere, run bin/cutreel -- and it was a second Linux package to
@@ -169,12 +242,12 @@ else()
 
     # --- The .deb --------------------------------------------------------------
     # Lowercase, because a Debian package name has to be. The rest of CPack's
-    # naming is left to the generator, which spells it cutreel_0.7.0_amd64.deb.
+    # naming is left to the generator, which spells it cutreel_0.7.1_amd64.deb.
     set(CPACK_DEBIAN_PACKAGE_NAME "cutreel")
     set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
     set(CPACK_DEBIAN_PACKAGE_SECTION "video")
     set(CPACK_DEBIAN_PACKAGE_MAINTAINER "${CPACK_PACKAGE_VENDOR}")
-    set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "https://github.com/skynab/Zaro-Video")
+    set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "https://github.com/skynab/CutReel")
 
     # Four, and only four. The package carries its own Qt, FFmpeg and SDL, so
     # the only things it needs from the distribution are the ones no program can

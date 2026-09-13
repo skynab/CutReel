@@ -132,6 +132,14 @@ SmartRenderPlan smartRenderPlan(const model::Project& project, const model::Sequ
         plan.reason = "that clip's media is missing";
         return plan;
     }
+    // Checked here rather than in `isUntouched`, which is handed a clip and
+    // cannot see the file behind it. Nothing may have been done to the clip and
+    // the picture still not be the source's: a source grade is carried by the
+    // media, and copying its bytes would ship the ungraded footage.
+    if (media->isGraded()) {
+        plan.reason = "the media file carries a source grade";
+        return plan;
+    }
     if (project.usingProxies() && !media->proxyPath.empty()) {
         // Copying the proxy into a deliverable is the one mistake that would
         // ship at the wrong quality without anybody noticing.

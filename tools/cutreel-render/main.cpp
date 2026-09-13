@@ -25,7 +25,7 @@
 namespace {
 
 void printUsage() {
-    std::puts("usage: zaro-render <project.cutreel> <output.mov|.mp4> [options]");
+    std::puts("usage: cutreel-render <project.cutreel> <output.mov|.mp4> [options]");
     std::puts("");
     std::puts("  --start <frame>   first frame to render (default 0)");
     std::puts("  --frames <n>      how many frames (default: the whole sequence)");
@@ -45,7 +45,7 @@ void printUsage() {
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (zaro::tools::handledVersion(argc, argv, "zaro-render")) {
+    if (zaro::tools::handledVersion(argc, argv, "cutreel-render")) {
         return 0;
     }
     if (argc < 3) {
@@ -95,7 +95,7 @@ int main(int argc, char** argv) {
         } else if (arg == "--quiet") {
             quiet = true;
         } else {
-            std::fprintf(stderr, "zaro-render: unknown option '%s'\n", arg.c_str());
+            std::fprintf(stderr, "cutreel-render: unknown option '%s'\n", arg.c_str());
             return 2;
         }
     }
@@ -104,13 +104,13 @@ int main(int argc, char** argv) {
 
     auto loaded = zaro::io::loadProject(projectPath);
     if (!loaded) {
-        std::fprintf(stderr, "zaro-render: %s\n", loaded.error().toString().c_str());
+        std::fprintf(stderr, "cutreel-render: %s\n", loaded.error().toString().c_str());
         return 1;
     }
     const zaro::model::Project& project = loaded->project;
     const zaro::model::Sequence* sequence = project.findSequence(project.activeSequence());
     if (sequence == nullptr) {
-        std::fprintf(stderr, "zaro-render: this project has no active sequence\n");
+        std::fprintf(stderr, "cutreel-render: this project has no active sequence\n");
         return 1;
     }
 
@@ -119,7 +119,7 @@ int main(int argc, char** argv) {
         frameCount = sequence->duration().frames() - startFrame;
     }
     if (frameCount <= 0) {
-        std::fprintf(stderr, "zaro-render: nothing to render\n");
+        std::fprintf(stderr, "cutreel-render: nothing to render\n");
         return 1;
     }
 
@@ -183,7 +183,7 @@ int main(int argc, char** argv) {
     if (const auto status = zaro::platform::ffmpeg::renderSequence(loaded->project, request,
                                                                    onProgress, {}, &summary, &text);
         !status) {
-        std::fprintf(stderr, "\nzaro-render: %s\n", status.error().toString().c_str());
+        std::fprintf(stderr, "\ncutreel-render: %s\n", status.error().toString().c_str());
         return 1;
     }
 

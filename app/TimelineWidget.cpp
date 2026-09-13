@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <string>
 #include <utility>
 
 #include "zaro/core/edit/Operations.h"
@@ -3678,8 +3679,8 @@ std::int32_t TimelineWidget::soundBlockTop(bool past) const {
     return edge;
 }
 
-std::optional<TimelineWidget::DropSpot> TimelineWidget::dropSpotFor(const MediaDrag& dragged,
-                                                                    const QPoint& at) {
+std::optional<TimelineWidget::DropSpot> TimelineWidget::dropSpotFor(
+    const MediaDrag& dragged, const QPoint& at, const std::optional<time::RationalTime>& startAt) {
     const model::Sequence* seq = sequence();
     if (project_ == nullptr || commands_ == nullptr || seq == nullptr) {
         return std::nullopt;
@@ -3733,7 +3734,11 @@ std::optional<TimelineWidget::DropSpot> TimelineWidget::dropSpotFor(const MediaD
         spot.at.kind = model::TrackKind::Audio;
     }
 
-    spot.start = maybeSnap(layout_.timeForX(at.x(), rate), model::ClipId{});
+    // Not snapped when the caller said where: a run of files placed end to end
+    // is already flush against the one before it, and snapping the second one
+    // to a clip edge nearby would open a gap or overlap the first.
+    spot.start = startAt ? startAt->rescaledTo(rate)
+                         : maybeSnap(layout_.timeForX(at.x(), rate), model::ClipId{});
     if (spot.start.frames() < 0) {
         spot.start = time::RationalTime{0, rate};
     }
@@ -4000,6 +4005,15 @@ void TimelineWidget::paintMovePreview(QPainter& painter) {
 }
 
 void TimelineWidget::dragEnterEvent(QDragEnterEvent* event) {
+    // Taken rather than refused, because refusing achieves nothing: the drop
+    // stops at the widget under the pointer, and the timeline is the widest
+    // target in the window.
+    if (!droppedProjectPath(event->mimeData()).empty() ||
+        !droppedMediaPaths(event->mimeData()).isEmpty()) {
+        event->setDropAction(Qt::CopyAction);
+        event->acceptProposedAction();
+        return;
+    }
     const auto dragged = decodeMediaDrag(event->mimeData());
     if (!dragged) {
         event->ignore();
@@ -4019,6 +4033,16 @@ void TimelineWidget::dragEnterEvent(QDragEnterEvent* event) {
 }
 
 void TimelineWidget::dragMoveEvent(QDragMoveEvent* event) {
+    if (!droppedProjectPath(event->mimeData()).empty() ||
+        !droppedMediaPaths(event->mimeData()).isEmpty()) {
+        // No ghost for either. A project replaces the whole window, so there is
+        // no spot on the cut for it to land on; a file from the file manager
+        // has no length yet, because working one out means opening the file,
+        // and that is not something to do on every mouse-move.
+        event->setDropAction(Qt::CopyAction);
+        event->acceptProposedAction();
+        return;
+    }
     dropSpot_ = dropSpotFor(dragged_, event->position().toPoint());
     if (!dropSpot_) {
         clearGestureMarks();
@@ -4040,6 +4064,28 @@ void TimelineWidget::dragLeaveEvent(QDragLeaveEvent* event) {
 
 void TimelineWidget::dropEvent(QDropEvent* event) {
     dropSpot_.reset();
+    if (const std::string project = droppedProjectPath(event->mimeData()); !project.empty()) {
+        event->setDropAction(Qt::CopyAction);
+        event->accept();
+        clearGestureMarks();
+        update();
+        // Said, not done: the window defers the open past the end of this drag
+        // session, because opening a project rebinds this widget out from
+        // under the handler that is still on the stack.
+        emit projectDropped(QString::fromStdString(project));
+        return;
+    }
+    if (const QStringList files = droppedMediaPaths(event->mimeData()); !files.isEmpty()) {
+        event->setDropAction(Qt::CopyAction);
+        event->accept();
+        clearGestureMarks();
+        update();
+        // Said, not done, and for the usual reason plus one of its own: this
+        // is inside the window system's drag session, and importing means a
+        // probe per file with the file manager waiting on it.
+        emit mediaDropped(files, event->position().toPoint());
+        return;
+    }
     const auto dragged = decodeMediaDrag(event->mimeData());
     if (!dragged || project_ == nullptr || commands_ == nullptr || sequence() == nullptr) {
         clearGestureMarks();
@@ -4058,15 +4104,8 @@ void TimelineWidget::dropEvent(QDropEvent* event) {
     // The first file on an empty timeline decides its shape, exactly as it does
     // when the bin appends one. Before the drop is worked out rather than
     // after: conforming changes the frame rate the start time is counted in.
-    if (const model::MediaRef* ref =
-            dragged->isTitle() ? nullptr : project_->findMedia(dragged->media)) {
-        const media::VideoStreamInfo* video = ref->info.primaryVideo();
-        if (video != nullptr && sequence()->duration().frames() == 0) {
-            if (auto conformed = edit::makeConformSequence(*project_, sequenceId_, video->frameRate,
-                                                           video->width, video->height)) {
-                commands_->execute(*project_, std::move(*conformed));
-            }
-        }
+    if (!dragged->isTitle()) {
+        conformToFirst(dragged->media);
     }
 
     const auto spot = dropSpotFor(*dragged, event->position().toPoint());
@@ -4154,6 +4193,53 @@ model::TrackId TimelineWidget::placeOne(const MediaDrag& dragged, const DropSpot
     commands_->execute(*project_, std::move(*built));
     placed = clip.id;
     return target;
+}
+
+void TimelineWidget::conformToFirst(model::MediaRefId media) {
+    if (project_ == nullptr || commands_ == nullptr || sequence() == nullptr) {
+        return;
+    }
+    const model::MediaRef* ref = project_->findMedia(media);
+    if (ref == nullptr) {
+        return;
+    }
+    const media::VideoStreamInfo* video = ref->info.primaryVideo();
+    if (video == nullptr || sequence()->duration().frames() != 0) {
+        return;
+    }
+    if (auto conformed = edit::makeConformSequence(*project_, sequenceId_, video->frameRate,
+                                                   video->width, video->height)) {
+        commands_->execute(*project_, std::move(*conformed));
+    }
+}
+
+void TimelineWidget::placeImported(const std::vector<model::MediaRefId>& media, const QPoint& at) {
+    if (project_ == nullptr || commands_ == nullptr || sequence() == nullptr || media.empty()) {
+        return;
+    }
+
+    // One step for the whole drop, however many files it was and however many
+    // rows they need making.
+    const edit::CommandStack::Group step{*commands_};
+    conformToFirst(media.front());
+
+    std::optional<time::RationalTime> next;
+    for (const model::MediaRefId id : media) {
+        MediaDrag dragged;
+        dragged.media = id;
+        const auto spot = dropSpotFor(dragged, at, next);
+        if (!spot) {
+            // A file with nothing in it this can place -- no picture, no
+            // sound, or a duration that never got probed. Skipped rather than
+            // abandoning the rest: one unreadable file in a folder of rushes
+            // should cost that file, not the drop.
+            continue;
+        }
+        placeDropped(dragged, *spot);
+        // End to end, so a folder of takes arrives as a cut rather than as a
+        // pile on top of each other.
+        next = spot->start + spot->duration;
+    }
 }
 
 void TimelineWidget::placeDropped(const MediaDrag& dragged, const DropSpot& where) {

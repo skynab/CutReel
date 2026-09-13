@@ -25,6 +25,7 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QComboBox>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QKeyEvent>
@@ -57,9 +58,6 @@
 #include "zaro/core/edit/Operations.h"
 #include "zaro/core/edit/Sync.h"
 #include "zaro/core/io/CubeLut.h"
-#include "zaro/core/io/FinalCutXml.h"
-#include "zaro/core/io/OtioIo.h"
-#include "zaro/core/io/PremiereXml.h"
 #include "zaro/core/io/ProjectIo.h"
 #include "zaro/core/io/ProjectLock.h"
 #include "zaro/core/io/Relink.h"
@@ -91,37 +89,17 @@
 #include "zaro/ui/SequenceBinding.h"
 
 #include "ActionRouter.h"
-#include "ChannelPanel.h"
-#include "ClipStrip.h"
 #include "ColorPalette.h"
 #include "CurveEditor.h"
-#include "DeliverPanel.h"
 #include "Document.h"
-#include "EffectControls.h"
 #include "ExportDialog.h"
-#include "FrameThumb.h"
-#include "GalleryPanel.h"
-#include "GradeNodes.h"
-#include "Hotkeys.h"
 #include "Icons.h"
-#include "LoudnessPanel.h"
-#include "MaskOverlay.h"
-#include "MediaBrowser.h"
-#include "MixerPanel.h"
+#include "Interchange.h"
 #include "PlaybackController.h"
-#include "ProgramMonitor.h"
-#include "ProjectBin.h"
 #include "Say.h"
-#include "ScopesPanel.h"
 #include "SourceMonitor.h"
-#include "StemsPanel.h"
 #include "SupportButton.h"
 #include "Theme.h"
-#include "ThumbnailCache.h"
-#include "TimelineWidget.h"
-#include "TitleOverlay.h"
-#include "Transcript.h"
-#include "ViewerOverlay.h"
 #include "chrome/Bars.h"
 #include "chrome/Choices.h"
 #include "chrome/Menus.h"
@@ -136,6 +114,41 @@
 #include "commands/Templates.h"
 
 namespace zaro::app {
+
+// The panels the window owns, by name only.
+//
+// Every one of these is held as a bare pointer, is created by createPanels and
+// is deleted by Qt with the window, and nothing in this header does more with
+// one than pass it along -- so a name is all this file needs. The full headers
+// are included by PreviewWindow.cpp, which is the only place that calls into
+// them.
+//
+// This matters more here than it would anywhere else: app/tests reaches the
+// whole program through GuiFixture.h, so every one of these headers used to be
+// parsed by twelve test translation units as well as by the window itself. A
+// change to any panel rebuilt all of them.
+class ChannelPanel;
+class ClipStrip;
+class ColorManagement;
+class DeliverPanel;
+class EffectControls;
+class FrameThumb;
+class GalleryPanel;
+class GradeNodes;
+class Hotkeys;
+class LoudnessPanel;
+class MaskOverlay;
+class MediaBrowser;
+class MixerPanel;
+class ProgramMonitor;
+class ProjectBin;
+class ScopesPanel;
+class StemsPanel;
+class ThumbnailCache;
+class TimelineWidget;
+class TitleOverlay;
+class Transcript;
+class ViewerOverlay;
 
 // Transport glyphs. Characters rather than an icon font: nothing is vendored
 // here, and a glyph that renders as a colour emoji on one platform and an
@@ -153,7 +166,7 @@ inline const QString kPlatformLabel = QSysInfo::prettyProductName();
 /// the button should not have to be found again when it does. Until there is a
 /// funding page this is the project's own, which is at least somewhere a person
 /// who wants to help can start.
-inline const QString kSupportUrl = "https://github.com/skynab/Zaro-Video";
+inline const QString kSupportUrl = "https://github.com/skynab/CutReel";
 
 // No Q_OBJECT: this declares no signals or slots of its own, and
 // QMetaObject::invokeMethod with a lambda needs only a QObject to bind the
@@ -194,6 +207,7 @@ public:
     [[nodiscard]] app::SourceMonitor* sourceMonitor() const { return source_; }
     [[nodiscard]] app::EffectControls* effects() const { return effects_; }
     [[nodiscard]] app::ScopesPanel* scopes() const { return scopes_; }
+    [[nodiscard]] app::ColorPalette* palette() const { return palette_; }
     [[nodiscard]] app::MixerPanel* mixer() const { return mixer_; }
     [[nodiscard]] app::ChannelPanel* channel() const { return channel_; }
     [[nodiscard]] app::DeliverPanel* deliver() const { return deliver_; }
@@ -233,6 +247,20 @@ public:
     /// window changes, and a cached copy would be a second answer to questions
     /// that already have one.
     [[nodiscard]] commands::Context editContext();
+
+    /// Run one analysis on a worker thread, over a copy of the project.
+    ///
+    /// `analyse` is handed an input pointing at that copy and at decoders
+    /// opened for the call alone, and runs on the worker; it must touch nothing
+    /// else on this window. Everything before and after it -- the snapshot, and
+    /// applying whatever came back -- runs here.
+    ///
+    /// Returns false if it was stopped, or if the decoders would not open. The
+    /// caller captures the result it wants; nothing is applied for it, because
+    /// what to do with a half-finished analysis differs by analysis.
+    bool analyseInBackground(const QString& message, const QString& stopLabel,
+                             const std::function<void(const commands::AnalysisInput&,
+                                                      const commands::Progress&)>& analyse);
 
     /// Show what an edit did.
     ///
@@ -293,6 +321,15 @@ public:
 
     /// Steady the selected clip.
     Result<render::StabiliseResult> stabiliseClip(const commands::Progress& tell = {});
+
+    /// Which thread the last background analysis actually ran on.
+    ///
+    /// Here so a test can assert that it is not this one. That an analysis runs
+    /// off the UI thread is the whole point of analyseInBackground and is
+    /// invisible from the outside: putting the work back on this thread would
+    /// leave every other test passing, and only reappear as the window going
+    /// dead for a minute on somebody's long shot.
+    [[nodiscard]] std::thread::id lastAnalysisThread() const { return lastAnalysisThread_; }
 
     /// Point the project's media at files that moved.
     Result<io::RelinkReport> relinkMedia(const std::string& root);
@@ -522,6 +559,38 @@ public:
 
     void openDialog();
 
+    /// Open this project, asking about somebody else's lock first if there is
+    /// one.
+    ///
+    /// The whole of Open apart from choosing the file, which is why it is
+    /// separate: a project let go of over the window arrives already chosen,
+    /// and it should be opened on exactly the terms the dialog opens one on
+    /// -- the same question about a lock, the same sentence when it will not
+    /// load. A second path that skipped either would be a second way to open
+    /// a project that behaves differently for no reason anybody could see.
+    void openChosen(const std::string& path);
+
+    /// Open a project that was let go of over the window, once the drag that
+    /// brought it is over.
+    ///
+    /// The deferral is the whole reason this exists, and it is not optional.
+    /// A drop handler runs inside the window system's drag session, with the
+    /// program that started the drag waiting on it; opening a project rebinds
+    /// every panel in the window, and the panel it rebinds is often the one
+    /// whose handler is still on the stack. The three places a project can
+    /// land all end up here so that none of them can forget.
+    void openDropped(const QString& path);
+
+    /// Import footage let go of over the timeline, and put it on the cut.
+    ///
+    /// Split between the two panels because the two halves belong to
+    /// different ones: importing means probing every file, which is the media
+    /// pane's job, and a point on the timeline is only meaningful to the
+    /// timeline. Neither knows about the other, so the window joins them --
+    /// and it is the window that has to wait for the drag to finish first,
+    /// exactly as it does for a project.
+    void importDropped(const QStringList& paths, const QPoint& at);
+
     bool saveAs();
 
     /// Write the recovery file, if there is anything to recover.
@@ -628,6 +697,15 @@ protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
 
     void closeEvent(QCloseEvent* event) override;
+
+    // A project file let go of over the window opens it, the way letting go
+    // of footage over the bin imports it. Handled on the window as well as on
+    // the panes that fill it because a drop lands on whatever is under the
+    // pointer and goes no further: the panes cover most of the window, and the
+    // window covers the rest -- the tool bar, the transport, the gaps.
+    void dragEnterEvent(QDragEnterEvent* event) override;
+    void dragMoveEvent(QDragMoveEvent* event) override;
+    void dropEvent(QDropEvent* event) override;
 
 private:
     // --- The chrome ---------------------------------------------------------
@@ -1005,6 +1083,32 @@ private:
     app::ClipStrip* clipStrip_{nullptr};
     app::GradeNodes* nodes_{nullptr};
     app::ColorPalette* palette_{nullptr};
+    /// The Grading selector: whether the wheels drive this cut of the shot or
+    /// the file every cut of it reads. Color-room only, so it lives with the
+    /// node strip rather than in the shared toolbar.
+    QPushButton* gradeClipTab_{nullptr};
+    QPushButton* gradeMediaTab_{nullptr};
+    QLabel* gradeTargetLabel_{nullptr};
+    /// Point the palette, and the label under it, at one of the two grades.
+    void setGradeTarget(app::ColorPalette::GradeTarget target);
+    /// Re-read the selector and its caption from what is selected now.
+    void syncGradeTarget();
+
+    /// Colour management: what the footage is read through, and what the
+    /// sequence is delivered as.
+    ///
+    /// Three questions that sit either side of the grade rather than in it --
+    /// the input transform belongs to the file, the delivery curve and the
+    /// highlight rolloff to the sequence. They were reachable only from a menu
+    /// before; a colourist wants to see the answers while grading, because a
+    /// grade judged against the wrong delivery curve is a grade done twice.
+    app::ColorManagement* colorManagement_{nullptr};
+    /// Put what the project says in front of the colourist again.
+    void syncColorManagement();
+    /// The file under the selection, or null when what is selected reads none.
+    [[nodiscard]] const model::MediaRef* selectedMedia() const;
+    /// Put a .cube on the file the selection reads. Empty path clears it.
+    void applyInputLut(const QString& path);
     /// Every panel that is about a sequence, in one place. See rebindSequence.
     std::vector<ui::SequenceBound*> bound_;
     app::MediaBrowser* browser_{nullptr};
@@ -1042,6 +1146,10 @@ private:
     bool warnedNoAudioDevice_{false};
 
     std::thread waveformThread_;
+
+    /// Set by the worker in analyseInBackground, read here after it is joined --
+    /// which is the happens-before that makes a plain member enough.
+    std::thread::id lastAnalysisThread_;
     std::atomic<bool> shuttingDown_{false};
 };
 

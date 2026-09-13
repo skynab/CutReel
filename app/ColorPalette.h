@@ -3,16 +3,21 @@
 #include <QString>
 #include <QWidget>
 #include <array>
+#include <cstdint>
 #include <vector>
 
+#include "zaro/core/Error.h"
 #include "zaro/core/edit/CommandStack.h"
 #include "zaro/core/model/Project.h"
 
 class QLabel;
 class QListWidget;
+class QScrollArea;
 class QStackedWidget;
 
 #include "zaro/ui/SequenceBinding.h"
+
+#include "Icons.h"
 
 namespace zaro::app {
 
@@ -77,11 +82,33 @@ class ColorPalette : public QWidget, public ui::SequenceBound {
     Q_OBJECT
 
 public:
+    /// Which of the two grades these wheels are driving.
+    ///
+    /// The same controls serve both, deliberately: a colourist balancing a shot
+    /// reaches for the same wheels whether the answer is going to live on this
+    /// cut of it or on the file every cut reads. What changes is where the edit
+    /// lands, and that is a choice made once at the top of the room rather than
+    /// a second set of wheels to learn.
+    enum class GradeTarget : std::uint8_t {
+        /// This instance only. Other uses of the same file are untouched.
+        TimelineClip,
+        /// The file itself, under every clip that reads it.
+        MediaFile,
+    };
+
     explicit ColorPalette(QWidget* parent = nullptr);
 
     void bind(const ui::SequenceBinding& binding) override;
     /// Whose grade is being shown. An invalid clip empties the panel.
     void setSelection(model::TrackId track, model::ClipId clip);
+    /// Grade the instance or the file. Re-reads, so the wheels move to whatever
+    /// the newly-chosen target already says.
+    void setTarget(GradeTarget target);
+    [[nodiscard]] GradeTarget target() const noexcept { return target_; }
+    /// The file being graded when the target is `MediaFile`. Invalid means
+    /// "whatever the selected clip reads", which is the usual case.
+    void setMedia(model::MediaRefId media);
+    [[nodiscard]] model::MediaRefId media() const noexcept { return media_; }
     /// Re-read the clip. Called after an edit from anywhere, and after undo.
     void refresh();
 
@@ -89,19 +116,41 @@ public:
     /// also a button in the node panel, and both should be the same action.
     void resetGrade();
 
+    /// Hang another panel off the same tab strip the wheels and bars use.
+    ///
+    /// The Gallery and the LUTs arrive this way. They are not grading controls
+    /// -- neither writes to a correction -- but they are the same kind of thing
+    /// to reach for while grading, and a colourist should not have to learn
+    /// that stills are behind a second row of tabs somewhere else. Pages added
+    /// here are left alone when there is nothing selected: a still can be
+    /// grabbed and a look folder opened with no clip in hand.
+    void addPage(const QString& name, icons::Glyph glyph, QWidget* page);
+
 signals:
     /// The grade changed, so the monitor and the scopes must be redrawn.
     void edited();
 
 private:
     [[nodiscard]] const model::Clip* selectedClip() const;
+    /// The file whose grade is being edited: the one explicitly chosen, else
+    /// the one the selected clip reads. Null when neither resolves.
+    [[nodiscard]] const model::MediaRef* selectedMedia() const;
+    /// Whether there is anything for the wheels to drive at all.
+    [[nodiscard]] bool haveTarget() const;
+    /// The grade currently on the target, whichever it is.
+    [[nodiscard]] model::ColorCorrection currentColor() const;
+    [[nodiscard]] model::ColorWheels currentWheels() const;
     void pushWheels(bool committed);
     void pushCorrection(bool committed);
+    /// Send one edit to the stack, merging while a drag is in flight.
+    void push(Result<edit::CommandPtr> built, bool committed);
 
     model::Project* project_{nullptr};
     model::SequenceId sequenceId_;
     model::TrackId track_;
     model::ClipId clip_;
+    model::MediaRefId media_;
+    GradeTarget target_{GradeTarget::TimelineClip};
     edit::CommandStack* commands_{nullptr};
     /// True while the widgets are being written from the model, so the writes
     /// do not read as somebody moving them.
@@ -114,6 +163,15 @@ private:
     GradientSlider* saturation_{nullptr};
     QListWidget* palettes_{nullptr};
     QStackedWidget* pages_{nullptr};
+    /// The scroller holding the grading controls, and the ramps inside it.
+    /// Both step aside for the empty message when there is nothing to grade.
+    QScrollArea* scroller_{nullptr};
+    QWidget* ramps_{nullptr};
+    /// How many of the pages are grading controls. The ones after these came
+    /// through `addPage` and do not need a selection to be useful.
+    int gradingPages_{0};
+    /// Whether the page on screen is one of those grading controls.
+    [[nodiscard]] bool onGradingPage() const;
     std::vector<GradientSlider*> bars_;
     QLabel* empty_{nullptr};
 };

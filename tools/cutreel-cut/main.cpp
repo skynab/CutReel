@@ -20,7 +20,7 @@
 namespace {
 
 void printUsage() {
-    std::puts("usage: zaro-cut <output.cutreel> <media>... [options]");
+    std::puts("usage: cutreel-cut <output.cutreel> <media>... [options]");
     std::puts("");
     std::puts("  --rate <r>      sequence frame rate (default: the first clip's)");
     std::puts("  --size <w>x<h>  sequence frame size (default: the first clip's)");
@@ -31,7 +31,7 @@ void printUsage() {
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (zaro::tools::handledVersion(argc, argv, "zaro-cut")) {
+    if (zaro::tools::handledVersion(argc, argv, "cutreel-cut")) {
         return 0;
     }
     if (argc < 3) {
@@ -87,7 +87,7 @@ int main(int argc, char** argv) {
     for (const std::string& path : inputs) {
         auto probed = zaro::platform::ffmpeg::probe(path);
         if (!probed) {
-            std::fprintf(stderr, "zaro-cut: %s\n", probed.error().toString().c_str());
+            std::fprintf(stderr, "cutreel-cut: %s\n", probed.error().toString().c_str());
             return 1;
         }
         zaro::model::MediaRef ref;
@@ -176,7 +176,7 @@ int main(int argc, char** argv) {
         const auto target = hasVideo ? videoTrack : audioTrack;
         auto built = zaro::edit::makeOverwrite(project, {sequenceId, target}, clip);
         if (!built) {
-            std::fprintf(stderr, "zaro-cut: %s\n", built.error().toString().c_str());
+            std::fprintf(stderr, "cutreel-cut: %s\n", built.error().toString().c_str());
             return 1;
         }
         stack.execute(project, std::move(*built));
@@ -207,7 +207,7 @@ int main(int argc, char** argv) {
     }
 
     if (const auto status = zaro::io::saveProject(project, outputPath); !status) {
-        std::fprintf(stderr, "zaro-cut: %s\n", status.error().toString().c_str());
+        std::fprintf(stderr, "cutreel-cut: %s\n", status.error().toString().c_str());
         return 1;
     }
 

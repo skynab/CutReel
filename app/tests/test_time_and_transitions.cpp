@@ -15,6 +15,7 @@
 #include <QTimer>
 #include <cmath>
 #include <cstdint>
+#include <thread>
 #include <utility>
 
 #include <catch2/catch_test_macros.hpp>
@@ -22,7 +23,11 @@
 #include "zaro/core/edit/Operations.h"
 
 #include "../FrameGrab.h"
+#include "EffectControls.h"
 #include "GuiFixture.h"
+#include "ProgramMonitor.h"
+#include "TimelineWidget.h"
+#include "Transcript.h"
 
 // The suite was written inside main(), which had this at file scope; the
 // bodies still say `model::` and `Status` unqualified.
@@ -565,6 +570,24 @@ TEST_CASE("Scene edit detection over the real footage", "[gui]") {
     QApplication::processEvents();
 
     const std::int32_t found = window.detectScenes();
+
+    // Where it ran matters as much as what it found. Scene detection decodes
+    // every frame of the clip, and it used to do that on this thread with a
+    // processEvents pump driving its dialog -- so every timer, every queued
+    // call from the waveform and render threads, and the autosave all ran
+    // inside the analysis with the model half-read. Nothing else here would
+    // notice it moving back.
+    //
+    // Both halves are needed. A default-constructed id also differs from this
+    // thread's, so "not the UI thread" on its own would pass just as happily if
+    // the analysis had never run at all.
+    if (window.lastAnalysisThread() == std::thread::id{}) {
+        zaro::app::testing::failf("no analysis ran, so where it ran proves nothing\n");
+    }
+    if (window.lastAnalysisThread() == std::this_thread::get_id()) {
+        zaro::app::testing::failf("the analysis ran on the UI thread\n");
+    }
+
     const std::size_t clipsAfter =
         window.project().findSequence(sceneSequenceId)->findTrack(sceneTrackId)->clips().size();
     std::printf(

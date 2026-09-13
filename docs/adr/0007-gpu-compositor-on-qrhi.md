@@ -86,7 +86,7 @@ both paths together rather than letting them drift apart.
 
 ## Consequences
 
-- The GPU path is the default in `zaro-play`, with `--cpu` to force the
+- The GPU path is the default in `cutreel-play`, with `--cpu` to force the
   reference. The CPU path stays: it is the oracle the GPU is checked against,
   and it is what a headless render node without a GPU will use.
 - **Preview still reads back**, because the playback scheduler's queue holds CPU

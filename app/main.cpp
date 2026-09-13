@@ -23,6 +23,7 @@
 
 #include "FrameGrab.h"
 #include "PreviewWindow.h"
+#include "ProgramMonitor.h"
 #include "Say.h"
 #include "Theme.h"
 

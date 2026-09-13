@@ -118,10 +118,18 @@ void refresh(const Bars& bars, const Status& status) {
         bars.formatBox->setEnabled(status.haveSequence);
         refreshFormatBox(*bars.formatBox, status);
         bars.rateButton->setVisible(status.haveSequence);
-        bars.statusMiddle->setText(QString("%1 %2 · %3")
-                                       .arg(status.binItems)
-                                       .arg(status.binItems == 1 ? "item" : "items",
-                                            status.modified ? "edited" : "clean"));
+        if (status.workspace == "Color" && status.totalClips > 0) {
+            bars.statusMiddle->setText(
+                QString("%1 of %2 clips graded · %3 · %4")
+                    .arg(status.gradedClips)
+                    .arg(status.totalClips)
+                    .arg(status.gradeTarget, status.modified ? "edited" : "clean"));
+        } else {
+            bars.statusMiddle->setText(QString("%1 %2 · %3")
+                                           .arg(status.binItems)
+                                           .arg(status.binItems == 1 ? "item" : "items",
+                                                status.modified ? "edited" : "clean"));
+        }
     }
     // The missing device takes the right-hand slot while it is missing. What
     // normally sits there is the platform and the Qt version, which nobody is

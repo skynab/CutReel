@@ -6,14 +6,20 @@ qt_standard_project_setup()
 # main(), and the GUI tests in app/tests link it in front of Catch2's. A test
 # cannot drive a window that only exists inside an executable.
 add_library(zaro_app_ui STATIC
+    About.cpp
+    About.h
     ActionRouter.cpp
     ActionRouter.h
     AudioStrip.cpp
     AudioStrip.h
+    BackgroundWork.cpp
+    BackgroundWork.h
     ChannelPanel.cpp
     ChannelPanel.h
     ClipStrip.cpp
     ClipStrip.h
+    ColorManagement.cpp
+    ColorManagement.h
     ColorPalette.cpp
     ColorPalette.h
     ColorWheel.cpp
@@ -43,6 +49,8 @@ add_library(zaro_app_ui STATIC
     HueBand.h
     Icons.cpp
     Icons.h
+    Interchange.cpp
+    Interchange.h
     LoudnessPanel.cpp
     LoudnessPanel.h
     MaskOverlay.cpp
@@ -113,6 +121,7 @@ add_library(zaro_app_ui STATIC
 target_link_libraries(zaro_app_ui
     PUBLIC
         zaro::version
+        zaro::notices
         zaro::ui_core
         zaro::platform_qrhi
         zaro::platform_qtext
@@ -125,6 +134,17 @@ target_link_libraries(zaro_app_ui
 target_include_directories(zaro_app_ui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 set_target_properties(zaro_app_ui PROPERTIES AUTOMOC ON)
+
+# Qt's widget headers, parsed once instead of once per file. See Precompiled.h
+# for what is in it and, more importantly, what is deliberately left out.
+#
+# PUBLIC rather than PRIVATE so that the two things which link this library get
+# it too: `cutreel` below, and the GUI tests in app/tests, which are the eleven
+# translation units that each pull in the whole window through GuiFixture.h and
+# therefore had the most to gain. CMake gives each consumer its own precompiled
+# header rather than sharing one, which is what makes this safe across targets
+# whose compile flags differ.
+target_precompile_headers(zaro_app_ui PUBLIC Precompiled.h)
 
 # --- Branding -------------------------------------------------------------------
 # One directory of artwork, three platforms that each want it in their own
@@ -209,6 +229,23 @@ if(WIN32 OR APPLE)
     install(SCRIPT "${zaro_deploy_script}" COMPONENT runtime)
 endif()
 
+# macdeployqt does not finish the job on macOS: a library Homebrew links
+# through @rpath is copied into the bundle and then left with a dependency the
+# loader cannot resolve and a signature that no longer matches the file. The
+# script says which library, and what it looks like when it ships. It has to
+# run after the deployment above, which is why it is installed from here rather
+# than from cmake/Packaging.cmake.
+if(APPLE)
+    # The directory macOS opens when the .app is double-clicked, named the way
+    # the bundle is named -- target name plus .app, because nothing sets
+    # OUTPUT_NAME. The script is given it rather than looking for one, so that
+    # a bundle missing entirely is an error rather than a silent no-op.
+    set(ZARO_APP_BUNDLE_NAME "cutreel.app")
+    configure_file("${CMAKE_SOURCE_DIR}/cmake/RepairMacBundle.cmake.in"
+                   "${CMAKE_BINARY_DIR}/RepairMacBundle.cmake" @ONLY)
+    install(SCRIPT "${CMAKE_BINARY_DIR}/RepairMacBundle.cmake" COMPONENT runtime)
+endif()
+
 # --- Linux ---------------------------------------------------------------------
 # Linux has no deployment tool of Qt's, so the two halves are done by hand: the
 # shared libraries come from the runtime dependency set in cmake/Packaging.cmake,
@@ -219,7 +256,7 @@ if(UNIX AND NOT APPLE)
     set_target_properties(cutreel PROPERTIES INSTALL_RPATH "${ZARO_PRIVATE_RPATH}")
 
     # xcb is what a desktop session wants and offscreen is what a render farm,
-    # a container and an ssh session want -- zaro-render selects the second for
+    # a container and an ssh session want -- cutreel-render selects the second for
     # itself when there is no display. Missing either one is a program that
     # aborts on startup with "could not load the Qt platform plugin", which
     # says nothing about a file having been left out of a package.

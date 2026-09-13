@@ -22,7 +22,11 @@
 #include "../FrameGrab.h"
 #include "../TitleOverlay.h"
 #include "../commands/Structure.h"
+#include "EffectControls.h"
 #include "GuiFixture.h"
+#include "ProgramMonitor.h"
+#include "TimelineWidget.h"
+#include "TitleOverlay.h"
 
 // The suite was written inside main(), which had this at file scope; the
 // bodies still say `model::` and `Status` unqualified.

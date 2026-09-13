@@ -1,4 +1,10 @@
-find_package(Qt6 REQUIRED COMPONENTS Widgets)
+# GuiPrivate is where QRhi lives, and one of these tests builds a device of its
+# own: the preview adopts whichever backend QRhiWidget hands it, which is
+# OpenGL on Linux and nothing else anywhere, so the only way to cover it is to
+# ask for one. The compositor's own tests cannot -- a GL device needs a
+# QOffscreenSurface, which needs a QGuiApplication, which this suite has and
+# the media tests deliberately do not.
+find_package(Qt6 REQUIRED COMPONENTS Widgets GuiPrivate)
 # The GUI tests drive a real window against a real GPU, so they need Widgets
 # and the panels the window is built from -- the same sources cutreel
 # links, less its main().
@@ -20,6 +26,7 @@ add_executable(zaro_app_tests
     test_titles_and_captions.cpp
     test_media_management.cpp
     test_project_lifecycle.cpp
+    test_gpu_orientation.cpp
 )
 
 target_link_libraries(zaro_app_tests
@@ -27,6 +34,7 @@ target_link_libraries(zaro_app_tests
         zaro_app_ui
         zaro::warnings
         Qt6::Widgets
+        Qt6::GuiPrivate
         Catch2::Catch2WithMain
 )
 

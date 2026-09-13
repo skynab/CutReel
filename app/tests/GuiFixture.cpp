@@ -27,6 +27,8 @@
 
 #include "../Say.h"
 #include "../Theme.h"
+#include "ProgramMonitor.h"
+#include "TimelineWidget.h"
 
 namespace zaro::app::testing {
 namespace {
@@ -45,7 +47,7 @@ std::filesystem::path fixtureMedia() {
 
 /// Build the project the tests open: one clip, picture and sound, on V1 and A1.
 ///
-/// The same shape `zaro-cut` produces, built here rather than by running that
+/// The same shape `cutreel-cut` produces, built here rather than by running that
 /// tool so the suite has no dependency on another binary having been built.
 Result<std::string> writeFixtureProject() {
     const std::string clipPath = fixtureMedia().string();

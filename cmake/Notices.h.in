@@ -1,0 +1,24 @@
+// Generated from cmake/Notices.h.in at configure time. Do not edit.
+//
+// The one source of the attribution text is THIRD-PARTY.md at the repository
+// root, read into this header verbatim so that the notice shipped inside the
+// binary and the notice in the repository cannot disagree. A licence notice
+// maintained in two places is a licence notice that is wrong in one of them the
+// first time a dependency changes, and the copy somebody who was handed only
+// the binary can read is the copy that has to be right.
+//
+// Compiled in rather than loaded from a Qt resource: a resource inside a static
+// library is registered only if something drags its initialiser in, and
+// zaro_app_ui is exactly the library a linker would drop it from. See the
+// branding resource in app/CMakeLists.txt for the case where that is worth
+// living with.
+#pragma once
+
+#include <string_view>
+
+namespace zaro {
+
+/// THIRD-PARTY.md, verbatim. Markdown, because that is what renders it.
+inline constexpr std::string_view kThirdPartyNotices = R"NOTICES(@ZARO_THIRD_PARTY_TEXT@)NOTICES";
+
+}  // namespace zaro

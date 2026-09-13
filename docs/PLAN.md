@@ -107,9 +107,9 @@ Zaro-Video/
 │  ├─ panels/              bin, timeline, monitors, effect controls, audio
 │  └─ main.cpp
 ├─ tools/
-│  ├─ zaro-probe           dump media metadata
-│  ├─ zaro-frame           extract frame N → PNG  (Phase 1 proof)
-│  └─ zaro-render          headless project → file (Phase 3 proof)
+│  ├─ cutreel-probe           dump media metadata
+│  ├─ cutreel-frame           extract frame N → PNG  (Phase 1 proof)
+│  └─ cutreel-render          headless project → file (Phase 3 proof)
 ├─ docs/                   this plan, ADRs, format specs
 └─ testdata/               small generated clips, checked in
 ```
@@ -164,7 +164,7 @@ implementation of the same SMPTE rules — and matches on all 2,589,408 labels i
   — content hashing, eviction, invalidation, background scheduling — is its own chunk of
   work that belongs next to its consumer. Moved to the head of Phase 4.
 
-**Done when:** `zaro-frame movie.mov 1234 out.png` is frame-exact against
+**Done when:** `cutreel-frame movie.mov 1234 out.png` is frame-exact against
 `ffmpeg -vf select` for H.264, HEVC, ProRes, and a VFR phone clip; and a 4K ProRes file
 decodes above realtime through VideoToolbox.
 
@@ -255,7 +255,7 @@ function called as fast as possible, playback is the same function on a clock.
 - ✅ Frame cache: strict LRU with a budget **in bytes**, because a working-space frame is
   8 MB at 1080p and 33 MB at 4K — a cache sized in entries is one that works until
   someone opens UHD footage.
-- ✅ `zaro-render`: headless project → mov/mp4, and `zaro-cut` to build a project from
+- ✅ `cutreel-render`: headless project → mov/mp4, and `cutreel-cut` to build a project from
   media so the path can be exercised without a UI.
 - ⏸️ **Not done: the QRhi shader path.** The CPU implementation here is deliberately
   first, because it is the oracle a GPU renderer's golden-frame tests compare against.
@@ -269,7 +269,7 @@ function called as fast as possible, playback is the same function on a clock.
   continuous speed changes.
 - ✅ JKL shuttle with a rational speed ladder — rational because speed multiplies into the
   position mapping, and 1/3 as a double puts the playhead visibly out within a minute.
-- ✅ Lock-free SPSC ring buffer feeding a real SDL2 audio device, and `zaro-play`, which
+- ✅ Lock-free SPSC ring buffer feeding a real SDL2 audio device, and `cutreel-play`, which
   plays a project against it and reports sync.
 - ⏸️ Outstanding: scrub-request coalescing, and a preview window.
 
@@ -308,7 +308,7 @@ frames and drops 664, with picture lagging the clock by three. The GPU path pres
 and drops 198, with an offset of zero and no audio underruns — seven times the frames,
 and in sync rather than merely close.
 
-It is still not presenting all 59.94. The remainder is the readback, which `zaro-play`
+It is still not presenting all 59.94. The remainder is the readback, which `cutreel-play`
 does because it has nowhere to put a texture, and the single-threaded render loop. A
 preview window removes the first and Phase 4 addresses the second.
 
@@ -362,7 +362,7 @@ obvious from the offscreen case:
 
 **The preview rendered vertically flipped**, and the self-test that counted lit pixels
 reported 96.8% either way. It was caught by comparing a captured frame against a
-reference extracted through the byte-exact `zaro-frame` path — the timecode burn-in had
+reference extracted through the byte-exact `cutreel-frame` path — the timecode burn-in had
 moved from the top to the bottom. The cause is that the composited texture is written
 with row 0 as the top of the picture while the present quad maps texture V=0 to the
 bottom of clip space, which flips on Y-down backends (Metal, Vulkan, D3D) and not on Y-up
@@ -492,7 +492,7 @@ actually set will catch it.
   "only additive", which is how a write path that undo does not cover gets established.
 - ✅ **An export dialog**, with progress, cancellation, and a partial file deleted rather
   than left looking like a delivery.
-- ✅ **`renderSequence` extracted** so `zaro-render` and the export dialog run the same
+- ✅ **`renderSequence` extracted** so `cutreel-render` and the export dialog run the same
   code. Two loops doing this would have to be kept agreeing, and the one nobody runs is
   the one that drifts. Verified by re-running the A/V sync check through the extracted
   path: 250 frames encoded, 250 packets written, 0 samples of drift, unchanged.
@@ -536,7 +536,7 @@ headers to hang on.
 - ✅ **Link groups.** A `LinkId` on the clip: clips sharing one are moved, trimmed and
   removed together. Picture and its sound arrive together and should stay together —
   dragging one and leaving the other is how a cut goes out of sync without anyone
-  noticing. `zaro-cut` now links the pairs it creates, and the timeline outlines the whole
+  noticing. `cutreel-cut` now links the pairs it creates, and the timeline outlines the whole
   group when one of them is selected.
 - ✅ **Sync locks**, distinct from track locks. A locked track refuses all editing; a track
   with sync lock off can still be edited directly but stays put when something else
@@ -1173,7 +1173,7 @@ a title into a delivered file.
 
 **No rasteriser is a countable outcome, not a blank frame.** A tool that was
 never given one renders everything else and reports how many text layers it had
-to skip; `zaro-render` prints a warning. A delivered file quietly missing its
+to skip; `cutreel-render` prints a warning. A delivered file quietly missing its
 titles is the worst outcome available, so the number is on the record.
 
 **Sizes are in pixels, not points.** A point size depends on a notional DPI, and
@@ -1182,7 +1182,7 @@ rendered it thought its screen was. Subpixel antialiasing is off for the same
 class of reason: it is specific to one screen's pixel layout and is wrong the
 moment the result is composited or delivered anywhere else.
 
-**`zaro-render` builds its own `QGuiApplication`.** Qt's font engine needs one
+**`cutreel-render` builds its own `QGuiApplication`.** Qt's font engine needs one
 even with no window. A library that constructed one behind its caller's back
 would fight whatever the caller had already made, so the tool does it and the
 rasteriser says so plainly when there is none.
@@ -1242,7 +1242,7 @@ frame. Both said "no difference" while the code was right.
 
 #### Phase 5n — OpenTimelineIO ✅
 
-Read and write OTIO, a `zaro-otio` conversion tool, and export from the window.
+Read and write OTIO, a `cutreel-otio` conversion tool, and export from the window.
 §7.7 called this the highest-leverage item in the inventory and it is: an edit
 can leave here and come back, or arrive from a system that has never heard of
 this one.
@@ -1270,7 +1270,7 @@ after it lands early.
 
 **Importing produces a project of its own.** An OTIO file names media by URL,
 and matching those against media already open is a different decision from
-reading the file. That is also why import lives in `zaro-otio` and not in the
+reading the file. That is also why import lives in `cutreel-otio` and not in the
 window: replacing the open project needs a "save first?" that does not exist
 yet, and the tool has nothing to lose.
 
@@ -4235,7 +4235,7 @@ step; and the farm and upload buttons, which have nothing behind them.
 
 ### Phase 7v — Premiere interchange §7.7 ✅
 
-Read and write the format Premiere actually opens, a `zaro-premiere` conversion
+Read and write the format Premiere actually opens, a `cutreel-premiere` conversion
 tool, and both directions from the window.
 
 **`.prproj` is not the deliverable, and could not have been.** A Premiere
@@ -4310,7 +4310,7 @@ find than one that arrives absent.
 
 ### Phase 7w — Final Cut interchange §7.7 ✅
 
-Read and write FCPXML, a `zaro-finalcut` conversion tool, and both directions
+Read and write FCPXML, a `cutreel-finalcut` conversion tool, and both directions
 from the window.
 
 **It is not the file the last phase wrote, and could not be.** FCP7 XML and

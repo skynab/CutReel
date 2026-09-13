@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "zaro/core/media/MediaInfo.h"
+#include "zaro/core/model/ColorCorrection.h"
 #include "zaro/core/model/Ids.h"
 #include "zaro/core/model/Sequence.h"
 
@@ -94,6 +95,44 @@ struct MediaRef {
     /// and often simply absent rather than wrong. `Unknown` means believe it.
     media::ColorPrimaries primariesOverride{media::ColorPrimaries::Unknown};
 
+    /// A grade on the file itself, which every clip that reads it inherits.
+    ///
+    /// **The same footage is usually graded once, not once per cut of it.** A
+    /// take that appears four times in the timeline is one lighting setup with
+    /// one answer to "what should this look like", and grading it four times
+    /// means four chances to get a different answer -- then re-grading all four
+    /// when the take is recut. Putting the answer on the file is what makes
+    /// that a single edit.
+    ///
+    /// It does not replace the grade on the clip; it sits under it. A clip's
+    /// own correction is applied on top of this one, so a shot can be balanced
+    /// once at the source and then pushed warmer for the one scene that wants
+    /// it, without the two edits fighting over the same numbers. That is the
+    /// difference the Color workspace calls a source grade and an instance
+    /// grade, and it is why both exist.
+    ///
+    /// Composed at render time rather than folded together here: white balance
+    /// is a channel multiply and contrast is a power about middle grey, and
+    /// those two do not commute, so there is no single correction that means
+    /// "this one then that one". See `render::gradePixel`.
+    ColorCorrection color;
+    /// The source grade's wheels, applied with `color`. An ASC CDL, as on a
+    /// clip -- see `ColorWheels`.
+    ColorWheels wheels;
+
+    /// The LUT this footage is read through, before anything else.
+    ///
+    /// An input transform rather than a look: the .cube that gets a camera's
+    /// log onto a curve a grade can be built on. It belongs to the file for the
+    /// same reason `transferOverride` does -- it answers a question about what
+    /// the file is, and every clip reading it needs the same answer.
+    LutRef lut;
+
+    /// Whether this file carries a source grade worth applying.
+    [[nodiscard]] bool isGraded() const noexcept {
+        return !color.isIdentity() || !wheels.isIdentity() || lut.isSet();
+    }
+
     /// The curve to decode this file through: the override if there is one,
     /// otherwise whatever the container said.
     [[nodiscard]] media::TransferFunction transfer() const {
@@ -121,7 +160,8 @@ struct MediaRef {
         return a.id == b.id && a.path == b.path && a.contentHash == b.contentHash &&
                a.notes == b.notes && a.contentDigest == b.contentDigest && a.name == b.name &&
                a.transferOverride == b.transferOverride &&
-               a.primariesOverride == b.primariesOverride;
+               a.primariesOverride == b.primariesOverride && a.color == b.color &&
+               a.wheels == b.wheels && a.lut == b.lut;
     }
 };
 

@@ -33,19 +33,19 @@ Result<model::ClipId> pinTo(const Context& context, model::ClipId host) {
 /// without a dialog. Zero is a perfectly good answer: a single continuous
 /// take has no scene changes in it, and reporting one would be worse than
 /// reporting none.
-std::int32_t detectScenes(const Context& context, const Progress& tell) {
-    const model::Sequence* sequence = context.sequence();
-    const model::Clip* clip = context.selectedClip();
-    if (clip == nullptr || context.media == nullptr || clip->nested.isValid() ||
+std::vector<time::RationalTime> analyseScenes(const AnalysisInput& input, const Progress& tell) {
+    const model::Sequence* sequence = input.sequenceOrNull();
+    const model::Clip* clip = input.selectedClip();
+    if (clip == nullptr || input.media == nullptr || clip->nested.isValid() ||
         clip->graphic.isSet()) {
-        return 0;
+        return {};
     }
 
     const time::Rational rate = sequence->frameRate();
     const std::int64_t first = clip->start().rescaledTo(rate).frames();
     const std::int64_t count = clip->timelineRange.duration().rescaledTo(rate).frames();
     if (count <= 1) {
-        return 0;
+        return {};
     }
 
     render::SceneDetectOptions options;
@@ -57,10 +57,13 @@ std::int32_t detectScenes(const Context& context, const Progress& tell) {
     render::SceneDetector detector{options};
     for (std::int64_t i = 0; i < count; ++i) {
         if (tell && !tell(i, count)) {
-            return 0;
+            // Stopped by hand. Half a shot's worth of cuts is not a useful
+            // answer to "where does this change?", so nothing is returned and
+            // nothing is applied.
+            return {};
         }
         const time::RationalTime at{first + i, rate};
-        auto image = context.media->imageFor(clip->activeSource(), clip->activeSourceTimeAt(at));
+        auto image = input.media->imageFor(clip->activeSource(), clip->activeSourceTimeAt(at));
         if (!image) {
             // A frame that will not decode is a gap in the evidence, not a
             // scene change. Skipped, and the frame before it stays the one
@@ -76,16 +79,24 @@ std::int32_t detectScenes(const Context& context, const Progress& tell) {
     for (const render::SceneCut& cut : detector.cuts()) {
         points.push_back(cut.at);
     }
-    if (points.empty()) {
+    return points;
+}
+
+std::int32_t applyScenes(const Context& context, const std::vector<time::RationalTime>& points) {
+    const model::Sequence* sequence = context.sequence();
+    if (sequence == nullptr || points.empty()) {
         return 0;
     }
-
     auto built = edit::makeRazorAt(context.project(), {sequence->id(), context.track}, points);
     if (!built) {
         return 0;
     }
     context.commands().execute(context.project(), std::move(*built));
     return static_cast<std::int32_t>(points.size());
+}
+
+std::int32_t detectScenes(const Context& context, const Progress& tell) {
+    return applyScenes(context, analyseScenes(inputFor(context), tell));
 }
 
 Result<model::ClipId> pinToClipBelow(const Context& context) {

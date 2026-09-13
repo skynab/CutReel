@@ -36,6 +36,12 @@ namespace zaro::render {
 /// wants geometry passes nothing.
 struct ClipShading {
     const GradeConstants* grade{nullptr};
+    /// The media file's own grade, applied before the clip's. Null when the
+    /// file carries none, which is the common case. See `model::MediaRef`.
+    const GradeConstants* source{nullptr};
+    /// The file's input LUT, applied before its grade.
+    const LutTable* sourceLut{nullptr};
+    float sourceLutAmount{1.0F};
     const CurveTable* curves{nullptr};
     const SecondaryConstants* secondary{nullptr};
     const LutTable* lut{nullptr};

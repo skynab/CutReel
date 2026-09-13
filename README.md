@@ -73,7 +73,7 @@ FCPXML for Final Cut Pro, which reads neither of the other two.
 | 5k | Shape layers: generated rectangles and ellipses | **done** |
 | 5l | Text layers: Qt font engine behind a core interface | **done** |
 | 5m | Captions: SubRip and WebVTT, burn-in | **done** |
-| 5n | OpenTimelineIO interchange, `zaro-otio` | **done** |
+| 5n | OpenTimelineIO interchange, `cutreel-otio` | **done** |
 | 5o | Masks: shape mattes with feather and invert | **done** |
 | 5p | Speed and reverse, with retimed audio | **done** |
 | 5q | Track EQ and compression, before the fader | **done** |
@@ -131,8 +131,8 @@ FCPXML for Final Cut Pro, which reads neither of the other two.
 | 7s | Timeline alignment: snap guides, and a blade that shows its cut | **done** |
 | 7t | Cutting a linked pair, and a clip that says it is linked | **done** |
 | 7u | The Deliver workspace: presets, settings and a render queue | **done** |
-| 7v | Premiere interchange: FCP7 XML in and out, `zaro-premiere` | **done** |
-| 7w | Final Cut interchange: FCPXML in and out, `zaro-finalcut` | **done** |
+| 7v | Premiere interchange: FCP7 XML in and out, `cutreel-premiere` | **done** |
+| 7w | Final Cut interchange: FCPXML in and out, `cutreel-finalcut` | **done** |
 | 7x | The design's third pass: the inspector's sliders and tabs | **done** |
 | 7y | An inspector per kind of clip: titles, shapes, adjustments, speed | **done** |
 | 7z | Angles, nested sequences, and per-clip filtering and compression | **done** |
@@ -146,6 +146,41 @@ FCPXML for Final Cut Pro, which reads neither of the other two.
 | 8h | Hue against hue: the curve set complete | **done** |
 | 8i | Folding 5.1 to stereo without losing the dialogue | **done** |
 | 8j | Exporting a graphic with its alpha, or refusing to pretend | **done** |
+
+## Installing
+
+Built packages are on the [releases page](https://github.com/skynab/CutReel/releases):
+a `.dmg` for macOS, a `.deb` for Linux, an installer `.exe` for Windows. Every
+run of CI attaches the same three to itself, so a build can be tried without
+waiting for a tag.
+
+### macOS: clearing the first launch
+
+CutReel is not signed with an Apple Developer ID and is not notarised, so macOS
+refuses the first launch and words the refusal like this:
+
+> "cutreel" is damaged and can't be opened. You should move it to the Trash.
+
+Nothing is damaged and there is no reason to trash it. A browser marks anything
+it downloads with a `com.apple.quarantine` flag, and Gatekeeper will not start a
+quarantined application it cannot trace to a paid developer account. This is the
+message it picks for that, and it is the same message you would get for a
+genuinely corrupt download, which is the unhelpful part.
+
+Drag `cutreel.app` from the disk image onto `/Applications` as usual, then clear
+the flag on the copy you installed:
+
+```
+xattr -dr com.apple.quarantine /Applications/cutreel.app
+```
+
+It launches normally from then on. An update is a new download, so it needs the
+command again. The flag lives on the bundle and nowhere else, so removing it
+leaves Gatekeeper switched on for everything else on the machine -- which is why
+this is the thing to run and `spctl --master-disable` is not.
+
+The dialog goes away for good only with a Developer ID signature and
+notarisation, which requires a paid Apple Developer account.
 
 ## Building
 
@@ -177,20 +212,20 @@ it under `xvfb-run`, which is what CI does.
 ## Tools
 
 ```
-zaro-probe <file>                        what we believe about a file
-zaro-frame <file> <index> <out.png>      extract one frame, exactly
-zaro-frame <file> --benchmark 150        decode throughput
-zaro-cut out.cutreel a.mov b.mov            build a project from media
-zaro-render project.cutreel out.mov         render it, headless
-zaro-play project.cutreel --seconds 10       play it on the GPU, and report sync
-zaro-otio export project.cutreel out.otio   hand the cut to any other NLE
-zaro-premiere import cut.xml out.cutreel    take one back from Premiere
-zaro-finalcut export p.cutreel out.fcpxml   hand it to Final Cut Pro
+cutreel-probe <file>                        what we believe about a file
+cutreel-frame <file> <index> <out.png>      extract one frame, exactly
+cutreel-frame <file> --benchmark 150        decode throughput
+cutreel-cut out.cutreel a.mov b.mov            build a project from media
+cutreel-render project.cutreel out.mov         render it, headless
+cutreel-play project.cutreel --seconds 10       play it on the GPU, and report sync
+cutreel-otio export project.cutreel out.otio   hand the cut to any other NLE
+cutreel-premiere import cut.xml out.cutreel    take one back from Premiere
+cutreel-finalcut export p.cutreel out.fcpxml   hand it to Final Cut Pro
 ```
 
-`zaro-premiere` speaks FCP7 XML (`xmeml`), which is what Premiere Pro's
+`cutreel-premiere` speaks FCP7 XML (`xmeml`), which is what Premiere Pro's
 File ▸ Import and File ▸ Export ▸ Final Cut Pro XML read and write.
-`zaro-finalcut` speaks FCPXML, which is what Final Cut Pro's File ▸ Import ▸ XML
+`cutreel-finalcut` speaks FCPXML, which is what Final Cut Pro's File ▸ Import ▸ XML
 and File ▸ Export XML read and write. Despite the names, these are two unrelated
 formats that share a vendor: Final Cut has not read `xmeml` since version 10,
 and Premiere has never read `.fcpxml`, so both tools exist. Neither `.prproj`
@@ -200,7 +235,7 @@ version.
 
 Two verification scripts back the claims the tests cannot make on their own:
 
-- `scripts/verify-frame-exact.sh` compares `zaro-frame`'s raw output against
+- `scripts/verify-frame-exact.sh` compares `cutreel-frame`'s raw output against
   FFmpeg's own decoder, byte for byte, in each file's native pixel format.
 - `scripts/verify-av-sync.sh` renders the flash-and-click fixture, then pulls
   picture and sound back out of the *output file* independently and reports the
@@ -223,8 +258,8 @@ platform/
   ffmpeg/   the only place libav* headers are included
   qrhi/     GPU compositor and its shaders
   sdl/      audio output device
-tools/      zaro-probe, zaro-frame, zaro-cut, zaro-render, zaro-play,
-            zaro-otio, zaro-premiere, zaro-finalcut
+tools/      cutreel-probe, cutreel-frame, cutreel-cut, cutreel-render, cutreel-play,
+            cutreel-otio, cutreel-premiere, cutreel-finalcut
 testdata/   fixture generator
 cmake/      warning policy, find modules
 docs/       plan and architecture decision records
@@ -234,3 +269,36 @@ docs/       plan and architecture decision records
 headless is what makes it testable in CI, scriptable, and renderable without a
 window server — and it means a second decoder backend can be dropped in without
 touching a caller.
+
+## Licence
+
+**The source in this repository is Apache-2.0. The binaries on the releases
+page are GPL-3.0-or-later.**
+
+Those are two different answers to two different questions, and the difference
+is not a technicality. The code here is permissively licensed and can be used as
+such. A built CutReel links x264, x265 and a GPL-enabled build of FFmpeg, whose
+authors allow that only if the whole combined work is offered under the GPL — so
+the thing you download is copyleft even though the thing you clone is not.
+GPL-3.0 rather than 2.0 because Apache-2.0 and Qt 6's LGPL-3.0 are both
+incompatible with GPLv2, and because x264, x265 and FFmpeg are all
+"GPL-2.0-**or later**", which is what makes version 3 available.
+
+In practice:
+
+- **Cloning, reading, and reusing this source**: Apache-2.0. See `LICENSE`.
+- **Redistributing a binary you built or downloaded**: GPL-3.0-or-later, which
+  means passing on the complete corresponding source. Every release links it
+  from the page it is downloaded from.
+- **Contributing**: Apache-2.0 inbound, certified with a `Signed-off-by` line.
+  See [CONTRIBUTING.md](CONTRIBUTING.md) for why it has to be that way round.
+
+[THIRD-PARTY.md](THIRD-PARTY.md) is the full picture: every component, its
+version, its licence, and who holds the copyright. It ships inside the
+application too — Help ▸ About shows it — because somebody handed only a binary
+has nowhere else to look. The full licence texts are in [licenses/](licenses/)
+and in `share/doc/CutReel/licenses` once installed.
+
+H.264 and HEVC are covered by patent pools whose terms are independent of any of
+the above. Nothing in this repository's licensing resolves them, and anyone
+redistributing CutReel commercially should take their own advice.

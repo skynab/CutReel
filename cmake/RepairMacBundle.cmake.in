@@ -1,0 +1,259 @@
+# Repair and re-sign the deployed app bundle. Runs at install time, directly
+# after macdeployqt has copied Qt and the Homebrew libraries into
+# Contents/Frameworks.
+#
+# macdeployqt rewrites every load command it can resolve and ad-hoc signs the
+# bundle afterwards, and for almost everything it copies that is the end of it.
+# The exception is a library whose siblings are named with @rpath. Homebrew
+# links brotli that way: libbrotlidec.1.dylib asks for
+#
+#   @rpath/libbrotlicommon.1.dylib
+#
+# and finds it through an LC_RPATH of @loader_path/../lib, which is the Cellar
+# layout. macdeployqt resolves that once -- against the original in
+# /opt/homebrew, where it is correct -- and copies libbrotlicommon into
+# Contents/Frameworks. It then strips the copy, which invalidates the ad-hoc
+# signature Homebrew's bottle carries, and walks the bundle to re-sign it
+# inside out. That walk resolves @rpath against the *bundled* library's
+# LC_RPATH, which still says @loader_path/../lib and now means
+# Contents/lib -- a directory that does not exist. So the walk never reaches
+# libbrotlicommon: its install name is never rewritten and its signature is
+# never replaced. macdeployqt reports
+#
+#   ERROR: Cannot resolve rpath "@rpath/libbrotlicommon.1.dylib"
+#
+# and carries on, and the bundle it leaves behind fails the signature check in
+# the release workflow:
+#
+#   cutreel.app: invalid signature (code or signature have been modified)
+#   In subcomponent: .../Contents/Frameworks/libbrotlicommon.1.dylib
+#
+# The signature is the smaller half of it. The bundle does not start at all:
+#
+#   Library not loaded: @rpath/libbrotlicommon.1.dylib
+#   Referenced from: .../Contents/Frameworks/libbrotlidec.1.dylib
+#   Reason: tried: '.../Contents/Frameworks/../lib/libbrotlicommon.1.dylib'
+#           (no such file)
+#
+# on every Mac, including the one that built it. freetype pulls brotli in for
+# WOFF2 and Qt pulls freetype in for text, so this is on the path of every
+# CutReel build made against a current Homebrew -- and it is exactly the
+# breakage the workflow's codesign step was added to catch.
+#
+# What this script does is the part macdeployqt could not: point every @rpath
+# dependency that names something actually present in Contents/Frameworks
+# straight at it with @executable_path, give the libraries there install names
+# to match, and ad-hoc sign what was touched, innermost first, ending with the
+# bundle itself. Nothing here is brotli-specific; it is a sweep over whatever
+# ended up in the bundle, and on one macdeployqt got right it changes nothing.
+#
+# A reference macdeployqt could not resolve and neither can we -- @rpath naming
+# a library that was never copied in -- is reported and left alone. Rewriting
+# it would only move the failure.
+
+set(zaro_bundle "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/@ZARO_APP_BUNDLE_NAME@")
+set(zaro_frameworks "${zaro_bundle}/Contents/Frameworks")
+
+if(NOT IS_DIRECTORY "${zaro_bundle}")
+    message(FATAL_ERROR
+        "No app bundle at ${zaro_bundle}. The Qt deployment step in "
+        "app/CMakeLists.txt should have produced it before this script ran.")
+endif()
+
+# Looked up here rather than at configure time: a plain build runs from the
+# build tree, where nothing is copied and none of this applies. It is only
+# installing or packaging that needs these, so that is where their absence
+# should stop you.
+find_program(ZARO_OTOOL NAMES otool)
+find_program(ZARO_INSTALL_NAME_TOOL NAMES install_name_tool)
+find_program(ZARO_CODESIGN NAMES codesign)
+foreach(zaro_tool ZARO_OTOOL ZARO_INSTALL_NAME_TOOL ZARO_CODESIGN)
+    if(NOT ${zaro_tool})
+        message(FATAL_ERROR
+            "${zaro_tool} was not found. The macOS bundle cannot be finished "
+            "without the Xcode command line tools; install them with "
+            "`xcode-select --install` and install again.")
+    endif()
+endforeach()
+
+# Everything that might be Mach-O: the executables, the libraries beside them,
+# the plugins, and the binary at the top of each framework version.
+file(GLOB zaro_candidates LIST_DIRECTORIES false
+    "${zaro_bundle}/Contents/MacOS/*"
+    "${zaro_frameworks}/*.dylib")
+file(GLOB_RECURSE zaro_more LIST_DIRECTORIES false
+    "${zaro_bundle}/Contents/PlugIns/*.dylib")
+list(APPEND zaro_candidates ${zaro_more})
+
+# The frameworks are walked a version at a time, and Versions/Current is
+# stepped over rather than followed. It is a symlink to Versions/A, and a glob
+# through it reaches the same binary under a second name -- which is a file
+# repaired twice, given an install name naming whichever spelling came last,
+# and signed on top of itself. Not GLOB_RECURSE either: that goes on past the
+# binary into Resources and Headers and hands us every plist and header in Qt.
+file(GLOB zaro_versions LIST_DIRECTORIES true "${zaro_frameworks}/*.framework/Versions/*")
+foreach(zaro_version IN LISTS zaro_versions)
+    if(IS_SYMLINK "${zaro_version}" OR NOT IS_DIRECTORY "${zaro_version}")
+        continue()
+    endif()
+    file(GLOB zaro_more LIST_DIRECTORIES false "${zaro_version}/*")
+    list(APPEND zaro_candidates ${zaro_more})
+endforeach()
+
+# Make a file writable before install_name_tool touches it: what macdeployqt
+# copies keeps the permissions of the original, and a Homebrew bottle's
+# libraries are read-only. chmod rather than file(CHMOD), which can only set
+# the whole mode and would have to invent the other eight bits.
+macro(zaro_make_writable zaro_path)
+    execute_process(COMMAND chmod u+w "${zaro_path}")
+endmacro()
+
+set(zaro_touched "")
+set(zaro_unresolved "")
+
+foreach(zaro_binary IN LISTS zaro_candidates)
+    if(IS_SYMLINK "${zaro_binary}")
+        continue()
+    endif()
+
+    # Read the magic number rather than asking otool: given a file that is not
+    # Mach-O, otool prints its complaint and still exits 0, so there is nothing
+    # in its result to test. The four are a 32- and 64-bit little-endian
+    # header and the two byte orders of a universal binary's fat header.
+    file(READ "${zaro_binary}" zaro_magic HEX LIMIT 4)
+    if(NOT zaro_magic MATCHES "^(cefaedfe|cffaedfe|cafebabe|bebafeca)$")
+        continue()
+    endif()
+
+    execute_process(
+        COMMAND "${ZARO_OTOOL}" -L "${zaro_binary}"
+        OUTPUT_VARIABLE zaro_otool_output
+        ERROR_QUIET)
+
+    set(zaro_binary_changed FALSE)
+
+    # The install name, for the libraries in Frameworks. A library that still
+    # calls itself /opt/homebrew/... is one macdeployqt did not finish with,
+    # and the only reason it works at all is that the loader goes by what the
+    # binary asking for it says, not by what it says about itself. Ours to fix
+    # while we are here; leaving it is a path to a machine that is not the
+    # user's, recorded in a file that is supposed to be self-contained.
+    file(RELATIVE_PATH zaro_relative "${zaro_frameworks}" "${zaro_binary}")
+    if(NOT zaro_relative MATCHES "^\\.\\./")
+        set(zaro_wanted_id "@executable_path/../Frameworks/${zaro_relative}")
+        execute_process(
+            COMMAND "${ZARO_OTOOL}" -D "${zaro_binary}"
+            OUTPUT_VARIABLE zaro_id_output
+            ERROR_QUIET)
+        # Two lines: the file name, then the install name. A Mach-O without an
+        # LC_ID_DYLIB -- an executable -- prints only the first.
+        string(REPLACE "\n" ";" zaro_id_lines "${zaro_id_output}")
+        list(LENGTH zaro_id_lines zaro_id_line_count)
+        if(zaro_id_line_count GREATER 1)
+            list(GET zaro_id_lines 1 zaro_current_id)
+            if(NOT zaro_current_id STREQUAL zaro_wanted_id)
+                zaro_make_writable("${zaro_binary}")
+                execute_process(
+                    COMMAND "${ZARO_INSTALL_NAME_TOOL}"
+                            -id "${zaro_wanted_id}" "${zaro_binary}"
+                    RESULT_VARIABLE zaro_result
+                    ERROR_VARIABLE zaro_error)
+                if(NOT zaro_result EQUAL 0)
+                    message(FATAL_ERROR
+                        "Could not set the install name of ${zaro_binary}: ${zaro_error}")
+                endif()
+                set(zaro_binary_changed TRUE)
+            endif()
+        endif()
+    endif()
+
+    # The dependencies. An @rpath entry naming a file that is in Frameworks is
+    # rewritten to point at it directly, which is the form macdeployqt gives
+    # everything it does resolve, and which needs no LC_RPATH to work.
+    string(REPLACE "\n" ";" zaro_lines "${zaro_otool_output}")
+    foreach(zaro_line IN LISTS zaro_lines)
+        if(NOT zaro_line MATCHES "^[ \t]+(.+) \\(compatibility version ")
+            continue()
+        endif()
+        set(zaro_dependency "${CMAKE_MATCH_1}")
+        if(NOT zaro_dependency MATCHES "^@rpath/(.+)$")
+            continue()
+        endif()
+        set(zaro_suffix "${CMAKE_MATCH_1}")
+
+        if(NOT EXISTS "${zaro_frameworks}/${zaro_suffix}")
+            list(APPEND zaro_unresolved "${zaro_binary} -> ${zaro_dependency}")
+            continue()
+        endif()
+
+        zaro_make_writable("${zaro_binary}")
+        execute_process(
+            COMMAND "${ZARO_INSTALL_NAME_TOOL}"
+                    -change "${zaro_dependency}"
+                            "@executable_path/../Frameworks/${zaro_suffix}"
+                    "${zaro_binary}"
+            RESULT_VARIABLE zaro_result
+            ERROR_VARIABLE zaro_error)
+        if(NOT zaro_result EQUAL 0)
+            message(FATAL_ERROR
+                "Could not repoint ${zaro_dependency} in ${zaro_binary}: ${zaro_error}")
+        endif()
+        set(zaro_binary_changed TRUE)
+    endforeach()
+
+    if(zaro_binary_changed)
+        # A binary inside a framework is signed as part of that framework, not
+        # on its own: signing the file directly replaces the bundle signature
+        # with a bare one and loses the resource seal, which --deep --strict
+        # then rejects.
+        if(zaro_binary MATCHES "^(.*\\.framework)/")
+            list(APPEND zaro_touched "${CMAKE_MATCH_1}")
+        else()
+            list(APPEND zaro_touched "${zaro_binary}")
+        endif()
+    endif()
+endforeach()
+
+if(zaro_unresolved)
+    list(REMOVE_DUPLICATES zaro_unresolved)
+    string(REPLACE ";" "\n  " zaro_unresolved_text "${zaro_unresolved}")
+    message(WARNING
+        "The bundle has @rpath dependencies on libraries that are not in it, "
+        "and the loader will have to find them on the user's machine:\n  "
+        "${zaro_unresolved_text}")
+endif()
+
+# Ad-hoc, and only ad-hoc: there is no Developer ID here, and cmake/Packaging.cmake
+# says what that costs the user on first launch. What it buys is a bundle whose
+# contents match what the signature says they are, which on Apple silicon is the
+# difference between a program that starts and one the kernel refuses to run.
+if(zaro_touched)
+    list(REMOVE_DUPLICATES zaro_touched)
+    # Innermost first, then the bundle: signing a nested framework invalidates
+    # the seal of whatever contains it, so the outermost signature has to be
+    # the last one written.
+    list(APPEND zaro_touched "${zaro_bundle}")
+    foreach(zaro_item IN LISTS zaro_touched)
+        execute_process(
+            COMMAND "${ZARO_CODESIGN}" --force --sign - "${zaro_item}"
+            RESULT_VARIABLE zaro_result
+            ERROR_VARIABLE zaro_error)
+        if(NOT zaro_result EQUAL 0)
+            message(FATAL_ERROR "Could not sign ${zaro_item}: ${zaro_error}")
+        endif()
+    endforeach()
+    list(LENGTH zaro_touched zaro_signed_count)
+    message(STATUS "Repaired and re-signed ${zaro_signed_count} items in ${zaro_bundle}")
+endif()
+
+# The same check the release workflow runs on the mounted disk image, run here
+# as well so that a bundle this script could not fix stops the build that made
+# it rather than the job that ships it.
+execute_process(
+    COMMAND "${ZARO_CODESIGN}" --verify --deep --strict "${zaro_bundle}"
+    RESULT_VARIABLE zaro_result
+    ERROR_VARIABLE zaro_error)
+if(NOT zaro_result EQUAL 0)
+    message(FATAL_ERROR
+        "${zaro_bundle} is not correctly signed after deployment:\n${zaro_error}")
+endif()

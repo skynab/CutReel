@@ -18,8 +18,8 @@
 namespace {
 
 void printUsage() {
-    std::puts("usage: zaro-frame <input> <frame-index> <output.png> [options]");
-    std::puts("       zaro-frame <input> --time <timecode> <output> [options]");
+    std::puts("usage: cutreel-frame <input> <frame-index> <output.png> [options]");
+    std::puts("       cutreel-frame <input> --time <timecode> <output> [options]");
     std::puts("");
     std::puts("  --raw          write packed planes instead of a PNG");
     std::puts("  --software     force software decoding");
@@ -32,7 +32,7 @@ void printUsage() {
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (zaro::tools::handledVersion(argc, argv, "zaro-frame")) {
+    if (zaro::tools::handledVersion(argc, argv, "cutreel-frame")) {
         return 0;
     }
     if (argc < 3) {
@@ -75,7 +75,7 @@ int main(int argc, char** argv) {
 
     auto opened = zaro::platform::ffmpeg::openVideoDecoder(input, options);
     if (!opened) {
-        std::fprintf(stderr, "zaro-frame: %s\n", opened.error().toString().c_str());
+        std::fprintf(stderr, "cutreel-frame: %s\n", opened.error().toString().c_str());
         return 1;
     }
     zaro::media::VideoDecoder& decoder = **opened;
@@ -102,12 +102,13 @@ int main(int argc, char** argv) {
     if (!timecodeText.empty()) {
         const auto parsed = zaro::time::parseTimecode(timecodeText);
         if (!parsed) {
-            std::fprintf(stderr, "zaro-frame: cannot parse timecode '%s'\n", timecodeText.c_str());
+            std::fprintf(stderr, "cutreel-frame: cannot parse timecode '%s'\n",
+                         timecodeText.c_str());
             return 2;
         }
         const auto asFrames = zaro::time::framesFromTimecode(*parsed, decoder.info().frameRate);
         if (!asFrames) {
-            std::fprintf(stderr, "zaro-frame: timecode '%s' does not exist at %s fps\n",
+            std::fprintf(stderr, "cutreel-frame: timecode '%s' does not exist at %s fps\n",
                          timecodeText.c_str(), decoder.info().frameRate.toString().c_str());
             return 2;
         }
@@ -121,7 +122,7 @@ int main(int argc, char** argv) {
 
     auto frame = decoder.frameAtIndex(frameIndex);
     if (!frame) {
-        std::fprintf(stderr, "zaro-frame: %s\n", frame.error().toString().c_str());
+        std::fprintf(stderr, "cutreel-frame: %s\n", frame.error().toString().c_str());
         return 1;
     }
 
@@ -129,7 +130,7 @@ int main(int argc, char** argv) {
         const auto status = raw ? zaro::platform::ffmpeg::writeRawPlanes(*frame, output)
                                 : zaro::platform::ffmpeg::writePng(*frame, output);
         if (!status) {
-            std::fprintf(stderr, "zaro-frame: %s\n", status.error().toString().c_str());
+            std::fprintf(stderr, "cutreel-frame: %s\n", status.error().toString().c_str());
             return 1;
         }
     }

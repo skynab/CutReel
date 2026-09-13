@@ -25,10 +25,12 @@
 #include <QDir>
 #include <QFont>
 #include <QFontDatabase>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMimeData>
 #include <QProgressDialog>
 #include <QRegularExpression>
 #include <QSlider>
@@ -37,9 +39,36 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include <zaro/Version.h>
+
+#include "About.h"
+#include "BackgroundWork.h"
+#include "ChannelPanel.h"
+#include "ClipStrip.h"
+#include "ColorManagement.h"
+#include "DeliverPanel.h"
+#include "EffectControls.h"
+#include "FrameThumb.h"
+#include "GalleryPanel.h"
+#include "GradeNodes.h"
+#include "Hotkeys.h"
+#include "LoudnessPanel.h"
+#include "MaskOverlay.h"
+#include "MediaBrowser.h"
+#include "MediaDrag.h"
+#include "MixerPanel.h"
+#include "ProgramMonitor.h"
+#include "ProjectBin.h"
+#include "ScopesPanel.h"
+#include "StemsPanel.h"
+#include "ThumbnailCache.h"
+#include "TimelineWidget.h"
+#include "TitleOverlay.h"
+#include "Transcript.h"
+#include "ViewerOverlay.h"
 
 namespace zaro::app {
 namespace {
@@ -51,6 +80,12 @@ QString appName() {
 QString versionText() {
     return QString::fromUtf8(kVersion.data(), static_cast<qsizetype>(kVersion.size()));
 }
+
+/// The frame cache an analysis gets, which is not the one the window has.
+///
+/// Enough to hold a handful of 4K frames, which is all a forward walk over a
+/// shot ever needs at once. See PreviewWindow::analyseInBackground.
+constexpr std::size_t kAnalysisCacheBytes = 64u * 1024u * 1024u;
 
 }  // namespace
 
@@ -82,6 +117,11 @@ PreviewWindow::PreviewWindow(model::Project project, io::LoadedProject loaded, s
     buildWindowLayout();
     wireEditingSignals();
     startTimers();
+
+    // Last, so that nothing can be let go of over a window that is still being
+    // put together. A project dropped anywhere on it opens, which is the
+    // shortest route there is from "this is the cut" to having it on screen.
+    setAcceptDrops(true);
 }
 
 void PreviewWindow::createPanels() {
@@ -215,11 +255,9 @@ void PreviewWindow::createPanels() {
     channel_->setMaximumWidth(320);
 
     gallery_ = new app::GalleryPanel(this);
-    gallery_->setFixedWidth(236);
     clipStrip_ = adopting(new app::ClipStrip(this));
     nodes_ = new app::GradeNodes(this);
     palette_ = adopting(new app::ColorPalette(this));
-    palette_->setFixedHeight(212);
 
     source_ = new app::SourceMonitor(this);
     // Its own row of buttons -- In, Out, Subclip, Insert, Over -- is what sets
@@ -290,7 +328,20 @@ void PreviewWindow::buildViewerLayout() {
     bars_.audioSide = leftColumn;
 
     topSplitter_->addWidget(bars_.audioSide);
-    topSplitter_->addWidget(gallery_);
+    // The grading palette is the Color room's left column: the wheels, the
+    // bars and the ramps, stacked. It used to run along the bottom, which is
+    // where the timeline belongs -- a colourist reads the cut across and the
+    // controls down, not the other way about.
+    topSplitter_->addWidget(palette_);
+    palette_->setFixedWidth(310);
+    // The gallery is not a pane of its own: its two panels hang off the
+    // palette's tab strip, beside Wheels and Bars, so that everything a
+    // colourist reaches for while grading is in one column behind one row of
+    // tabs. The panel itself stays alive as the owner of the stills and the
+    // look folder.
+    palette_->addPage(tr("Gallery"), app::icons::Glyph::Camera, gallery_->stillsPage());
+    palette_->addPage(tr("LUTs"), app::icons::Glyph::FolderOpen, gallery_->lutsPage());
+    gallery_->hide();
     topSplitter_->addWidget(bin_);
     topSplitter_->addWidget(programColumn);
     // Scopes share the parameter column: they are read while grading, and
@@ -307,7 +358,73 @@ void PreviewWindow::buildViewerLayout() {
     bars_.nodesBox->setObjectName("grade-nodes-box");
     auto* nodesLayout = new QVBoxLayout(bars_.nodesBox);
     nodesLayout->setContentsMargins(12, 10, 12, 10);
+
+    // Grading: which of the two grades the wheels are driving. Above the node
+    // strip because it is the question that comes first -- a node chain is a
+    // chain *on something*, and choosing the shot or the file decides what
+    // every control below this line is going to write to.
+    auto* targetRow = new QWidget(bars_.nodesBox);
+    auto* targetLayout = new QHBoxLayout(targetRow);
+    targetLayout->setContentsMargins(0, 0, 0, 6);
+    targetLayout->setSpacing(6);
+    auto* targetCaption = new QLabel(tr("Grading"), targetRow);
+    targetCaption->setObjectName("section-label");
+    targetLayout->addWidget(targetCaption);
+    auto* targetGroup = new QWidget(targetRow);
+    targetGroup->setObjectName("tab-group");
+    targetGroup->setFixedHeight(26);
+    auto* targetTabs = new QHBoxLayout(targetGroup);
+    targetTabs->setContentsMargins(2, 2, 2, 2);
+    targetTabs->setSpacing(2);
+    gradeClipTab_ = chrome::button(targetGroup, tr("Timeline clip"),
+                                   tr("Grade this instance only — other uses of "
+                                      "the same file are untouched."),
+                                   true);
+    gradeMediaTab_ = chrome::button(targetGroup, tr("Media file"),
+                                    tr("Grade the source file — every instance in "
+                                       "the timeline inherits it."),
+                                    true);
+    for (QPushButton* tab : {gradeClipTab_, gradeMediaTab_}) {
+        tab->setFixedHeight(22);
+        targetTabs->addWidget(tab);
+    }
+    targetLayout->addWidget(targetGroup);
+    targetLayout->addStretch(1);
+    nodesLayout->addWidget(targetRow);
+
+    // What the choice above resolves to right now, spelled out. "Media file"
+    // alone does not say *which* file, and grading the wrong one is not visible
+    // until somebody looks at another cut of it.
+    gradeTargetLabel_ = new QLabel(bars_.nodesBox);
+    gradeTargetLabel_->setObjectName("muted-label");
+    gradeTargetLabel_->setTextFormat(Qt::PlainText);
+    nodesLayout->addWidget(gradeTargetLabel_);
+
+    connect(gradeClipTab_, &QPushButton::clicked, this,
+            [this] { setGradeTarget(app::ColorPalette::GradeTarget::TimelineClip); });
+    connect(gradeMediaTab_, &QPushButton::clicked, this,
+            [this] { setGradeTarget(app::ColorPalette::GradeTarget::MediaFile); });
+
     nodesLayout->addWidget(nodes_);
+
+    // Colour management, under the chain rather than in it: these are what the
+    // grade is done *between* -- the transform the footage arrives through and
+    // the curve it is delivered as -- and both were previously reachable only
+    // from a menu somebody had to remember was there.
+    auto* managementCaption = new QLabel(tr("Colour management"), bars_.nodesBox);
+    managementCaption->setObjectName("section-label");
+    nodesLayout->addSpacing(8);
+    nodesLayout->addWidget(managementCaption);
+
+    colorManagement_ = new app::ColorManagement(bars_.nodesBox);
+    nodesLayout->addWidget(colorManagement_);
+
+    // The panel reports what was picked; turning that into a command needs the
+    // project, the selection and four panels to redraw, which are the window's.
+    connect(colorManagement_, &app::ColorManagement::inputLutChosen, this,
+            &PreviewWindow::applyInputLut);
+    connect(colorManagement_, &app::ColorManagement::deliveryChosen, this,
+            [this](const model::Sequence::Output& wanted) { setDelivery(wanted); });
     gradeLayout->addWidget(bars_.nodesBox);
     gradeLayout->addWidget(effects_, 1);
 
@@ -325,7 +442,10 @@ void PreviewWindow::buildViewerLayout() {
     scopes_->setMinimumHeight(150);
     mixer_->setMinimumHeight(190);
     topSplitter_->addWidget(rightColumn);
-    topSplitter_->setStretchFactor(3, 3);
+    // By index-of rather than by a literal: the panes either side of the
+    // viewer have been reordered twice now, and a hard-coded 3 silently
+    // stretches whichever pane has drifted into that slot.
+    topSplitter_->setStretchFactor(topSplitter_->indexOf(programColumn), 3);
 }
 
 void PreviewWindow::wireWorkspacePanels() {
@@ -391,6 +511,15 @@ void PreviewWindow::wireWorkspacePanels() {
             [this](const QString& lut) { applyLookToSelection(lut); });
 
     connect(bin_, &app::ProjectBin::openRequested, this, [this](zaro::model::MediaRefId id) {
+        // In Color, with the file as the target, opening one is also choosing
+        // which file the wheels are about to grade. Elsewhere it just means
+        // "let me look at this", which is what it has always meant.
+        if (workspace_ == "Color" &&
+            palette_->target() == app::ColorPalette::GradeTarget::MediaFile) {
+            palette_->setMedia(id);
+            syncGradeTarget();
+            syncColorManagement();
+        }
         if (const model::MediaRef* ref = document_.project().findMedia(id)) {
             source_->load(*ref);
             // Opening a clip is a request to look at it.
@@ -459,6 +588,9 @@ void PreviewWindow::wireWorkspacePanels() {
     // without it.
     connect(bin_, &app::ProjectBin::addTitleRequested, this,
             [this](const QString& presetId) { addTitle(presetId.toStdString()); });
+    // Either pane may be the one a project lands on; both hand it here.
+    connect(bin_, &app::ProjectBin::projectDropped, this,
+            [this](const QString& path) { openDropped(path); });
     connect(bin_, &app::ProjectBin::mediaImported, this, [this] {
         if (Status reopened = openMedia(); !reopened) {
             app::warn(this, "Import", QString::fromStdString(reopened.error().toString()));
@@ -478,11 +610,6 @@ void PreviewWindow::buildWindowLayout() {
     mainSplitter_->addWidget(topSplitter_);
     bars_.timelinePane = buildTimelinePane();
     mainSplitter_->addWidget(bars_.timelinePane);
-    // The grading palette takes the timeline's place in Color. Not beside
-    // it: the design gives that workspace no timeline at all, because what
-    // a colourist moves through is shots, and the strip under the viewer is
-    // the list of those.
-    mainSplitter_->addWidget(palette_);
     mainSplitter_->setStretchFactor(0, 3);
     mainSplitter_->setStretchFactor(1, 2);
 
@@ -533,6 +660,8 @@ void PreviewWindow::wireEditingSignals() {
                 selectedClip_ = clip;
                 palette_->setSelection(track, clip);
                 clipStrip_->setSelection(track, clip);
+                syncGradeTarget();
+                syncColorManagement();
                 refreshGradeChain();
                 maskOverlay_->setTarget(&document_.project(), sequenceId_, track, clip,
                                         &document_.commands());
@@ -576,6 +705,10 @@ void PreviewWindow::wireEditingSignals() {
     connect(timeline_, &app::TimelineWidget::addTitleRequested, this, [this] { addTitle(); });
     connect(timeline_, &app::TimelineWidget::detectScenesRequested, this,
             [this] { static_cast<void>(detectScenes()); });
+    connect(timeline_, &app::TimelineWidget::projectDropped, this,
+            [this](const QString& path) { openDropped(path); });
+    connect(timeline_, &app::TimelineWidget::mediaDropped, this,
+            [this](const QStringList& paths, const QPoint& at) { importDropped(paths, at); });
     connect(timeline_, &app::TimelineWidget::toolChanged, this, [this] { updateChrome(); });
     connect(timeline_, &app::TimelineWidget::snapChanged, this, [this] { updateChrome(); });
     connect(timeline_, &app::TimelineWidget::edited, this, [this] {
@@ -683,91 +816,27 @@ void PreviewWindow::exportDialog() {
 }
 
 void PreviewWindow::exportOtio() {
-    if (liveSequence() == nullptr) {
-        return;
-    }
-    // Export only, from the window. Importing an OTIO file produces a
-    // project of its own, and replacing the open one needs a "save first?"
-    // that does not exist yet -- so that direction lives in zaro-otio,
-    // where there is nothing to lose.
-    const QString path = QFileDialog::getSaveFileName(this, "Export OpenTimelineIO",
-                                                      "timeline.otio", "OpenTimelineIO (*.otio)");
-    if (path.isEmpty()) {
-        return;
-    }
-    if (Status saved = io::saveOtio(document_.project(), liveSequence()->id(), path.toStdString());
-        !saved) {
-        app::warn(this, "OpenTimelineIO", QString::fromStdString(saved.error().toString()));
-    }
+    interchange::exportOtio(this, document_.project(), sequenceId_);
 }
 
 void PreviewWindow::exportPremiere() {
-    if (liveSequence() == nullptr) {
-        return;
-    }
-    // Named for the program rather than for the format. "FCP7 XML" is what the
-    // file is; "the one Premiere opens" is what somebody came here for, and the
-    // menu already said Premiere.
-    const QString path = QFileDialog::getSaveFileName(this, "Export Premiere XML", "timeline.xml",
-                                                      "FCP7 XML (*.xml)");
-    if (path.isEmpty()) {
-        return;
-    }
-    if (Status saved =
-            io::savePremiereXml(document_.project(), liveSequence()->id(), path.toStdString());
-        !saved) {
-        app::warn(this, "Premiere XML", QString::fromStdString(saved.error().toString()));
-    }
+    interchange::exportPremiere(this, document_.project(), sequenceId_);
 }
 
 void PreviewWindow::importPremiere() {
-    const QString path =
-        QFileDialog::getOpenFileName(this, "Import Premiere XML", {}, "FCP7 XML (*.xml)");
-    if (path.isEmpty()) {
-        return;
+    if (auto read = interchange::importPremiere(this)) {
+        adoptImported(std::move(read->project), read->format, read->lost);
     }
-    auto imported = io::loadPremiereXml(path.toStdString());
-    if (!imported) {
-        app::warn(this, "Premiere XML", QString::fromStdString(imported.error().toString()));
-        return;
-    }
-    adoptImported(std::move(*imported), "Premiere XML",
-                  "Grades, effects, transitions and keyframes");
 }
 
 void PreviewWindow::exportFinalCut() {
-    if (liveSequence() == nullptr) {
-        return;
-    }
-    const QString path = QFileDialog::getSaveFileName(
-        this, "Export Final Cut Pro XML", "timeline.fcpxml", "Final Cut Pro XML (*.fcpxml)");
-    if (path.isEmpty()) {
-        return;
-    }
-    if (Status saved =
-            io::saveFcpXml(document_.project(), liveSequence()->id(), path.toStdString());
-        !saved) {
-        app::warn(this, "Final Cut Pro XML", QString::fromStdString(saved.error().toString()));
-    }
+    interchange::exportFinalCut(this, document_.project(), sequenceId_);
 }
 
 void PreviewWindow::importFinalCut() {
-    // The bundle as well as the file. Final Cut 10.6.6 began writing a
-    // `.fcpxmld` directory whose `Info.fcpxml` is the document, and what
-    // somebody picks in this dialog is the bundle -- so it has to be offered,
-    // and `loadFcpXml` looks inside.
-    const QString path = QFileDialog::getOpenFileName(this, "Import Final Cut Pro XML", {},
-                                                      "Final Cut Pro XML (*.fcpxml *.fcpxmld)");
-    if (path.isEmpty()) {
-        return;
+    if (auto read = interchange::importFinalCut(this)) {
+        adoptImported(std::move(read->project), read->format, read->lost);
     }
-    auto imported = io::loadFcpXml(path.toStdString());
-    if (!imported) {
-        app::warn(this, "Final Cut Pro XML", QString::fromStdString(imported.error().toString()));
-        return;
-    }
-    adoptImported(std::move(*imported), "Final Cut Pro XML",
-                  "Grades, effects, transitions, keyframes and track mute and lock");
 }
 
 void PreviewWindow::adoptImported(model::Project imported, const QString& format,
@@ -799,57 +868,69 @@ void PreviewWindow::adoptImported(model::Project imported, const QString& format
 }
 
 void PreviewWindow::trackMask() {
-    // Every frame of the rest of the clip gets composited, which is not
-    // instant on a long one.
     // A dialog rather than a wait cursor. This composites every frame of the
     // rest of the clip, and on a long one a frozen window with a spinning
     // cursor and no way out is indistinguishable from a hang.
-    QProgressDialog progress("Tracking the mask…", "Stop", 0, 1, this);
-    progress.setWindowModality(Qt::WindowModal);
-    progress.setMinimumDuration(400);
-    auto tracked = trackMaskForward([&](std::int64_t done, std::int64_t total) {
-        progress.setMaximum(static_cast<int>(total));
-        progress.setValue(static_cast<int>(done));
-        QCoreApplication::processEvents();
-        return !progress.wasCanceled();
-    });
-    progress.reset();
-    if (!tracked) {
-        app::say(this, "Track mask", QString::fromStdString(tracked.error().message()));
+    //
+    // The compositing happens on a worker thread; only the curves it produces
+    // come back here to be applied. See analyseInBackground.
+    std::optional<Result<commands::MaskTrackAnalysis>> analysed;
+    const bool ran = analyseInBackground(
+        "Tracking the mask…", "Stop",
+        [&](const commands::AnalysisInput& input, const commands::Progress& tell) {
+            analysed = commands::analyseMaskTrack(input, tell);
+        });
+    if (!ran || !analysed.has_value()) {
         return;
     }
+    if (!*analysed) {
+        app::say(this, "Track mask", QString::fromStdString(analysed->error().message()));
+        return;
+    }
+    // Applied against the live project, on this thread. It can still fail --
+    // the clip may have been trimmed away by a background render finishing
+    // while the track ran -- and that is a real answer, not an assertion.
+    if (Status applied = commands::applyMaskTrack(editContext(), **analysed); !applied) {
+        app::say(this, "Track mask", QString::fromStdString(applied.error().message()));
+        return;
+    }
+    const commands::MaskTrack& tracked = (*analysed)->report;
     QString said = QString("Tracked %1 frame%2, weakest match %3.")
-                       .arg(tracked->frames)
-                       .arg(tracked->frames == 1 ? "" : "s")
-                       .arg(tracked->confidence, 0, 'f', 2);
-    if (!tracked->stopped.empty()) {
+                       .arg(tracked.frames)
+                       .arg(tracked.frames == 1 ? "" : "s")
+                       .arg(tracked.confidence, 0, 'f', 2);
+    if (!tracked.stopped.empty()) {
         // Said plainly, with the keyframes kept: where a track gave up is
         // exactly where somebody needs to look.
-        said += QString("\nStopped early: %1").arg(QString::fromStdString(tracked->stopped));
+        said += QString("\nStopped early: %1").arg(QString::fromStdString(tracked.stopped));
     }
     app::say(this, "Track mask", said);
 }
 
 void PreviewWindow::stabilise() {
-    QProgressDialog progress("Measuring the camera move…", "Stop", 0, 1, this);
-    progress.setWindowModality(Qt::WindowModal);
-    progress.setMinimumDuration(400);
-    auto held = stabiliseClip([&](std::int64_t done, std::int64_t total) {
-        progress.setMaximum(static_cast<int>(total));
-        progress.setValue(static_cast<int>(done));
-        QCoreApplication::processEvents();
-        return !progress.wasCanceled();
-    });
-    progress.reset();
-    if (!held) {
-        app::say(this, "Stabilise", QString::fromStdString(held.error().message()));
+    std::optional<Result<commands::StabiliseAnalysis>> analysed;
+    const bool ran = analyseInBackground(
+        "Measuring the camera move…", "Stop",
+        [&](const commands::AnalysisInput& input, const commands::Progress& tell) {
+            analysed = commands::analyseStabilise(input, tell);
+        });
+    if (!ran || !analysed.has_value()) {
         return;
     }
+    if (!*analysed) {
+        app::say(this, "Stabilise", QString::fromStdString(analysed->error().message()));
+        return;
+    }
+    if (Status applied = commands::applyStabilise(editContext(), **analysed); !applied) {
+        app::say(this, "Stabilise", QString::fromStdString(applied.error().message()));
+        return;
+    }
+    const render::StabiliseResult& held = (*analysed)->report;
     QString said = QString("Stabilised %1 frames, zoomed in %2%.")
-                       .arg(held->measured)
-                       .arg((held->zoom - 1.0) * 100.0, 0, 'f', 1);
-    if (!held->stopped.empty()) {
-        said += QString("\nStopped early: %1").arg(QString::fromStdString(held->stopped));
+                       .arg(held.measured)
+                       .arg((held.zoom - 1.0) * 100.0, 0, 'f', 1);
+    if (!held.stopped.empty()) {
+        said += QString("\nStopped early: %1").arg(QString::fromStdString(held.stopped));
     }
     app::say(this, "Stabilise", said);
 }
@@ -1163,6 +1244,17 @@ void PreviewWindow::loudnessMenu() {
     if (liveSequence() == nullptr || media_ == nullptr) {
         return;
     }
+    // Stop the transport first. Playback decodes on a thread of its own -- see
+    // PlaybackController::pumpAudio -- through the very media source this is
+    // about to read, and nothing guards one decoder against two threads: doing
+    // both at once faults inside avcodec. `stop` joins that thread, so past
+    // this line the decoder is this thread's alone.
+    //
+    // Stopped rather than locked, and deliberately. A lock would have to be
+    // held for a whole-programme decode, which is exactly as long as the wait
+    // cursor below is up -- the realtime path would starve and the device would
+    // drop out. Nothing was going to be heard through a modal wait anyway.
+    playback_.stop();
     render::AudioGraph mixer{*media_};
     const time::TimeRange whole{time::RationalTime{0, liveSequence()->frameRate()},
                                 liveSequence()->duration()};
@@ -1285,6 +1377,47 @@ void PreviewWindow::rebindSequence() {
     monitor_->setRenderCache(&renderCache_);
     monitor_->setTextRasterizer(&text_);
     monitor_->update();
+}
+
+bool PreviewWindow::analyseInBackground(
+    const QString& message, const QString& stopLabel,
+    const std::function<void(const commands::AnalysisInput&, const commands::Progress&)>& analyse) {
+    // A snapshot, and decoders opened for this call alone. Neither is caution:
+    // the analysis runs on a worker thread, and this window goes on painting
+    // the monitor, ticking its meters, autosaving and finishing background
+    // renders the whole time it does. See commands::AnalysisInput.
+    const model::Project snapshot = document_.project();
+    Status opened;
+    const bool ran = app::runWithProgress(this, message, stopLabel, [&](const app::Reporter& tell) {
+        lastAnalysisThread_ = std::this_thread::get_id();
+        // A small budget rather than the window's. An analysis walks a shot
+        // forward once and never asks for a frame twice, so a second 512 MB
+        // cache would be 512 MB of frames nothing reads -- and doubling the
+        // frame cache for the length of a long track is the memory blowout
+        // docs/PLAN.md lists as a top risk.
+        auto media = platform::ffmpeg::ProjectMediaSource::open(snapshot, kAnalysisCacheBytes);
+        if (!media) {
+            opened = media.error();
+            return;
+        }
+        // Its own font engine, built on the thread that will use it, the
+        // way the Deliver queue builds one for each render.
+        platform::qtext::QtTextRasterizer text;
+        commands::AnalysisInput input;
+        input.project = &snapshot;
+        input.sequence = sequenceId_;
+        input.track = selectedTrack_;
+        input.clip = selectedClip_;
+        input.position = position_;
+        input.media = media->get();
+        input.text = &text;
+        analyse(input, tell);
+    });
+    if (!opened) {
+        app::warn(this, message, QString::fromStdString(opened.error().toString()));
+        return false;
+    }
+    return ran;
 }
 
 commands::Context PreviewWindow::editContext() {
@@ -1845,20 +1978,16 @@ std::int32_t PreviewWindow::detectScenes() {
         return 0;
     }
 
-    // The dialog is the window's, and the operation's only view of it is a
-    // question it asks once a frame: keep going?
-    QProgressDialog progress("Looking for scene changes\u2026", "Cancel", 0, 1, this);
-    progress.setWindowModality(Qt::WindowModal);
-    progress.setMinimumDuration(400);
-    const std::int32_t cuts =
-        commands::detectScenes(editContext(), [&](std::int64_t done, std::int64_t total) {
-            progress.setMaximum(static_cast<int>(total));
-            progress.setValue(static_cast<int>(done));
-            QCoreApplication::processEvents();
-            return !progress.wasCanceled();
+    // The decoding happens on a worker thread; the cuts it found come back here
+    // to be made. See analyseInBackground.
+    std::vector<time::RationalTime> points;
+    const bool ran = analyseInBackground(
+        "Looking for scene changes\u2026", "Cancel",
+        [&](const commands::AnalysisInput& input, const commands::Progress& tell) {
+            points = commands::analyseScenes(input, tell);
         });
-    const bool canceled = progress.wasCanceled();
-    progress.reset();
+    const bool canceled = !ran;
+    const std::int32_t cuts = canceled ? 0 : commands::applyScenes(editContext(), points);
     if (cuts > 0) {
         afterEdit();
         app::say(this, "Detect cuts",
@@ -1999,7 +2128,10 @@ void PreviewWindow::openDialog() {
     if (chosen.isEmpty()) {
         return;
     }
-    const std::string path = chosen.toStdString();
+    openChosen(chosen.toStdString());
+}
+
+void PreviewWindow::openChosen(const std::string& path) {
     // Somebody else's lock is a question, not a refusal: often enough the
     // answer is "let me look at it anyway", and often enough the other
     // machine went home hours ago.
@@ -2254,6 +2386,82 @@ bool PreviewWindow::eventFilter(QObject* watched, QEvent* event) {
     return QWidget::eventFilter(watched, event);
 }
 
+void PreviewWindow::dragEnterEvent(QDragEnterEvent* event) {
+    if (droppedProjectPath(event->mimeData()).empty()) {
+        // Footage let go of over the window's furniture rather than over the
+        // bin. Refused rather than imported: the bin is where files go, it is
+        // the largest thing on the left of the window, and a drop that landed
+        // on the tool bar by half a pixel should miss rather than do something
+        // slightly different.
+        event->ignore();
+        return;
+    }
+    // Copy rather than move: the project file stays where it is. A move would
+    // ask the file manager to delete it once this returns.
+    event->setDropAction(Qt::CopyAction);
+    event->acceptProposedAction();
+}
+
+void PreviewWindow::dragMoveEvent(QDragMoveEvent* event) {
+    if (droppedProjectPath(event->mimeData()).empty()) {
+        event->ignore();
+        return;
+    }
+    event->setDropAction(Qt::CopyAction);
+    event->acceptProposedAction();
+}
+
+void PreviewWindow::dropEvent(QDropEvent* event) {
+    const std::string path = droppedProjectPath(event->mimeData());
+    if (path.empty()) {
+        event->ignore();
+        return;
+    }
+    event->setDropAction(Qt::CopyAction);
+    event->accept();
+    openDropped(QString::fromStdString(path));
+}
+
+void PreviewWindow::openDropped(const QString& path) {
+    // On the next turn of the event loop, never inside the handler. This runs
+    // in the middle of the window system's drag session -- the file manager is
+    // blocked waiting for the drop to come back -- and opening a project tears
+    // down and rebinds every panel in the window, one of which is very often
+    // the widget whose handler is still on the stack.
+    QTimer::singleShot(0, this, [this, path] { openChosen(path.toStdString()); });
+}
+
+void PreviewWindow::importDropped(const QStringList& paths, const QPoint& at) {
+    // Past the end of the drag session, like a project. More so, in fact: an
+    // import probes every file, and the file manager is blocked until this
+    // handler comes back.
+    QTimer::singleShot(0, this, [this, paths, at] {
+        // The import and the placement under one group: letting go of a folder
+        // of rushes is one gesture, and a person who did it and changed their
+        // mind should press undo once, not once per file plus once per import.
+        //
+        // It still comes out as two steps rather than one, and that is a
+        // property of the history rather than of this call: importing snapshots
+        // the project, placing snapshots the sequence, and two different kinds
+        // of snapshot cannot fold into each other. Two is the floor; without
+        // the group it was two per file.
+        const edit::CommandStack::Group step{document_.commands()};
+        const app::ProjectBin::Imported brought = bin_->importMedia(paths);
+        if (brought.media.empty()) {
+            // Nothing readable in what was let go of. Said where an import
+            // says everything else, rather than in a dialog: it is the answer
+            // to a gesture, and a gesture does not deserve a box to dismiss.
+            bin_->note(QStringLiteral("Nothing to import"));
+            return;
+        }
+        timeline_->placeImported(brought.media, at);
+        // The set of media changed, so which of it is missing has to be
+        // recomputed -- quietly, as an import does from the pane.
+        checkMissingMedia();
+        updateTitle();
+    });
+}
+
 void PreviewWindow::closeEvent(QCloseEvent* event) {
     // Handed back on the way out, so the next person is not told a machine
     // that has gone home still has it.
@@ -2428,10 +2636,8 @@ void PreviewWindow::bindCommands() {
     actions_.bind("reset-panels", [this] { setWorkspace(workspace_); });
     actions_.bind("hotkeys", [this] { showHotkeys(); });
     actions_.bind("about", [this] {
-        QMessageBox::about(this, QString("About %1").arg(appName()),
-                           QString("%1 %2 — a non-linear editor.\n\n"
-                                   "C++20, Qt 6, FFmpeg, GPU compositing on Qt RHI.")
-                               .arg(appName(), versionText()));
+        app::About about{this};
+        about.exec();
     });
 }
 
@@ -2516,7 +2722,124 @@ void PreviewWindow::setProgramShown(bool on) {
 }
 
 QString PreviewWindow::layoutKey(const QString& workspace, const char* which) {
-    return QString("workspace/%1/%2-v3").arg(workspace, QString::fromUtf8(which));
+    // -v6: the gallery stopped being a pane of its own -- its panels moved
+    // into the palette's tabs -- so the top splitter has one pane fewer.
+    // -v5: the grading palette moved from the bottom splitter to the left
+    // column, so a saved state restores sizes for a pane that is no longer in
+    // that splitter at all.
+    // -v4: Color gained the timeline pane. A layout saved before that was
+    // stored with the pane hidden, and restoring it over a pane that is now
+    // shown gives it zero height -- a timeline that is present, correct and
+    // invisible, which reads as the feature not being there at all. Bumping
+    // the key retires those layouts instead of restoring them.
+    return QString("workspace/%1/%2-v6").arg(workspace, QString::fromUtf8(which));
+}
+
+namespace {
+
+/// Where highlights start rolling off. The same four the delivery menu offers,
+/// so the panel and the menu cannot come to disagree about what "roll off"
+/// means. See chrome::deliveryMenu.
+}  // namespace
+
+void PreviewWindow::syncColorManagement() {
+    if (colorManagement_ == nullptr) {
+        return;
+    }
+    colorManagement_->showState(liveSequence(), selectedMedia(), gallery_->lutFolder());
+}
+
+/// The file under the selection, or null when what is selected reads no file.
+const model::MediaRef* PreviewWindow::selectedMedia() const {
+    const model::Sequence* sequence = liveSequence();
+    const model::Track* track = sequence != nullptr ? sequence->findTrack(selectedTrack_) : nullptr;
+    const model::Clip* clip = track != nullptr ? track->find(selectedClip_) : nullptr;
+    if (clip == nullptr || !clip->activeSource().isValid()) {
+        return nullptr;
+    }
+    return document_.project().findMedia(clip->activeSource());
+}
+
+void PreviewWindow::applyInputLut(const QString& path) {
+    const model::MediaRef* media = selectedMedia();
+    if (media == nullptr) {
+        return;
+    }
+    model::LutRef wanted;
+    wanted.path = path.toStdString();
+    if (auto built = edit::makeSetMediaGrade(document_.project(), media->id, media->color,
+                                             media->wheels, wanted)) {
+        document_.commands().execute(document_.project(), std::move(*built));
+        document_.commands().breakMerge();
+    }
+    renderCache_.clear();
+    monitor_->update();
+    clipStrip_->refresh();
+    refreshInstruments();
+    updateTitle();
+}
+
+void PreviewWindow::setGradeTarget(app::ColorPalette::GradeTarget target) {
+    palette_->setTarget(target);
+    // Which pane answers "which one" depends on the target: the shot strip
+    // names cuts, the bin names files.
+    const bool gradingFile = target == app::ColorPalette::GradeTarget::MediaFile;
+    if (workspace_ == "Color") {
+        bin_->setVisible(gradingFile);
+        clipStrip_->setVisible(!gradingFile);
+    }
+    // The chain and the scopes are reading the other grade now, so everything
+    // that shows a grade has to be asked again.
+    refreshGradeChain();
+    refreshInstruments();
+    syncGradeTarget();
+    syncColorManagement();
+    // The status line names the target, so it is stale the moment this changes.
+    updateChrome();
+}
+
+void PreviewWindow::syncGradeTarget() {
+    if (gradeClipTab_ == nullptr) {
+        return;
+    }
+    const bool onFile = palette_->target() == app::ColorPalette::GradeTarget::MediaFile;
+    // setChecked only emits when the value moves, so this does not re-enter.
+    gradeClipTab_->setChecked(!onFile);
+    gradeMediaTab_->setChecked(onFile);
+
+    QString caption;
+    const model::Sequence* sequence = liveSequence();
+    const model::Track* track = sequence != nullptr ? sequence->findTrack(selectedTrack_) : nullptr;
+    const model::Clip* clip = track != nullptr ? track->find(selectedClip_) : nullptr;
+    if (onFile) {
+        // A file can be chosen in the bin without any clip being selected, so
+        // this case does not require one: the file picked there wins, and the
+        // selected clip's own file is the fallback.
+        const model::MediaRefId wanted = palette_->media().isValid() ? palette_->media()
+                                         : clip != nullptr           ? clip->activeSource()
+                                                                     : model::MediaRefId{};
+        const model::MediaRef* media =
+            wanted.isValid() ? document_.project().findMedia(wanted) : nullptr;
+        if (media == nullptr) {
+            caption = tr("Open a file in the bin to grade it");
+        } else {
+            const QString name = media->name.empty()
+                                     ? QFileInfo(QString::fromStdString(media->path)).fileName()
+                                     : QString::fromStdString(media->name);
+            // How many cuts inherit this edit. The number is the whole reason
+            // to grade the file rather than the clip, so it is worth saying
+            // before somebody drags a wheel rather than after.
+            const int uses = edit::clipsUsingMedia(document_.project(), media->id);
+            caption = tr("%1 · source grade · %n use(s)", nullptr, std::max(1, uses)).arg(name);
+        }
+    } else if (clip == nullptr) {
+        caption = tr("Nothing selected");
+    } else {
+        caption =
+            tr("%1 · instance grade")
+                .arg(QString::fromStdString(clip->name.empty() ? std::string{"Clip"} : clip->name));
+    }
+    chrome::setElidedText(gradeTargetLabel_, caption);
 }
 
 void PreviewWindow::setWorkspace(const QString& name) {
@@ -2544,18 +2867,25 @@ void PreviewWindow::setWorkspace(const QString& name) {
     // The bin and the parameter panel are both about picture; Audio has a
     // console in the middle and a channel's chain on the right, and neither
     // of those wants a clip's motion controls beside it.
-    bin_->setVisible(!colour && !deliver && !audio);
+    // The bin comes back in Color when the target is the file: "grade the media
+    // file" needs somewhere to say *which* file, and the bin is already the
+    // place this program lists them. Picking one is a double-click, the same
+    // gesture that opens a file anywhere else.
+    const bool gradingFile =
+        colour && palette_->target() == app::ColorPalette::GradeTarget::MediaFile;
+    bin_->setVisible((!colour && !deliver && !audio) || gradingFile);
     effects_->setVisible(!deliver && !audio);
     scopes_->setVisible(colour);
     mixer_->setVisible(audio);
-    // Color is a different room: the gallery and the shot strip replace the
-    // bin and the timeline, the grade chain sits over the parameters, and
-    // the wheels take the bottom of the window.
-    gallery_->setVisible(colour);
-    clipStrip_->setVisible(colour);
+    // Color is a different room: the gallery replaces the bin and the grade
+    // chain sits over the parameters. The timeline stays, though -- a colourist
+    // moves through a reel shot by shot, and the cut is what says which shot
+    // comes next and how long it is. The shot strip is the quick way along it
+    // and sits under the viewer; the timeline underneath is the cut itself.
+    clipStrip_->setVisible(colour && !gradingFile);
     bars_.nodesBox->setVisible(colour);
     palette_->setVisible(colour);
-    bars_.timelinePane->setVisible(!colour && !deliver);
+    bars_.timelinePane->setVisible(!deliver);
     // Audio is a console: the mixer takes the centre, the loudness meter
     // and the channel's chain take the sides, and the picture stands down.
     bars_.audioSide->setVisible(audio);
@@ -2570,6 +2900,8 @@ void PreviewWindow::setWorkspace(const QString& name) {
         palette_->setSelection(selectedTrack_, selectedClip_);
         clipStrip_->setSelection(selectedTrack_, selectedClip_);
         refreshGradeChain();
+        syncGradeTarget();
+        syncColorManagement();
     }
     for (auto entry = bars_.workspaceTabs.constBegin(); entry != bars_.workspaceTabs.constEnd();
          ++entry) {
@@ -2618,6 +2950,11 @@ void PreviewWindow::updateChrome() {
     status.toolName = kToolNames[status.toolIndex];
     status.workspace = workspace_;
     status.binItems = bin_->count();
+    status.gradedClips = clipStrip_->gradedCount();
+    status.totalClips = clipStrip_->count();
+    status.gradeTarget = palette_->target() == app::ColorPalette::GradeTarget::MediaFile
+                             ? tr("grading the media file")
+                             : tr("grading the timeline clip");
     status.snapEnabled = timeline_->snapEnabled();
     status.zoomFraction = timeline_->zoomFraction();
     status.trackHeightFraction = timeline_->trackHeightFraction();
@@ -2642,12 +2979,66 @@ void PreviewWindow::goToEnd() {
     setPosition(liveSequence()->duration());
 }
 
+namespace {
+
+/// Who publishes this, and what it is called.
+///
+/// The two arguments QSettings files everything under, and two different
+/// things: Zaro is the publisher -- the same name the installer's Publisher
+/// field and the .deb's Maintainer carry -- and CutReel is the product.
+///
+/// Kept here rather than taken from `kAppName`: that follows the CMake project
+/// name, and a release that renamed the project would silently move every
+/// user's settings. This is a storage location, and a storage location should
+/// only move when somebody decides to move it.
+constexpr const char* kOrganisation = "Zaro";
+constexpr const char* kApplication = "CutReel";
+
+/// Move a previous version's settings across, once, if they are still the only
+/// ones there are.
+///
+/// The organisation these are filed under is the publisher, and it was spelled
+/// with the product's name until the publisher became Zaro. Qt derives the
+/// storage location from that string -- `HKCU\Software\<org>\<app>` on Windows,
+/// `~/.config/<org>/<app>.conf` on Linux, a `com.<org>.<app>` plist on macOS --
+/// so renaming it points the application at somewhere empty, and somebody who
+/// had arranged their panels would find the window back at its default size
+/// with no explanation.
+///
+/// Copied rather than moved: the old keys are left where they are, so a build
+/// from before this change still finds what it wrote. Only when the new
+/// location is empty, so this cannot undo a later change by overwriting it with
+/// a stale one.
+void migrateSettingsOrganisation() {
+    static bool done = false;
+    if (done) {
+        return;
+    }
+    done = true;
+
+    QSettings current{kOrganisation, kApplication};
+    if (!current.allKeys().isEmpty()) {
+        return;
+    }
+    QSettings previous{kApplication, kApplication};
+    const QStringList keys = previous.allKeys();
+    if (keys.isEmpty()) {
+        return;
+    }
+    for (const QString& key : keys) {
+        current.setValue(key, previous.value(key));
+    }
+}
+
+}  // namespace
+
 QSettings PreviewWindow::makeSettings() {
     // Two returns rather than a ternary: QSettings is a QObject and so is
     // neither copyable nor movable, and only a returned prvalue elides into
     // the caller's object.
     if (settingsPath_.isEmpty()) {
-        return QSettings("CutReel", "CutReel");
+        migrateSettingsOrganisation();
+        return QSettings(kOrganisation, kApplication);
     }
     return QSettings(settingsPath_, QSettings::IniFormat);
 }
@@ -2852,6 +3243,17 @@ void PreviewWindow::measureProgramme() {
     if (sequence == nullptr) {
         return;
     }
+    // Stop the transport first. Playback decodes on a thread of its own -- see
+    // PlaybackController::pumpAudio -- through the very media source this is
+    // about to read, and nothing guards one decoder against two threads: doing
+    // both at once faults inside avcodec. `stop` joins that thread, so past
+    // this line the decoder is this thread's alone.
+    //
+    // Stopped rather than locked, and deliberately. A lock would have to be
+    // held for a whole-programme decode, which is exactly as long as the wait
+    // cursor below is up -- the realtime path would starve and the device would
+    // drop out. Nothing was going to be heard through a modal wait anyway.
+    playback_.stop();
     QApplication::setOverrideCursor(Qt::WaitCursor);
     render::AudioGraph graph{*media_};
     const time::TimeRange whole{time::RationalTime{0, sequence->frameRate()}, sequence->duration()};

@@ -98,6 +98,21 @@ TEST_CASE("anything done to the picture stops a copy, and says what", "[smartren
         CHECK_FALSE(plan.possible);
         CHECK(plan.reason.find("graded") != std::string::npos);
     }
+    SECTION("a grade on the file, with nothing done to the clip") {
+        // The trap this guards: `isUntouched` is handed a clip and cannot see
+        // the file behind it, so a source grade would read as "nothing done"
+        // and the export would copy the ungraded bytes.
+        Straight world;
+        world.project.mediaMutable().front().color.exposure = 0.5;
+        const auto plan = world.plan();
+        CHECK_FALSE(plan.possible);
+        CHECK(plan.reason.find("source grade") != std::string::npos);
+    }
+    SECTION("a LUT on the file") {
+        Straight world;
+        world.project.mediaMutable().front().lut.path = "/luts/log_to_709.cube";
+        CHECK_FALSE(world.plan().possible);
+    }
     SECTION("a transform") {
         Straight world;
         world.clip().transform.scaleX = 1.2;

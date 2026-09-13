@@ -2,6 +2,9 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
+#include <string>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -340,6 +343,98 @@ TEST_CASE("A media reference reads its curve from the file until told otherwise"
     }
 }
 
+TEST_CASE("A source grade on a media file survives a round trip", "[io][color][source]") {
+    Fixture f;
+    model::MediaRef& ref = f.project.mediaMutable().front();
+    ref.color.exposure = 1.5;
+    ref.color.saturation = 120.0;
+    ref.wheels.slopeR = 1.1;
+    ref.lut.path = "/luts/log_to_709.cube";
+    ref.lut.amount = 0.8;
+    REQUIRE(ref.isGraded());
+
+    auto text = io::saveProjectToString(f.project);
+    REQUIRE(text);
+    auto reloaded = io::loadProjectFromString(*text);
+    REQUIRE(reloaded);
+    const model::MediaRef& back = reloaded->project.media().front();
+    CHECK(back.color.exposure == 1.5);
+    CHECK(back.color.saturation == 120.0);
+    CHECK(back.wheels.slopeR == 1.1);
+    CHECK(back.lut.path == "/luts/log_to_709.cube");
+    CHECK(back.lut.amount == 0.8);
+}
+
+TEST_CASE("An ungraded media file carries no grade on disk", "[io][color][source]") {
+    Fixture f;
+    auto text = io::saveProjectToString(f.project);
+    REQUIRE(text);
+    // A bin of a thousand ungraded files should not carry a thousand copies of
+    // "no correction", the same bargain the clip encoder makes.
+    CHECK(text->find("\"wheels\"") == std::string::npos);
+}
+
+// --- Known bug: a reset is undone by the save that should record it ---------
+//
+// `mergePreserved` copies back every key the writer did not emit, and the
+// writer omits a grade that is neutral. Together those mean "set it back to
+// zero and save" reloads with the old numbers still on it: the omission that
+// keeps ungraded projects small is indistinguishable, at merge time, from a
+// field this build has never heard of.
+//
+// Both cases below are tagged `!shouldfail`, so the suite stays honest about
+// what is broken and speaks up the day it starts working. Fixing it needs
+// preservation to know which keys this version owns, which is a change to how
+// every project file round-trips rather than a patch to the colour code.
+
+TEST_CASE("Clearing a source grade actually clears it on disk",
+          "[io][color][source][!shouldfail]") {
+    // The writer omits a neutral grade, and unknown-field preservation merges
+    // back anything the writer did not emit. Those two together are how a reset
+    // could be silently undone by the save that was meant to record it.
+    Fixture f;
+    f.project.mediaMutable().front().color.exposure = 1.5;
+    auto graded = io::saveProjectToString(f.project);
+    REQUIRE(graded);
+    auto loaded = io::loadProjectFromString(*graded);
+    REQUIRE(loaded);
+    REQUIRE(loaded->project.media().front().color.exposure == 1.5);
+
+    // Reset it, and save with the document it was read from in hand.
+    model::Project reset = loaded->project;
+    reset.mediaMutable().front().color = model::ColorCorrection{};
+    auto text = io::saveProjectToString(reset, loaded->unknown);
+    REQUIRE(text);
+    auto again = io::loadProjectFromString(*text);
+    REQUIRE(again);
+    CHECK(again->project.media().front().color.exposure == 0.0);
+}
+
+TEST_CASE("Clearing a CLIP grade actually clears it on disk",
+          "[io][color][preserve][!shouldfail]") {
+    Fixture f;
+    REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.v1), f.clip(0, 50))));
+    const model::ClipId clipId =
+        f.project.findSequence(f.sequenceId)->findTrack(f.v1)->clips().front().id;
+    f.project.findSequence(f.sequenceId)->findTrack(f.v1)->find(clipId)->color.exposure = 1.5;
+
+    auto graded = io::saveProjectToString(f.project);
+    REQUIRE(graded);
+    auto loaded = io::loadProjectFromString(*graded);
+    REQUIRE(loaded);
+
+    model::Project reset = loaded->project;
+    reset.findSequence(f.sequenceId)->findTrack(f.v1)->find(clipId)->color =
+        model::ColorCorrection{};
+    auto text = io::saveProjectToString(reset, loaded->unknown);
+    REQUIRE(text);
+    auto again = io::loadProjectFromString(*text);
+    REQUIRE(again);
+    CHECK(
+        again->project.findSequence(f.sequenceId)->findTrack(f.v1)->find(clipId)->color.exposure ==
+        0.0);
+}
+
 TEST_CASE("A sequence's delivery curve survives a round trip", "[io][tonemap]") {
     Fixture f;
     model::Sequence::Output delivery;
@@ -361,4 +456,150 @@ TEST_CASE("A sequence's delivery curve survives a round trip", "[io][tonemap]") 
         REQUIRE(bare);
         CHECK(bare->find("\"output\"") == std::string::npos);
     }
+}
+
+// --- Portable paths ---------------------------------------------------------
+//
+// The thing these are all about: a project and its footage that were moved
+// together should still find each other, and a project moved on its own
+// should still find footage that stayed where it was.
+
+namespace {
+
+/// A project in `dir` with one media reference pointing at a file that really
+/// exists at `mediaPath`, saved. Returns the project's path.
+std::string saveProjectPointingAt(const std::filesystem::path& dir,
+                                  const std::filesystem::path& mediaPath) {
+    std::filesystem::create_directories(dir);
+    std::filesystem::create_directories(mediaPath.parent_path());
+    std::ofstream{mediaPath} << "not really a movie";
+
+    Fixture f;
+    std::vector<model::MediaRef> media = f.project.media();
+    media.front().path = mediaPath.string();
+    f.project.setMedia(std::move(media));
+
+    const std::string path = (dir / "cut.cutreel").string();
+    REQUIRE(io::saveProject(f.project, path));
+    return path;
+}
+
+}  // namespace
+
+TEST_CASE("A project moved with its footage still finds it", "[io][save][paths]") {
+    TempDir dir;
+    const std::filesystem::path was = dir.path / "was";
+    const std::string project = saveProjectPointingAt(was, was / "footage" / "clip.mov");
+
+    // The whole folder somewhere else -- another disk, another machine, a
+    // different account. The absolute path in the file now names nothing.
+    const std::filesystem::path now = dir.path / "now";
+    std::filesystem::rename(was, now);
+
+    auto reopened = io::loadProject((now / "cut.cutreel").string());
+    REQUIRE(reopened);
+    const std::filesystem::path found{reopened->project.media().front().path};
+    CHECK(std::filesystem::exists(found));
+    CHECK(std::filesystem::equivalent(found, now / "footage" / "clip.mov"));
+}
+
+TEST_CASE("A project moved away from its footage still finds it", "[io][save][paths]") {
+    TempDir dir;
+    // Footage that does not travel with the project: a shared library, a card
+    // still in the reader, anything on another volume.
+    const std::filesystem::path media = dir.path / "library" / "clip.mov";
+    const std::filesystem::path was = dir.path / "was";
+    const std::string project = saveProjectPointingAt(was, media);
+
+    const std::filesystem::path now = dir.path / "elsewhere" / "deeper";
+    std::filesystem::create_directories(now.parent_path());
+    std::filesystem::rename(was, now);
+
+    auto reopened = io::loadProject((now / "cut.cutreel").string());
+    REQUIRE(reopened);
+    // The relative path names nothing from here, so the absolute one wins --
+    // which is the whole reason both are written.
+    const std::filesystem::path found{reopened->project.media().front().path};
+    CHECK(std::filesystem::exists(found));
+    CHECK(std::filesystem::equivalent(found, media));
+}
+
+TEST_CASE("A copied project folder edits its own copies", "[io][save][paths]") {
+    TempDir dir;
+    const std::filesystem::path original = dir.path / "original";
+    const std::string project = saveProjectPointingAt(original, original / "footage" / "clip.mov");
+
+    const std::filesystem::path copy = dir.path / "copy";
+    std::filesystem::copy(original, copy, std::filesystem::copy_options::recursive);
+
+    auto reopened = io::loadProject((copy / "cut.cutreel").string());
+    REQUIRE(reopened);
+    // Both files exist. Reaching back into the folder this one was copied out
+    // of would mean grading somebody's other project by accident.
+    const std::filesystem::path found{reopened->project.media().front().path};
+    CHECK(std::filesystem::equivalent(found, copy / "footage" / "clip.mov"));
+}
+
+TEST_CASE("A project file written before any of this loads as it always did", "[io][save][paths]") {
+    TempDir dir;
+    const std::filesystem::path media = dir.path / "footage" / "clip.mov";
+    std::filesystem::create_directories(media.parent_path());
+    std::ofstream{media} << "not really a movie";
+
+    // Every project file written before the relative twin existed looks like
+    // this: one path, and it is the absolute one.
+    const std::string text = R"({
+        "zaro": {"schemaVersion": 1},
+        "media": [{"id": 1, "path": ")" +
+                             std::filesystem::path{media}.generic_string() + R"("}],
+        "sequences": [{"id": 2, "frameRate": "25"}]})";
+
+    auto loaded = io::loadProjectFromString(text, dir.path.string());
+    REQUIRE(loaded);
+    REQUIRE(loaded->project.media().size() == 1);
+    CHECK(std::filesystem::equivalent(std::filesystem::path{loaded->project.media().front().path},
+                                      media));
+
+    SECTION("and gains its twin the next time it is saved") {
+        const std::string project = (dir.path / "cut.cutreel").string();
+        REQUIRE(io::saveProject(loaded->project, project, loaded->unknown));
+        std::ifstream file{project, std::ios::binary};
+        std::ostringstream buffer;
+        buffer << file.rdbuf();
+        CHECK(buffer.str().find(R"("relativePath": "footage/clip.mov")") != std::string::npos);
+    }
+}
+
+TEST_CASE("A relinked file does not keep the old file's relative path", "[io][save][paths]") {
+    TempDir dir;
+    const std::filesystem::path first = dir.path / "footage" / "one.mov";
+    const std::string project = saveProjectPointingAt(dir.path, first);
+
+    auto opened = io::loadProject(project);
+    REQUIRE(opened);
+
+    // Relinked to a file in a different folder, the way the relink dialog
+    // does it: the path changes and nothing else does.
+    const std::filesystem::path second = dir.path / "rushes" / "two.mov";
+    std::filesystem::create_directories(second.parent_path());
+    std::ofstream{second} << "also not a movie";
+    std::vector<model::MediaRef> media = opened->project.media();
+    media.front().path = second.string();
+    opened->project.setMedia(std::move(media));
+
+    REQUIRE(io::saveProject(opened->project, project, opened->unknown));
+    auto reopened = io::loadProject(project);
+    REQUIRE(reopened);
+    CHECK(std::filesystem::equivalent(std::filesystem::path{reopened->project.media().front().path},
+                                      second));
+}
+
+TEST_CASE("A project written without a folder to be relative to writes no twins",
+          "[io][save][paths]") {
+    Fixture f;
+    auto text = io::saveProjectToString(f.project);
+    REQUIRE(text);
+    // Nothing to be relative to, so nothing is claimed. This is the shape
+    // every caller that builds a project in memory gets.
+    CHECK(text->find("relativePath") == std::string::npos);
 }

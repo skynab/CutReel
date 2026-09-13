@@ -400,6 +400,12 @@ struct PastedClip {
 /// is shorter than the clip: at that point there is no honest answer, and
 /// silently shortening the clip would ripple a cut somebody did not ask to
 /// change.
+///
+/// **A still is never too short.** One picture can be held for as long as
+/// somebody wants, so a length is not a thing it can fail to have -- and
+/// swapping a placeholder for the finished artwork is exactly what this is
+/// for. Its in point goes to zero, since there is no frame 500 of a
+/// photograph, and the clip keeps its length.
 [[nodiscard]] Result<CommandPtr> makeReplaceSource(model::Project& project,
                                                    const EditTarget& target, model::ClipId clip,
                                                    model::MediaRefId media);
@@ -511,6 +517,18 @@ struct PastedClip {
 /// somebody typing a note, quitting, and being told there was nothing to save.
 [[nodiscard]] Result<CommandPtr> makeSetMediaNotes(model::Project& project, model::MediaRefId media,
                                                    const std::string& notes);
+
+/// Grade the file itself, under every clip that reads it.
+///
+/// The source grade of `model::MediaRef`: one answer to "what should this
+/// footage look like", applied before each clip's own correction rather than
+/// instead of it. Grading a file that four clips use is one edit and one undo
+/// step, where grading the four clips is four of each and four chances for them
+/// to end up saying something slightly different.
+[[nodiscard]] Result<CommandPtr> makeSetMediaGrade(model::Project& project, model::MediaRefId media,
+                                                   const model::ColorCorrection& color,
+                                                   const model::ColorWheels& wheels,
+                                                   const model::LutRef& lut = {});
 
 /// Point a media reference at a different file.
 ///

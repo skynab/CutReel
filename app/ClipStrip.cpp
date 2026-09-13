@@ -75,9 +75,17 @@ void ClipStrip::refresh() {
                 // Graded means anything has been decided about this shot's
                 // colour -- a wheel moved, a correction typed, a look put on
                 // it. The mark answers "have I been here", so it has to catch
-                // all three rather than only the one this panel edits.
-                shot.graded =
-                    !clip.wheels.isIdentity() || !clip.color.isIdentity() || !clip.lut.path.empty();
+                // all of them rather than only the one this panel edits.
+                //
+                // A grade on the file counts too: the shot arrives graded
+                // whether the decision was recorded against this cut of it or
+                // against the file, and a mark that ignored the second would
+                // send somebody back to a shot that is already answered for.
+                const model::MediaRef* media = clip.activeSource().isValid()
+                                                   ? project_->findMedia(clip.activeSource())
+                                                   : nullptr;
+                shot.graded = !clip.wheels.isIdentity() || !clip.color.isIdentity() ||
+                              !clip.lut.path.empty() || (media != nullptr && media->isGraded());
                 shots_.push_back(std::move(shot));
             }
         }

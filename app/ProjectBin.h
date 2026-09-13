@@ -55,13 +55,31 @@ public:
     /// item in this panel's overflow menu, and both should be the same action.
     void importFiles();
 
-    /// Import these paths, and return how many the project gained.
+    /// What an import brought in.
+    struct Imported {
+        /// Every file the paths named that the project now holds, in the order
+        /// they were given -- including any that were already there.
+        ///
+        /// Both, because the caller that has somewhere to put them does not
+        /// care which were new: a take let go of over the timeline goes down
+        /// whether or not the bin already had it, and being silently skipped
+        /// for having been imported an hour ago is not an answer anybody could
+        /// work out from the screen.
+        std::vector<model::MediaRefId> media;
+        /// How many of them the project gained, for the line along the bottom.
+        int added{0};
+    };
+
+    /// Import these paths, and say what came of it.
     ///
-    /// The action behind both ways of asking -- the file dialog and a drop
-    /// from the file manager -- and behind the test that checks either. A
-    /// folder among them is listed rather than refused: dropping a card's
-    /// folder is how somebody hands over a shoot.
-    int importPaths(const QStringList& paths);
+    /// The action behind every way of asking -- the file dialog, a drop onto
+    /// this pane, a drop onto the timeline -- and behind the tests that check
+    /// them. A folder among them is listed rather than refused: dropping a
+    /// card's folder is how somebody hands over a shoot.
+    Imported importMedia(const QStringList& paths);
+
+    /// Import these paths, and return how many the project gained.
+    int importPaths(const QStringList& paths) { return importMedia(paths).added; }
 
     /// Transcode files into an editing codec and import the results.
     ///
@@ -70,6 +88,13 @@ public:
     [[nodiscard]] Status importTranscoded(const std::vector<std::string>& paths,
                                           const std::string& destination,
                                           const std::string& videoCodec);
+
+    /// Say something in the line along the bottom of the pane.
+    ///
+    /// Public because a drop that lands on the timeline is still an import,
+    /// and this line is where this program says what came of one. Replaced by
+    /// the next refresh, which is what a remark in passing should be.
+    void note(const QString& text);
 
     /// How many media references the project holds, for the status bar.
     [[nodiscard]] int count() const;
@@ -124,6 +149,14 @@ signals:
     /// The footage's curve was corrected, so anything showing it must redraw
     /// and the media has to be reopened.
     void colorChanged();
+    /// A project file was let go of over this pane.
+    ///
+    /// A request, not the open: what replaces the window is the window's to
+    /// decide, and it is the only thing that knows about locks, recovery
+    /// files and the project that is being left behind. The pane's whole part
+    /// in it is noticing that what landed was a project rather than footage.
+    void projectDropped(const QString& path);
+
     /// Somebody asked for a title from the Titles tab.
     ///
     /// The pane does not make one: a title is a clip on a sequence, and what

@@ -517,6 +517,31 @@ Result<CommandPtr> makeReplaceSource(Project& project, const EditTarget& target,
     }
 
     const time::Rational& rate = existing.sourceRange.start().rate();
+
+    // A still is never too short, whatever the clip's length.
+    //
+    // There is one picture and it can be held for as long as somebody wants,
+    // so "that media is shorter than the clip" is a sentence with no meaning
+    // attached to a photograph -- and it is what a swap of a placeholder for
+    // the final artwork used to be answered with, which is the swap this
+    // operation exists for.
+    //
+    // Its in point goes to zero rather than staying where the footage's was:
+    // there is no frame 500 of one picture. The length is kept, which also
+    // keeps any keyframes on the clip advancing -- animation is read in source
+    // time, so a source range of one frame would hold every one of them at the
+    // same instant. It is the range a still is given when it is dragged onto
+    // the timeline in the first place, for the same reason.
+    if (ref->info.isStill()) {
+        return modifyClip(
+            project, target, clipId, "Replace footage", "replace:" + idText(clipId),
+            [media, range = time::TimeRange{time::RationalTime{0, rate},
+                                            existing.sourceRange.duration()}](Clip& clip) {
+                clip.source = media;
+                clip.sourceRange = range;
+            });
+    }
+
     const time::RationalTime available = time::RationalTime::fromSeconds(ref->info.duration, rate);
     if (available < existing.sourceRange.duration()) {
         return Error{ErrorCode::InvalidData, "that media is shorter than the clip"};

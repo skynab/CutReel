@@ -198,3 +198,67 @@ TEST_CASE("A fully transparent pixel is left alone", "[render][grade]") {
     CHECK(empty.at(0, 0).r == 0.0F);
     CHECK(empty.at(0, 0).a == 0.0F);
 }
+
+TEST_CASE("A source grade is applied before the clip's own", "[render][grade][source]") {
+    // Two stops on the file and one on the clip: the picture should arrive at
+    // three, because the clip grades what the file already answered for.
+    model::ColorCorrection onFile;
+    onFile.exposure = 2.0;
+    model::ColorCorrection onClip;
+    onClip.exposure = 1.0;
+
+    const render::GradeConstants source = render::gradeConstantsFor(onFile);
+    const render::GradeConstants clip = render::gradeConstantsFor(onClip);
+
+    float r = 0.1F;
+    float g = 0.1F;
+    float b = 0.1F;
+    render::gradePixel(clip, r, g, b, nullptr, nullptr, nullptr, 1.0F, nullptr, &source);
+    CHECK(r == Approx(0.1F * 8.0F));
+    CHECK(g == Approx(0.1F * 8.0F));
+    CHECK(b == Approx(0.1F * 8.0F));
+}
+
+TEST_CASE("The two grades do not commute, which is why they stay separate",
+          "[render][grade][source]") {
+    // White balance is a channel multiply and contrast is a power about middle
+    // grey. Balancing then stretching is not stretching then balancing, so
+    // there is no single correction that means "the file's, then the clip's" --
+    // the reason `MediaRef` keeps its grade rather than folding it into one.
+    model::ColorCorrection balance;
+    balance.temperature = 60.0;
+    model::ColorCorrection contrast;
+    contrast.contrast = 70.0;
+
+    const auto run = [](const model::ColorCorrection& first, const model::ColorCorrection& second) {
+        const render::GradeConstants a = render::gradeConstantsFor(first);
+        const render::GradeConstants b = render::gradeConstantsFor(second);
+        float r = 0.42F;
+        float g = 0.31F;
+        float bl = 0.19F;
+        render::gradePixel(b, r, g, bl, nullptr, nullptr, nullptr, 1.0F, nullptr, &a);
+        return Colour{r, g, bl};
+    };
+
+    const Colour balanceFirst = run(balance, contrast);
+    const Colour contrastFirst = run(contrast, balance);
+    CHECK(balanceFirst.r != Approx(contrastFirst.r));
+}
+
+TEST_CASE("A source grade alone still reaches the picture", "[render][grade][source]") {
+    // The clip asks for nothing, so its own constants are the identity. The
+    // file's grade must still land: an ungraded clip over graded media is not
+    // "no grade".
+    model::ColorCorrection onFile;
+    onFile.saturation = 0.0;
+    const render::GradeConstants source = render::gradeConstantsFor(onFile);
+    const render::GradeConstants none;
+    REQUIRE(none.isIdentity());
+
+    Colour in{0.6F, 0.2F, 0.35F};
+    const float grey = luma(in);
+    render::gradePixel(none, in.r, in.g, in.b, nullptr, nullptr, nullptr, 1.0F, nullptr, &source);
+    CHECK(in.r == Approx(grey));
+    CHECK(in.g == Approx(grey));
+    CHECK(in.b == Approx(grey));
+}

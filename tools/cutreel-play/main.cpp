@@ -29,7 +29,7 @@
 namespace {
 
 void printUsage() {
-    std::puts("usage: zaro-play <project.cutreel> [options]");
+    std::puts("usage: cutreel-play <project.cutreel> [options]");
     std::puts("");
     std::puts("  --start <frame>   where to begin (default 0)");
     std::puts("  --seconds <n>     how long to play (default: to the end)");
@@ -43,7 +43,7 @@ void printUsage() {
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (zaro::tools::handledVersion(argc, argv, "zaro-play")) {
+    if (zaro::tools::handledVersion(argc, argv, "cutreel-play")) {
         return 0;
     }
     if (argc < 2) {
@@ -76,7 +76,7 @@ int main(int argc, char** argv) {
         } else if (arg == "--queue" && i + 1 < argc) {
             queueDepth = static_cast<std::size_t>(std::atoll(argv[++i]));
         } else {
-            std::fprintf(stderr, "zaro-play: unknown option '%s'\n", arg.c_str());
+            std::fprintf(stderr, "cutreel-play: unknown option '%s'\n", arg.c_str());
             return 2;
         }
     }
@@ -85,13 +85,13 @@ int main(int argc, char** argv) {
 
     auto loaded = zaro::io::loadProject(projectPath);
     if (!loaded) {
-        std::fprintf(stderr, "zaro-play: %s\n", loaded.error().toString().c_str());
+        std::fprintf(stderr, "cutreel-play: %s\n", loaded.error().toString().c_str());
         return 1;
     }
     const zaro::model::Project& project = loaded->project;
     const zaro::model::Sequence* sequence = project.findSequence(project.activeSequence());
     if (sequence == nullptr) {
-        std::fprintf(stderr, "zaro-play: this project has no active sequence\n");
+        std::fprintf(stderr, "cutreel-play: this project has no active sequence\n");
         return 1;
     }
 
@@ -103,7 +103,7 @@ int main(int argc, char** argv) {
 
     auto sourceOpened = zaro::platform::ffmpeg::ProjectMediaSource::open(project);
     if (!sourceOpened) {
-        std::fprintf(stderr, "zaro-play: %s\n", sourceOpened.error().toString().c_str());
+        std::fprintf(stderr, "cutreel-play: %s\n", sourceOpened.error().toString().c_str());
         return 1;
     }
     zaro::render::RenderGraph video{**sourceOpened};
@@ -121,7 +121,7 @@ int main(int argc, char** argv) {
             gpuVideo =
                 std::make_unique<zaro::platform::qrhi::GpuRenderGraph>(*compositor, **sourceOpened);
         } else {
-            std::fprintf(stderr, "zaro-play: no GPU (%s); compositing on the CPU\n",
+            std::fprintf(stderr, "cutreel-play: no GPU (%s); compositing on the CPU\n",
                          created.error().message().c_str());
         }
     }
@@ -130,7 +130,7 @@ int main(int argc, char** argv) {
     if (useAudio) {
         auto opened = zaro::platform::sdl::AudioSink::open(wantedAudioRate, kChannels);
         if (!opened) {
-            std::fprintf(stderr, "zaro-play: %s\n", opened.error().toString().c_str());
+            std::fprintf(stderr, "cutreel-play: %s\n", opened.error().toString().c_str());
             return 1;
         }
         sink = std::move(*opened);

@@ -309,6 +309,40 @@ jobs:
         if: matrix.artifact != ''
         run: cpack --preset ${{ matrix.preset }}
 
+      # An ad-hoc signature is the most macOS will give a build with no
+      # Developer ID, and it is worth something only for as long as it is
+      # valid. macdeployqt rewrites every load path in the bundle and signs
+      # afterwards; if that order ever changes, or a later step touches a
+      # binary after signing, the image ships a signature that no longer
+      # matches its contents. On Apple silicon that is not a warning -- the
+      # kernel refuses to start the process, quarantine or no quarantine -- and
+      # the dialog it produces is the same "is damaged" one an unnotarised
+      # build already shows, so a real breakage would be invisible underneath
+      # the expected complaint until a user hit it.
+      #
+      # Run against the mounted image, so what is checked is what ships. The
+      # mount point is given explicitly because the volume name has a space in
+      # it and hdiutil's output columns do not survive that.
+      #
+      # spctl is printed and not checked: it rejects this bundle by design.
+      # Without notarisation there is no verdict it could return that would
+      # pass, and the README says so where users will read it.
+      - name: Verify the app bundle's signature (macOS)
+        if: runner.os == 'macOS' && matrix.artifact != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          dmg=$(ls build/${{ matrix.preset }}/CutReel-*.dmg)
+          echo "Verifying $dmg"
+          mount=$(mktemp -d)
+          trap 'hdiutil detach "$mount" -quiet || true' EXIT
+          hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mount"
+          ls -l "$mount"
+          codesign --display --verbose=2 "$mount/cutreel.app"
+          codesign --verify --deep --strict --verbose "$mount/cutreel.app"
+          echo "--- Gatekeeper's verdict, for the record ---"
+          spctl --assess --type execute --verbose=4 "$mount/cutreel.app" || true
+
       # The MSI cannot carry an icon, so the file people actually download is a
       # Burn bundle wrapping it. See cmake/bundle.wxs.in.
       - name: Wrap the MSI in a bootstrapper
@@ -347,7 +381,7 @@ jobs:
           mkdir -p dist
           # CPack drops the archive in the build tree next to everything else.
           find "build/${{ matrix.preset }}" -maxdepth 1 \
-            \( -name 'CutReel-*.tar.gz' -o -name 'CutReel-*.exe' \
+            \( -name 'CutReel-*.dmg' -o -name 'CutReel-*.exe' \
                -o -name 'cutreel_*.deb' \) -exec cp {} dist/ \;
           ls -l dist
           # An empty upload is a green job that shipped nothing, which is worse
@@ -421,7 +455,7 @@ jobs:
           echo "checked $checked ELF objects"
           test "$checked" -gt 0
           # And then actually run the tools, with the environment emptied.
-          for tool in zaro-probe zaro-render zaro-cut zaro-otio; do
+          for tool in cutreel-probe cutreel-render cutreel-cut cutreel-otio; do
             env -i "PATH=$PATH" "HOME=$HOME" "/tmp/unpacked/usr/bin/$tool" --version || status=1
           done
           exit $status
@@ -496,7 +530,7 @@ jobs:
           # exists to test. Xvfb with llvmpipe behind it is the same recipe the
           # GUI job uses, and xcb is named rather than left to Qt so that the
           # plugin under test is the one that gets used.
-          zaro-cut /tmp/smoke.cutreel testdata/media/ladder_prores.mov
+          cutreel-cut /tmp/smoke.cutreel testdata/media/ladder_prores.mov
           xvfb-run -a --server-args="-screen 0 1280x800x24" \
             cutreel /tmp/smoke.cutreel --selftest --capture /tmp/smoke.png
           # --selftest prints what it measured, but an exit code can be zero
@@ -528,13 +562,13 @@ jobs:
       # platform-specific enough to be worth porting them for.
       - name: Verify frame exactness against FFmpeg
         if: runner.os != 'Windows'
-        run: ZARO_FRAME=build/${{ matrix.preset }}/bin/zaro-frame ./scripts/verify-frame-exact.sh
+        run: CUTREEL_FRAME=build/${{ matrix.preset }}/bin/cutreel-frame ./scripts/verify-frame-exact.sh
 
       - name: Verify audio/video sync in a rendered file
         if: runner.os != 'Windows'
         run: |
-          ZARO_CUT=build/${{ matrix.preset }}/bin/zaro-cut \
-          ZARO_RENDER=build/${{ matrix.preset }}/bin/zaro-render \
+          CUTREEL_CUT=build/${{ matrix.preset }}/bin/cutreel-cut \
+          CUTREEL_RENDER=build/${{ matrix.preset }}/bin/cutreel-render \
           ./scripts/verify-av-sync.sh
 
   format:
