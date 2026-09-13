@@ -248,6 +248,20 @@ public:
     /// that already have one.
     [[nodiscard]] commands::Context editContext();
 
+    /// Run one analysis on a worker thread, over a copy of the project.
+    ///
+    /// `analyse` is handed an input pointing at that copy and at decoders
+    /// opened for the call alone, and runs on the worker; it must touch nothing
+    /// else on this window. Everything before and after it -- the snapshot, and
+    /// applying whatever came back -- runs here.
+    ///
+    /// Returns false if it was stopped, or if the decoders would not open. The
+    /// caller captures the result it wants; nothing is applied for it, because
+    /// what to do with a half-finished analysis differs by analysis.
+    bool analyseInBackground(const QString& message, const QString& stopLabel,
+                             const std::function<void(const commands::AnalysisInput&,
+                                                      const commands::Progress&)>& analyse);
+
     /// Show what an edit did.
     ///
     /// The five or six lines every operation used to end with. They are the
@@ -307,6 +321,15 @@ public:
 
     /// Steady the selected clip.
     Result<render::StabiliseResult> stabiliseClip(const commands::Progress& tell = {});
+
+    /// Which thread the last background analysis actually ran on.
+    ///
+    /// Here so a test can assert that it is not this one. That an analysis runs
+    /// off the UI thread is the whole point of analyseInBackground and is
+    /// invisible from the outside: putting the work back on this thread would
+    /// leave every other test passing, and only reappear as the window going
+    /// dead for a minute on somebody's long shot.
+    [[nodiscard]] std::thread::id lastAnalysisThread() const { return lastAnalysisThread_; }
 
     /// Point the project's media at files that moved.
     Result<io::RelinkReport> relinkMedia(const std::string& root);
@@ -1123,6 +1146,10 @@ private:
     bool warnedNoAudioDevice_{false};
 
     std::thread waveformThread_;
+
+    /// Set by the worker in analyseInBackground, read here after it is joined --
+    /// which is the happens-before that makes a plain member enough.
+    std::thread::id lastAnalysisThread_;
     std::atomic<bool> shuttingDown_{false};
 };
 

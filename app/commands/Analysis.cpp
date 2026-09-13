@@ -35,6 +35,19 @@ render::RenderGraph graphFor(const Context& context) {
     return graph;
 }
 
+/// The same, over what an analysis was handed.
+///
+/// No render cache, and that is the difference. The cache belongs to the
+/// window, which is on another thread, and an analysis is the one thing that
+/// gains nothing from one anyway: it walks a shot forward once and never asks
+/// for a frame twice.
+render::RenderGraph graphFor(const AnalysisInput& input) {
+    render::RenderGraph graph{*input.media};
+    graph.setProject(input.project);
+    graph.setTextRasterizer(input.text);
+    return graph;
+}
+
 }  // namespace
 
 /// Match the selected clip to the frame being held as the reference.
@@ -94,16 +107,16 @@ Result<render::ShotMatch> matchToReference(const Context& context,
 /// **On the composited picture, not on the decoded source.** The mask lives
 /// in output coordinates over whatever is on screen, so what it has to
 /// follow is what is on screen.
-Result<MaskTrack> trackMaskForward(const Context& context, const Progress& tell) {
-    const model::Sequence* sequence = context.sequence();
-    const model::Clip* clip = context.selectedClip();
-    if (clip == nullptr || context.media == nullptr) {
+Result<MaskTrackAnalysis> analyseMaskTrack(const AnalysisInput& input, const Progress& tell) {
+    const model::Sequence* sequence = input.sequenceOrNull();
+    const model::Clip* clip = input.selectedClip();
+    if (clip == nullptr || input.media == nullptr) {
         return Error{ErrorCode::InvalidData, "select the clip whose mask should be tracked"};
     }
     if (!clip->mask.isSet()) {
         return Error{ErrorCode::InvalidData, "that clip has no mask to track"};
     }
-    const time::RationalTime from = context.position;
+    const time::RationalTime from = input.position;
     if (from < clip->start() || from >= clip->endExclusive()) {
         return Error{ErrorCode::InvalidData, "put the playhead over the clip first"};
     }
@@ -113,7 +126,7 @@ Result<MaskTrack> trackMaskForward(const Context& context, const Progress& tell)
         return Error{ErrorCode::InvalidData, "that mask has no area to track"};
     }
 
-    render::RenderGraph graph = graphFor(context);
+    render::RenderGraph graph = graphFor(input);
 
     const auto rate = sequence->frameRate();
     const auto step = time::RationalTime{1, rate};
@@ -131,8 +144,9 @@ Result<MaskTrack> trackMaskForward(const Context& context, const Progress& tell)
     render::PatchWindow window;
     window.search = std::clamp(static_cast<double>(sequence->width()) * 0.02, 8.0, 48.0);
 
-    model::Curve xs;
-    model::Curve ys;
+    MaskTrackAnalysis analysis;
+    model::Curve& xs = analysis.x;
+    model::Curve& ys = analysis.y;
     double dx = clip->parameterAt(model::Param::MaskX, from);
     double dy = clip->parameterAt(model::Param::MaskY, from);
     // Both curves start with where the mask already is, so the frames
@@ -140,7 +154,7 @@ Result<MaskTrack> trackMaskForward(const Context& context, const Progress& tell)
     xs.set(model::Keyframe{clip->sourceTimeAt(from), dx, model::Interpolation::Linear, {}, {}});
     ys.set(model::Keyframe{clip->sourceTimeAt(from), dy, model::Interpolation::Linear, {}, {}});
 
-    MaskTrack result;
+    MaskTrack& result = analysis.report;
     result.confidence = 1.0;
     const std::int64_t totalFrames = (clip->endExclusive() - from).rescaledTo(rate).frames();
     std::int64_t doneFrames = 0;
@@ -183,14 +197,29 @@ Result<MaskTrack> trackMaskForward(const Context& context, const Progress& tell)
                                                  ? "there is nothing after this frame to track into"
                                                  : result.stopped};
     }
+    return analysis;
+}
 
-    auto built = edit::makeTrackMask(context.project(), context.target(), context.clip, xs, ys);
+Status applyMaskTrack(const Context& context, const MaskTrackAnalysis& analysed) {
+    auto built = edit::makeTrackMask(context.project(), context.target(), context.clip, analysed.x,
+                                     analysed.y);
     if (!built) {
         return built.error();
     }
     context.commands().execute(context.project(), std::move(*built));
     context.commands().breakMerge();
-    return result;
+    return {};
+}
+
+Result<MaskTrack> trackMaskForward(const Context& context, const Progress& tell) {
+    auto analysed = analyseMaskTrack(inputFor(context), tell);
+    if (!analysed) {
+        return analysed.error();
+    }
+    if (Status applied = applyMaskTrack(context, *analysed); !applied) {
+        return applied.error();
+    }
+    return analysed->report;
 }
 
 /// Hold the selected clip still.
@@ -201,10 +230,10 @@ Result<MaskTrack> trackMaskForward(const Context& context, const Progress& tell)
 /// computed, which would make the analysis chase its own tail. It also has
 /// whatever is layered over the clip in it, which moved for reasons of its
 /// own.
-Result<render::StabiliseResult> stabiliseClip(const Context& context, const Progress& tell) {
-    const model::Sequence* sequence = context.sequence();
-    const model::Clip* clip = context.selectedClip();
-    if (clip == nullptr || context.media == nullptr) {
+Result<StabiliseAnalysis> analyseStabilise(const AnalysisInput& input, const Progress& tell) {
+    const model::Sequence* sequence = input.sequenceOrNull();
+    const model::Clip* clip = input.selectedClip();
+    if (clip == nullptr || input.media == nullptr) {
         return Error{ErrorCode::InvalidData, "select the clip to stabilise"};
     }
     if (clip->graphic.kind != model::GraphicKind::None || clip->nested.isValid() ||
@@ -221,13 +250,15 @@ Result<render::StabiliseResult> stabiliseClip(const Context& context, const Prog
         times.push_back(clip->activeSourceTimeAt(at));
     }
 
-    auto analysed = render::stabilise(*context.media, clip->activeSource(), times, {}, tell);
+    auto analysed = render::stabilise(*input.media, clip->activeSource(), times, {}, tell);
     if (!analysed) {
-        return analysed;
+        return analysed.error();
     }
 
-    model::Curve xs;
-    model::Curve ys;
+    StabiliseAnalysis result;
+    result.report = *analysed;
+    model::Curve& xs = result.x;
+    model::Curve& ys = result.y;
     for (std::size_t i = 0; i < analysed->x.size() && i < timeline.size(); ++i) {
         // Keyframes at the clip's own source times, like every other curve
         // in the project: a stabilised clip that is then trimmed or moved
@@ -239,15 +270,29 @@ Result<render::StabiliseResult> stabiliseClip(const Context& context, const Prog
     if (xs.empty()) {
         return Error{ErrorCode::InvalidData, "there is not enough of this clip to stabilise"};
     }
+    return result;
+}
 
-    auto built = edit::makeStabilise(context.project(), context.target(), context.clip, xs, ys,
-                                     analysed->zoom);
+Status applyStabilise(const Context& context, const StabiliseAnalysis& analysed) {
+    auto built = edit::makeStabilise(context.project(), context.target(), context.clip, analysed.x,
+                                     analysed.y, analysed.report.zoom);
     if (!built) {
         return built.error();
     }
     context.commands().execute(context.project(), std::move(*built));
     context.commands().breakMerge();
-    return analysed;
+    return {};
+}
+
+Result<render::StabiliseResult> stabiliseClip(const Context& context, const Progress& tell) {
+    auto analysed = analyseStabilise(inputFor(context), tell);
+    if (!analysed) {
+        return analysed.error();
+    }
+    if (Status applied = applyStabilise(context, *analysed); !applied) {
+        return applied.error();
+    }
+    return analysed->report;
 }
 
 /// Recompose the selected clip to fill the sequence's frame.

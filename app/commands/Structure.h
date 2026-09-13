@@ -23,6 +23,19 @@ Result<model::ClipId> pinTo(const Context& context, model::ClipId host);
 /// reporting none.
 std::int32_t detectScenes(const Context& context, const Progress& tell);
 
+/// The long half of detectScenes: decode the clip and say where it changes,
+/// writing nothing. Split so it can be run on a worker thread; see
+/// AnalysisInput for what it may and may not touch.
+///
+/// Empty when there is nothing to look at, when nothing was found, and when
+/// somebody stopped it -- three situations the caller tells apart by what it
+/// already knows, and which mean the same thing here: no cuts to make.
+std::vector<time::RationalTime> analyseScenes(const AnalysisInput& input, const Progress& tell);
+
+/// The short half: cut the clip at those points, as one undo step. Main thread
+/// only. Returns how many cuts were made.
+std::int32_t applyScenes(const Context& context, const std::vector<time::RationalTime>& points);
+
 /// Pin the selected clip to whatever is under it at the playhead.
 ///
 /// "Under" means the topmost audible video track below the selected one, since

@@ -49,6 +49,26 @@ Result<render::ShotMatch> matchToReference(const Context& context,
 /// hung with no way out but to kill it.
 Result<MaskTrack> trackMaskForward(const Context& context, const Progress& tell = {});
 
+/// What tracking found, before any of it is in the project.
+struct MaskTrackAnalysis {
+    MaskTrack report;
+    model::Curve x;
+    model::Curve y;
+};
+
+/// The long half of trackMaskForward: composite every frame and follow the
+/// mask, writing nothing.
+///
+/// Split out so it can be run on a worker thread. It reads only what is in
+/// `input` -- see AnalysisInput for why that has to be a copy -- and hands back
+/// the curves rather than executing a command, because the command has to be
+/// executed against the window's live project by the thread that owns it.
+Result<MaskTrackAnalysis> analyseMaskTrack(const AnalysisInput& input, const Progress& tell = {});
+
+/// The short half: put the tracked curves into the project, as one undo step.
+/// Main thread only.
+Status applyMaskTrack(const Context& context, const MaskTrackAnalysis& analysed);
+
 /// Hold the selected clip still.
 ///
 /// **On the clip's own frames, not on the composite.** What is being
@@ -60,6 +80,18 @@ Result<MaskTrack> trackMaskForward(const Context& context, const Progress& tell 
 ///
 /// Reports progress and can be stopped, for the reason trackMaskForward can.
 Result<render::StabiliseResult> stabiliseClip(const Context& context, const Progress& tell = {});
+
+/// What the stabiliser measured, before any of it is in the project.
+struct StabiliseAnalysis {
+    render::StabiliseResult report;
+    model::Curve x;
+    model::Curve y;
+};
+
+/// The long half of stabiliseClip, and the short half. Split for the reason
+/// analyseMaskTrack is.
+Result<StabiliseAnalysis> analyseStabilise(const AnalysisInput& input, const Progress& tell = {});
+Status applyStabilise(const Context& context, const StabiliseAnalysis& analysed);
 
 /// Recompose the selected clip to fill the sequence's frame.
 ///

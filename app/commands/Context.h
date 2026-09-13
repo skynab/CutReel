@@ -76,4 +76,59 @@ struct Context {
     }
 };
 
+/// What an analysis reads, with no way to write anything.
+///
+/// The long half of an analysis -- compositing every frame of a shot, or
+/// seeking a decoder through it -- runs on a worker thread, and this is what
+/// that thread is handed. It is deliberately not a `Context`: there is no
+/// command stack on it, because a worker has no business executing one against
+/// a model the UI thread owns.
+///
+/// **Everything in here belongs to the thread running the analysis**, and the
+/// project is a copy rather than the window's own. That is not caution.
+/// `ProjectMediaSource` keeps a decoder per file and memoises the last frame
+/// out of each, and there is no lock anywhere in it; the window goes on
+/// compositing the monitor for every repaint while an analysis runs, because a
+/// modal dialog stops input and not painting. Sharing one would put two threads
+/// through the same libavcodec decoder, which does not show up as a wrong pixel.
+struct AnalysisInput {
+    const model::Project* project{nullptr};
+    model::SequenceId sequence;
+    model::TrackId track;
+    model::ClipId clip;
+    /// Where the playhead was when the analysis was asked for.
+    time::RationalTime position;
+    platform::ffmpeg::ProjectMediaSource* media{nullptr};
+    platform::qtext::QtTextRasterizer* text{nullptr};
+
+    [[nodiscard]] const model::Sequence* sequenceOrNull() const {
+        return project != nullptr ? project->findSequence(sequence) : nullptr;
+    }
+
+    /// The clip the analysis is about, or null. Null covers every way of not
+    /// having one, for the reason Context::selectedClip does.
+    [[nodiscard]] const model::Clip* selectedClip() const {
+        const model::Sequence* seq = sequenceOrNull();
+        const model::Track* on = seq != nullptr ? seq->findTrack(track) : nullptr;
+        return on != nullptr ? on->find(clip) : nullptr;
+    }
+};
+
+/// The same view, onto what the window itself holds.
+///
+/// For the synchronous path -- the tests, and `trackMaskForward` and friends,
+/// which still run an analysis and apply it in one call. Safe there precisely
+/// because it is the UI thread reading its own model.
+[[nodiscard]] inline AnalysisInput inputFor(const Context& context) {
+    AnalysisInput input;
+    input.project = &context.project();
+    input.sequence = context.binding.sequence;
+    input.track = context.track;
+    input.clip = context.clip;
+    input.position = context.position;
+    input.media = context.media;
+    input.text = context.text;
+    return input;
+}
+
 }  // namespace zaro::app::commands

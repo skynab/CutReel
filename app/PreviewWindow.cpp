@@ -45,6 +45,7 @@
 #include <zaro/Version.h>
 
 #include "About.h"
+#include "BackgroundWork.h"
 #include "ChannelPanel.h"
 #include "ClipStrip.h"
 #include "ColorManagement.h"
@@ -79,6 +80,12 @@ QString appName() {
 QString versionText() {
     return QString::fromUtf8(kVersion.data(), static_cast<qsizetype>(kVersion.size()));
 }
+
+/// The frame cache an analysis gets, which is not the one the window has.
+///
+/// Enough to hold a handful of 4K frames, which is all a forward walk over a
+/// shot ever needs at once. See PreviewWindow::analyseInBackground.
+constexpr std::size_t kAnalysisCacheBytes = 64u * 1024u * 1024u;
 
 }  // namespace
 
@@ -861,57 +868,69 @@ void PreviewWindow::adoptImported(model::Project imported, const QString& format
 }
 
 void PreviewWindow::trackMask() {
-    // Every frame of the rest of the clip gets composited, which is not
-    // instant on a long one.
     // A dialog rather than a wait cursor. This composites every frame of the
     // rest of the clip, and on a long one a frozen window with a spinning
     // cursor and no way out is indistinguishable from a hang.
-    QProgressDialog progress("Tracking the mask…", "Stop", 0, 1, this);
-    progress.setWindowModality(Qt::WindowModal);
-    progress.setMinimumDuration(400);
-    auto tracked = trackMaskForward([&](std::int64_t done, std::int64_t total) {
-        progress.setMaximum(static_cast<int>(total));
-        progress.setValue(static_cast<int>(done));
-        QCoreApplication::processEvents();
-        return !progress.wasCanceled();
-    });
-    progress.reset();
-    if (!tracked) {
-        app::say(this, "Track mask", QString::fromStdString(tracked.error().message()));
+    //
+    // The compositing happens on a worker thread; only the curves it produces
+    // come back here to be applied. See analyseInBackground.
+    std::optional<Result<commands::MaskTrackAnalysis>> analysed;
+    const bool ran = analyseInBackground(
+        "Tracking the mask…", "Stop",
+        [&](const commands::AnalysisInput& input, const commands::Progress& tell) {
+            analysed = commands::analyseMaskTrack(input, tell);
+        });
+    if (!ran || !analysed.has_value()) {
         return;
     }
+    if (!*analysed) {
+        app::say(this, "Track mask", QString::fromStdString(analysed->error().message()));
+        return;
+    }
+    // Applied against the live project, on this thread. It can still fail --
+    // the clip may have been trimmed away by a background render finishing
+    // while the track ran -- and that is a real answer, not an assertion.
+    if (Status applied = commands::applyMaskTrack(editContext(), **analysed); !applied) {
+        app::say(this, "Track mask", QString::fromStdString(applied.error().message()));
+        return;
+    }
+    const commands::MaskTrack& tracked = (*analysed)->report;
     QString said = QString("Tracked %1 frame%2, weakest match %3.")
-                       .arg(tracked->frames)
-                       .arg(tracked->frames == 1 ? "" : "s")
-                       .arg(tracked->confidence, 0, 'f', 2);
-    if (!tracked->stopped.empty()) {
+                       .arg(tracked.frames)
+                       .arg(tracked.frames == 1 ? "" : "s")
+                       .arg(tracked.confidence, 0, 'f', 2);
+    if (!tracked.stopped.empty()) {
         // Said plainly, with the keyframes kept: where a track gave up is
         // exactly where somebody needs to look.
-        said += QString("\nStopped early: %1").arg(QString::fromStdString(tracked->stopped));
+        said += QString("\nStopped early: %1").arg(QString::fromStdString(tracked.stopped));
     }
     app::say(this, "Track mask", said);
 }
 
 void PreviewWindow::stabilise() {
-    QProgressDialog progress("Measuring the camera move…", "Stop", 0, 1, this);
-    progress.setWindowModality(Qt::WindowModal);
-    progress.setMinimumDuration(400);
-    auto held = stabiliseClip([&](std::int64_t done, std::int64_t total) {
-        progress.setMaximum(static_cast<int>(total));
-        progress.setValue(static_cast<int>(done));
-        QCoreApplication::processEvents();
-        return !progress.wasCanceled();
-    });
-    progress.reset();
-    if (!held) {
-        app::say(this, "Stabilise", QString::fromStdString(held.error().message()));
+    std::optional<Result<commands::StabiliseAnalysis>> analysed;
+    const bool ran = analyseInBackground(
+        "Measuring the camera move…", "Stop",
+        [&](const commands::AnalysisInput& input, const commands::Progress& tell) {
+            analysed = commands::analyseStabilise(input, tell);
+        });
+    if (!ran || !analysed.has_value()) {
         return;
     }
+    if (!*analysed) {
+        app::say(this, "Stabilise", QString::fromStdString(analysed->error().message()));
+        return;
+    }
+    if (Status applied = commands::applyStabilise(editContext(), **analysed); !applied) {
+        app::say(this, "Stabilise", QString::fromStdString(applied.error().message()));
+        return;
+    }
+    const render::StabiliseResult& held = (*analysed)->report;
     QString said = QString("Stabilised %1 frames, zoomed in %2%.")
-                       .arg(held->measured)
-                       .arg((held->zoom - 1.0) * 100.0, 0, 'f', 1);
-    if (!held->stopped.empty()) {
-        said += QString("\nStopped early: %1").arg(QString::fromStdString(held->stopped));
+                       .arg(held.measured)
+                       .arg((held.zoom - 1.0) * 100.0, 0, 'f', 1);
+    if (!held.stopped.empty()) {
+        said += QString("\nStopped early: %1").arg(QString::fromStdString(held.stopped));
     }
     app::say(this, "Stabilise", said);
 }
@@ -1358,6 +1377,47 @@ void PreviewWindow::rebindSequence() {
     monitor_->setRenderCache(&renderCache_);
     monitor_->setTextRasterizer(&text_);
     monitor_->update();
+}
+
+bool PreviewWindow::analyseInBackground(
+    const QString& message, const QString& stopLabel,
+    const std::function<void(const commands::AnalysisInput&, const commands::Progress&)>& analyse) {
+    // A snapshot, and decoders opened for this call alone. Neither is caution:
+    // the analysis runs on a worker thread, and this window goes on painting
+    // the monitor, ticking its meters, autosaving and finishing background
+    // renders the whole time it does. See commands::AnalysisInput.
+    const model::Project snapshot = document_.project();
+    Status opened;
+    const bool ran = app::runWithProgress(this, message, stopLabel, [&](const app::Reporter& tell) {
+        lastAnalysisThread_ = std::this_thread::get_id();
+        // A small budget rather than the window's. An analysis walks a shot
+        // forward once and never asks for a frame twice, so a second 512 MB
+        // cache would be 512 MB of frames nothing reads -- and doubling the
+        // frame cache for the length of a long track is the memory blowout
+        // docs/PLAN.md lists as a top risk.
+        auto media = platform::ffmpeg::ProjectMediaSource::open(snapshot, kAnalysisCacheBytes);
+        if (!media) {
+            opened = media.error();
+            return;
+        }
+        // Its own font engine, built on the thread that will use it, the
+        // way the Deliver queue builds one for each render.
+        platform::qtext::QtTextRasterizer text;
+        commands::AnalysisInput input;
+        input.project = &snapshot;
+        input.sequence = sequenceId_;
+        input.track = selectedTrack_;
+        input.clip = selectedClip_;
+        input.position = position_;
+        input.media = media->get();
+        input.text = &text;
+        analyse(input, tell);
+    });
+    if (!opened) {
+        app::warn(this, message, QString::fromStdString(opened.error().toString()));
+        return false;
+    }
+    return ran;
 }
 
 commands::Context PreviewWindow::editContext() {
@@ -1918,20 +1978,16 @@ std::int32_t PreviewWindow::detectScenes() {
         return 0;
     }
 
-    // The dialog is the window's, and the operation's only view of it is a
-    // question it asks once a frame: keep going?
-    QProgressDialog progress("Looking for scene changes\u2026", "Cancel", 0, 1, this);
-    progress.setWindowModality(Qt::WindowModal);
-    progress.setMinimumDuration(400);
-    const std::int32_t cuts =
-        commands::detectScenes(editContext(), [&](std::int64_t done, std::int64_t total) {
-            progress.setMaximum(static_cast<int>(total));
-            progress.setValue(static_cast<int>(done));
-            QCoreApplication::processEvents();
-            return !progress.wasCanceled();
+    // The decoding happens on a worker thread; the cuts it found come back here
+    // to be made. See analyseInBackground.
+    std::vector<time::RationalTime> points;
+    const bool ran = analyseInBackground(
+        "Looking for scene changes\u2026", "Cancel",
+        [&](const commands::AnalysisInput& input, const commands::Progress& tell) {
+            points = commands::analyseScenes(input, tell);
         });
-    const bool canceled = progress.wasCanceled();
-    progress.reset();
+    const bool canceled = !ran;
+    const std::int32_t cuts = canceled ? 0 : commands::applyScenes(editContext(), points);
     if (cuts > 0) {
         afterEdit();
         app::say(this, "Detect cuts",

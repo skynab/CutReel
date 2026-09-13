@@ -12,6 +12,8 @@ add_library(zaro_app_ui STATIC
     ActionRouter.h
     AudioStrip.cpp
     AudioStrip.h
+    BackgroundWork.cpp
+    BackgroundWork.h
     ChannelPanel.cpp
     ChannelPanel.h
     ClipStrip.cpp
