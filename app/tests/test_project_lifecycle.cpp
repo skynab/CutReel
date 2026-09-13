@@ -8,6 +8,7 @@
 #include <QDropEvent>
 #include <QElapsedTimer>
 #include <QList>
+#include <QMessageBox>
 #include <QMimeData>
 #include <QPoint>
 #include <QThread>
@@ -1484,5 +1485,26 @@ TEST_CASE("The toolbar's frame size dropdown resizes the sequence", "[gui]") {
     if (!box->currentText().contains(QString::number(wasWidth))) {
         zaro::app::testing::failf("after undo the dropdown still says '%s'\n",
                                   box->currentText().toUtf8().constData());
+    }
+}
+
+// A message box wears the theme's ground, not the platform's. The windowsvista
+// style paints one with the native task-dialog panels -- white above, grey under
+// the buttons -- and the palette's light text on that is unreadable. Grabbed
+// rather than shown, so nothing pops up in front of whoever is at the machine.
+TEST_CASE("A message box is drawn dark, like the rest of the window", "[gui]") {
+    zaro::app::testing::gui();
+    QMessageBox message(QMessageBox::Information, "Premiere XML",
+                        "Imported \"Sequence 01\": 6 tracks, 7 media files.", QMessageBox::Ok);
+    message.setInformativeText(
+        "Grades, effects, transitions and keyframes do not cross this "
+        "format and were not read. Save to keep this as a project.");
+    message.adjustSize();
+    const QImage image = message.grab().toImage();
+
+    const double gray = meanGray(image);
+    if (gray > 110.0) {
+        zaro::app::testing::failf("the message box grabbed at mean gray %.1f; the theme is dark\n",
+                                  gray);
     }
 }

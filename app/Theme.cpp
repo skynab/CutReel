@@ -382,6 +382,12 @@ QToolTip {
 }
 QLabel { background: transparent; }
 
+/* A ground of its own. Without one the windowsvista style paints a message box
+   with the native task-dialog panels -- white above, grey under the buttons --
+   whatever the palette says, and the palette's light text lands on the white. */
+QMessageBox { background: %SURFACE%; }
+QMessageBox QLabel { color: %TEXT%; }
+
 )";
     static constexpr char kSheetRest[] =
         R"(/* --- the window's own chrome ------------------------------------------- */
