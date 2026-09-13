@@ -131,6 +131,10 @@ void refresh(const Bars& bars, const Status& status) {
                                                 status.modified ? "edited" : "clean"));
         }
     }
+    // A passing note borrows the middle slot and gives it back once cleared.
+    if (!status.notice.isEmpty()) {
+        bars.statusMiddle->setText(status.notice);
+    }
     // The missing device takes the right-hand slot while it is missing. What
     // normally sits there is the platform and the Qt version, which nobody is
     // reading while wondering why the playhead will not move.

@@ -808,23 +808,38 @@ private:
     /// a timeline widget, a bin and a render queue. See chrome::refresh.
     void updateChrome();
 
+    /// A line in the status bar that clears itself after a few seconds.
+    ///
+    /// For news that needs no answer -- a still written -- where a dialog
+    /// would be one more thing to dismiss before getting on.
+    void showNotice(const QString& text);
+
     /// Two menu items and a toolbar button that were buttons in a row before.
     void exportDialog();
 
-    void exportOtio();
+    /// Where every File > Export starts: the folder the last export went to,
+    /// else the project's, else home. Kept in the settings, because the next
+    /// export of a piece of work goes where the last one did.
+    [[nodiscard]] QString exportFolder() const;
+    /// Keep the folder `written` is in as that place. Empty is ignored, so a
+    /// cancelled export forgets nothing.
+    static void rememberExportFolder(const QString& written);
 
-    /// The two directions of the Premiere interchange, and of Final Cut's.
+    /// The two directions of each interchange: OpenTimelineIO, Premiere and
+    /// Final Cut.
     ///
-    /// Both directions are here, unlike OTIO's, because an import that opens
-    /// as an untitled project loses nothing: it is what New already does, down
-    /// to the autosave `adopt` takes on the way past, and the cut somebody
-    /// wants to look at is in front of them rather than behind a command line.
+    /// An import opens as an untitled project and so loses nothing: it is what
+    /// New already does, down to the autosave `adopt` takes on the way past,
+    /// and the cut somebody wants to look at is in front of them rather than
+    /// behind a command line.
     ///
-    /// Four entries and not two with a format picker. The formats have no
+    /// Separate entries and not one with a format picker. The formats have no
     /// version in common -- Final Cut cannot read what Premiere reads -- so
     /// what somebody is choosing is which program the cut is going to, and
     /// making them pick that twice would be asking a question they have
     /// already answered.
+    void exportOtio();
+    void importOtio();
     void exportPremiere();
     void importPremiere();
     void exportFinalCut();
@@ -983,6 +998,10 @@ private:
     /// from the monitor: the monitor is however many pixels the window happens
     /// to give it, and a cover image taken from a half-size viewer is a
     /// half-size cover image.
+    ///
+    /// Straight into the export folder, named for the sequence and the frame,
+    /// with no dialog either side: stills come in handfuls, and a dialog per
+    /// frame was most of the time each one took. A failure still says so.
     void exportStill();
     /// The context menu over the program monitor.
     void showProgramMenu(const QPoint& where);
@@ -1032,6 +1051,9 @@ private:
     /// The transport, the audio clock and the thread that feeds it.
     PlaybackController playback_{this};
     QTimer* autosaveTimer_{nullptr};
+    /// What showNotice put up, and the timer that takes it down again.
+    QString notice_;
+    QTimer* noticeTimer_{nullptr};
     /// The active sequence, by id rather than by pointer.
     ///
     /// A pointer into the project's vector of sequences is valid until one is

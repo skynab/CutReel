@@ -7,7 +7,9 @@
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QElapsedTimer>
+#include <QImage>
 #include <QList>
+#include <QMenu>
 #include <QMessageBox>
 #include <QMimeData>
 #include <QPoint>
@@ -1492,6 +1494,71 @@ TEST_CASE("The toolbar's frame size dropdown resizes the sequence", "[gui]") {
 // style paints one with the native task-dialog panels -- white above, grey under
 // the buttons -- and the palette's light text on that is unreadable. Grabbed
 // rather than shown, so nothing pops up in front of whoever is at the machine.
+TEST_CASE("File > Import holds every import, OpenTimelineIO included", "[gui]") {
+    auto& window = zaro::app::testing::gui();
+    QMenu* imports = nullptr;
+    for (QMenu* menu : window.findChildren<QMenu*>()) {
+        const auto* parent = qobject_cast<QMenu*>(menu->parent());
+        if (menu->title() == "Import" && parent != nullptr && parent->title() == "File") {
+            imports = menu;
+        }
+    }
+    if (imports == nullptr) {
+        zaro::app::testing::failf("File has no Import submenu\n");
+    }
+
+    // The same shape as Export: every way in is under it, and none is left
+    // loose on File itself.
+    QStringList ids;
+    for (QAction* action : imports->actions()) {
+        if (!action->isSeparator()) {
+            ids << action->objectName();
+        }
+    }
+    CHECK(ids == QStringList{"import-media", "import-otio", "import-premiere", "import-finalcut"});
+    for (QAction* action : qobject_cast<QMenu*>(imports->parent())->actions()) {
+        CHECK_FALSE(action->objectName().startsWith("import-"));
+    }
+}
+
+// A still frame goes straight to the export folder with nothing to answer, and
+// a second still of the same frame is a second file rather than the first
+// written over.
+TEST_CASE("Export Still Frame writes to the export folder without asking", "[gui]") {
+    auto& window = zaro::app::testing::gui();
+    const std::filesystem::path scratch =
+        std::filesystem::temp_directory_path() / "zaro-selftest-stills";
+    std::error_code code;
+    std::filesystem::remove_all(scratch, code);
+    std::filesystem::create_directories(scratch, code);
+    PreviewWindow::makeSettings().setValue("export/folder",
+                                           QString::fromStdString(scratch.string()));
+
+    auto* still = window.findChild<QAction*>("export-still");
+    if (still == nullptr) {
+        zaro::app::testing::failf("there is no Export Still Frame item\n");
+    }
+    still->trigger();
+    still->trigger();
+    QApplication::processEvents();
+
+    std::vector<std::filesystem::path> written;
+    for (const auto& entry : std::filesystem::directory_iterator(scratch, code)) {
+        if (entry.path().extension() == ".png") {
+            written.push_back(entry.path());
+        }
+    }
+    const bool readable =
+        !written.empty() && !QImage(QString::fromStdString(written.front().string())).isNull();
+    PreviewWindow::makeSettings().remove("export/folder");
+    std::filesystem::remove_all(scratch, code);
+
+    if (written.size() != 2) {
+        zaro::app::testing::failf("two stills of one frame left %zu files\n", written.size());
+    }
+    CHECK(readable);
+}
+
 TEST_CASE("A message box is drawn dark, like the rest of the window", "[gui]") {
     zaro::app::testing::gui();
     QMessageBox message(QMessageBox::Information, "Premiere XML",

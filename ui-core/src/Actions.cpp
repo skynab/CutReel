@@ -27,7 +27,10 @@ constexpr std::array kActions{
     ActionInfo{"relink-media", "Relink Media…", "File", ""},
     ActionInfo{"consolidate-media", "Consolidate Media…", "File", ""},
     ActionInfo{"export-sequence", "Export…", "File", "Ctrl+E"},
+    // No ellipsis: it asks nothing. The frame goes straight to the export folder.
+    ActionInfo{"export-still", "Export Still Frame", "File", ""},
     ActionInfo{"export-otio", "Export OpenTimelineIO…", "File", ""},
+    ActionInfo{"import-otio", "Import OpenTimelineIO…", "File", ""},
     ActionInfo{"export-premiere", "Export Premiere XML…", "File", ""},
     ActionInfo{"import-premiere", "Import Premiere XML…", "File", ""},
     ActionInfo{"export-finalcut", "Export Final Cut Pro XML…", "File", ""},

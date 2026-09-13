@@ -46,30 +46,30 @@ QMenuBar* buildMenuBar(QWidget* parent, ActionRouter& router, const QStringList&
     QMenu* file = bar->addMenu("File");
     addItem(router, file, "new-project");
     addItem(router, file, "open-project");
-    // A cut from another program opens the same way a project does, so these
-    // sit with Open rather than under Media: what arrives is a timeline, not
-    // footage, and the Media submenu is about files to cut with. Two items and
-    // not one with a format picker, because the two programs are what somebody
-    // is choosing between and the file formats are an implementation detail of
-    // that choice.
-    addItem(router, file, "import-premiere");
-    addItem(router, file, "import-finalcut");
+    // Every way in, in one submenu and in the same order as Export below:
+    // footage first, then a cut from another program. One item per program
+    // rather than one with a format picker, because the program is what
+    // somebody is choosing between and the file format is an implementation
+    // detail of that choice.
+    QMenu* imports = file->addMenu("Import");
+    addItem(router, imports, "import-media");
+    addItem(router, imports, "import-otio");
+    addItem(router, imports, "import-premiere");
+    addItem(router, imports, "import-finalcut");
     file->addSeparator();
     addItem(router, file, "save-project");
     addItem(router, file, "save-project-as");
 
     // Grouped into submenus rather than listed. Fifteen items and four
     // rules made a File menu taller than some of the panels, and length is
-    // what makes a menu hard to read: four of these are about media, two
-    // about versions, two about templates and two about getting a file
-    // out, and saying so is shorter than spelling every one of them out.
+    // what makes a menu hard to read: saying what each group is about is
+    // shorter than spelling every one of its items out.
     QMenu* versions = file->addMenu("Versions");
     addItem(router, versions, "save-version");
     addItem(router, versions, "open-version");
     file->addSeparator();
 
     QMenu* media = file->addMenu("Media");
-    addItem(router, media, "import-media");
     addItem(router, media, "browse-media");
     media->addSeparator();
     addItem(router, media, "relink-media");
@@ -77,6 +77,7 @@ QMenuBar* buildMenuBar(QWidget* parent, ActionRouter& router, const QStringList&
 
     QMenu* exports = file->addMenu("Export");
     addItem(router, exports, "export-sequence");
+    addItem(router, exports, "export-still");
     addItem(router, exports, "export-otio");
     addItem(router, exports, "export-premiere");
     addItem(router, exports, "export-finalcut");

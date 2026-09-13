@@ -142,6 +142,10 @@ struct Status {
 
     QString platformLabel;
 
+    /// A passing note -- a still written -- shown in the middle of the status
+    /// line in place of what normally sits there, until the window clears it.
+    QString notice;
+
     /// Set once a device has been asked for and refused. The clock is the audio
     /// device (ADR-006), so without one the playhead does not move -- which is
     /// indistinguishable from a hung transport unless it is said out loud.

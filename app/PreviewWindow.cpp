@@ -811,16 +811,25 @@ void PreviewWindow::exportDialog() {
         return;
     }
     stop();
-    app::ExportDialog dialog{document_.project(), liveSequence()->id(), this};
+    app::ExportDialog dialog{document_.project(), liveSequence()->id(), exportFolder(), this};
     dialog.exec();
+    rememberExportFolder(dialog.exported());
 }
 
 void PreviewWindow::exportOtio() {
-    interchange::exportOtio(this, document_.project(), sequenceId_);
+    rememberExportFolder(
+        interchange::exportOtio(this, document_.project(), sequenceId_, exportFolder()));
+}
+
+void PreviewWindow::importOtio() {
+    if (auto read = interchange::importOtio(this)) {
+        adoptImported(std::move(read->project), read->format, read->lost);
+    }
 }
 
 void PreviewWindow::exportPremiere() {
-    interchange::exportPremiere(this, document_.project(), sequenceId_);
+    rememberExportFolder(
+        interchange::exportPremiere(this, document_.project(), sequenceId_, exportFolder()));
 }
 
 void PreviewWindow::importPremiere() {
@@ -830,7 +839,8 @@ void PreviewWindow::importPremiere() {
 }
 
 void PreviewWindow::exportFinalCut() {
-    interchange::exportFinalCut(this, document_.project(), sequenceId_);
+    rememberExportFolder(
+        interchange::exportFinalCut(this, document_.project(), sequenceId_, exportFolder()));
 }
 
 void PreviewWindow::importFinalCut() {
@@ -2542,7 +2552,9 @@ void PreviewWindow::bindCommands() {
     actions_.bind("relink-media", [this] { relinkDialog(); });
     actions_.bind("consolidate-media", [this] { consolidateDialog(); });
     actions_.bind("export-sequence", [this] { exportDialog(); });
+    actions_.bind("export-still", [this] { exportStill(); });
     actions_.bind("export-otio", [this] { exportOtio(); });
+    actions_.bind("import-otio", [this] { importOtio(); });
     actions_.bind("export-premiere", [this] { exportPremiere(); });
     actions_.bind("import-premiere", [this] { importPremiere(); });
     actions_.bind("export-finalcut", [this] { exportFinalCut(); });
@@ -2965,6 +2977,7 @@ void PreviewWindow::updateChrome() {
         status.rendering = deliver_->rendering();
     }
     status.audioDeviceMissing = playback_.audioDeviceMissing();
+    status.notice = notice_;
     status.platformLabel = kPlatformLabel;
     chrome::refresh(bars_, status);
 }
@@ -3041,6 +3054,47 @@ QSettings PreviewWindow::makeSettings() {
         return QSettings(kOrganisation, kApplication);
     }
     return QSettings(settingsPath_, QSettings::IniFormat);
+}
+
+QString PreviewWindow::exportFolder() const {
+    const QString remembered = makeSettings().value("export/folder").toString();
+    // Only while it is still there. A folder on a drive that has since been
+    // unplugged would open a dialog somewhere arbitrary and write a still
+    // nowhere at all.
+    if (!remembered.isEmpty() && QDir(remembered).exists()) {
+        return remembered;
+    }
+    // Beside the project when there is one, since that is where the rest of
+    // this piece of work lives.
+    return document_.path().empty()
+               ? QDir::homePath()
+               : QFileInfo(QString::fromStdString(document_.path())).absolutePath();
+}
+
+void PreviewWindow::rememberExportFolder(const QString& written) {
+    if (written.isEmpty()) {
+        return;
+    }
+    QSettings settings = makeSettings();
+    settings.setValue("export/folder", QFileInfo(written).absolutePath());
+}
+
+void PreviewWindow::showNotice(const QString& text) {
+    notice_ = text;
+    if (noticeTimer_ == nullptr) {
+        noticeTimer_ = new QTimer(this);
+        noticeTimer_->setSingleShot(true);
+        connect(noticeTimer_, &QTimer::timeout, this, [this] {
+            notice_.clear();
+            if (bars_.statusLeft != nullptr) {
+                updateChrome();
+            }
+        });
+    }
+    noticeTimer_->start(6000);
+    if (bars_.statusLeft != nullptr) {
+        updateChrome();
+    }
 }
 
 void PreviewWindow::saveWorkspace() {
@@ -3303,30 +3357,22 @@ void PreviewWindow::exportStill() {
         return;
     }
 
-    // Colons are legal in a timecode and not in a Windows file name, so the
-    // suggested name uses dashes. It is a suggestion; whatever gets typed over
-    // it is what the file is called.
+    // Named for the sequence and the frame. Nobody is asked, so the name has to
+    // be one every file system takes: a timecode's colons are not legal on
+    // Windows, and a sequence can be called anything.
     const bool dropFrame = time::supportsDropFrame(sequence->frameRate());
-    QString stamp = QString::fromStdString(
+    const QString stamp = QString::fromStdString(
         time::timecodeFromFrames(position_.frames(), sequence->frameRate(), dropFrame).toString());
-    stamp.replace(QChar(':'), QChar('-'));
-    const QString stem = QString::fromStdString(sequence->name()) + " " + stamp;
-    // Beside the project when there is one, since that is where the rest of
-    // this piece of work lives.
-    const QString folder = document_.path().empty()
-                               ? QDir::homePath()
-                               : QFileInfo(QString::fromStdString(document_.path())).absolutePath();
+    QString stem = QString::fromStdString(sequence->name()) + " " + stamp;
+    static const QRegularExpression kUnsafe{R"([\\/:*?"<>|])"};
+    stem.replace(kUnsafe, "-");
 
-    QString path = QFileDialog::getSaveFileName(this, "Export still", QDir(folder).filePath(stem),
-                                                "PNG image (*.png);;JPEG image (*.jpg);;TIFF "
-                                                "image (*.tif)");
-    if (path.isEmpty()) {
-        return;
-    }
-    // A name with no suffix is one QImage cannot pick a format for, and it
-    // fails by writing nothing rather than by saying so.
-    if (QFileInfo(path).suffix().isEmpty()) {
-        path += ".png";
+    // The same frame twice is a second file, never the first written over:
+    // with no dialog there was nobody to ask whether to replace it.
+    const QDir folder{exportFolder()};
+    QString path = folder.filePath(stem + ".png");
+    for (int copy = 2; QFileInfo::exists(path); ++copy) {
+        path = folder.filePath(QString("%1 (%2).png").arg(stem).arg(copy));
     }
 
     // Composited here rather than read back off the monitor. The monitor is
@@ -3368,15 +3414,16 @@ void PreviewWindow::exportStill() {
     // The QImage borrows the vector, and save() reads it before returning.
     const QImage image{rgb.data(), wide, tall, stride, QImage::Format_RGB888};
     if (!image.save(path)) {
-        app::say(this, "Still", QString("Nothing could be written to %1.").arg(path));
+        app::say(this, "Still",
+                 QString("Nothing could be written to %1.").arg(QDir::toNativeSeparators(path)));
         return;
     }
-    app::say(this, "Still", QString("Written to %1.").arg(QDir::toNativeSeparators(path)));
+    showNotice(QString("Still saved to %1").arg(QDir::toNativeSeparators(path)));
 }
 
 void PreviewWindow::showProgramMenu(const QPoint& where) {
     QMenu menu{this};
-    QAction* save = menu.addAction("Export Still Frame…");
+    QAction* save = menu.addAction("Export Still Frame");
     connect(save, &QAction::triggered, this, [this] { exportStill(); });
     QAction* grab = menu.addAction("Grab Still to Gallery");
     connect(grab, &QAction::triggered, this, [this] { grabStill(); });

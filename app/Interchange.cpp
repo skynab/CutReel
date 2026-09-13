@@ -1,5 +1,6 @@
 #include "Interchange.h"
 
+#include <QDir>
 #include <QFileDialog>
 #include <utility>
 
@@ -22,19 +23,22 @@ namespace {
 /// check that there is a sequence to export at all -- is otherwise a fix that
 /// has to be made in three places and will be made in two.
 template <typename Save>
-void exportThrough(QWidget* parent, const model::Project& project, model::SequenceId sequence,
-                   const QString& title, const QString& suggested, const QString& filter,
-                   const QString& label, Save&& save) {
+QString exportThrough(QWidget* parent, const model::Project& project, model::SequenceId sequence,
+                      const QString& folder, const QString& title, const QString& suggested,
+                      const QString& filter, const QString& label, Save&& save) {
     if (project.findSequence(sequence) == nullptr) {
-        return;
+        return {};
     }
-    const QString path = QFileDialog::getSaveFileName(parent, title, suggested, filter);
+    const QString path =
+        QFileDialog::getSaveFileName(parent, title, QDir(folder).filePath(suggested), filter);
     if (path.isEmpty()) {
-        return;
+        return {};
     }
     if (Status saved = save(project, sequence, path.toStdString()); !saved) {
         app::warn(parent, label, QString::fromStdString(saved.error().toString()));
+        return {};
     }
+    return path;
 }
 
 /// Ask for a file, then read it, then say so if it failed.
@@ -57,19 +61,33 @@ std::optional<Imported> importThrough(QWidget* parent, const QString& title, con
 
 }  // namespace
 
-void exportOtio(QWidget* parent, const model::Project& project, model::SequenceId sequence) {
-    exportThrough(parent, project, sequence, "Export OpenTimelineIO", "timeline.otio",
-                  "OpenTimelineIO (*.otio)", "OpenTimelineIO", io::saveOtio);
+QString exportOtio(QWidget* parent, const model::Project& project, model::SequenceId sequence,
+                   const QString& folder) {
+    return exportThrough(parent, project, sequence, folder, "Export OpenTimelineIO",
+                         "timeline.otio", "OpenTimelineIO (*.otio)", "OpenTimelineIO",
+                         io::saveOtio);
 }
 
-void exportPremiere(QWidget* parent, const model::Project& project, model::SequenceId sequence) {
-    exportThrough(parent, project, sequence, "Export Premiere XML", "timeline.xml",
-                  "FCP7 XML (*.xml)", "Premiere XML", io::savePremiereXml);
+QString exportPremiere(QWidget* parent, const model::Project& project, model::SequenceId sequence,
+                       const QString& folder) {
+    return exportThrough(parent, project, sequence, folder, "Export Premiere XML", "timeline.xml",
+                         "FCP7 XML (*.xml)", "Premiere XML", io::savePremiereXml);
 }
 
-void exportFinalCut(QWidget* parent, const model::Project& project, model::SequenceId sequence) {
-    exportThrough(parent, project, sequence, "Export Final Cut Pro XML", "timeline.fcpxml",
-                  "Final Cut Pro XML (*.fcpxml)", "Final Cut Pro XML", io::saveFcpXml);
+QString exportFinalCut(QWidget* parent, const model::Project& project, model::SequenceId sequence,
+                       const QString& folder) {
+    return exportThrough(parent, project, sequence, folder, "Export Final Cut Pro XML",
+                         "timeline.fcpxml", "Final Cut Pro XML (*.fcpxml)", "Final Cut Pro XML",
+                         io::saveFcpXml);
+}
+
+std::optional<Imported> importOtio(QWidget* parent) {
+    // Tracks, clips, transitions and a track's enable -- read as mute -- are
+    // what the reader takes from an OTIO file. The rest is this program's own
+    // and has no OTIO spelling.
+    return importThrough(
+        parent, "Import OpenTimelineIO", "OpenTimelineIO (*.otio)", "OpenTimelineIO",
+        "Grades, effects, titles, markers, keyframes and speed changes", io::loadOtio);
 }
 
 std::optional<Imported> importPremiere(QWidget* parent) {
