@@ -128,16 +128,19 @@ TEST_CASE("Muted tracks come back muted", "[io][otio]") {
 }
 
 TEST_CASE("A generated clip says it has no media", "[io][otio]") {
-    // MissingReference is OTIO's own way of saying so, and it survives a trip
-    // through a tool that has never heard of a shape layer.
+    // GeneratorReference is OTIO's own way of saying so, and it survives a
+    // trip through a tool that has never heard of a shape layer.
     Fixture f;
     model::Graphic shape;
     shape.kind = model::GraphicKind::Rectangle;
+    shape.cornerRadius = 12.0;
+    shape.width = 300.0;
+    shape.red = 0.25;
     REQUIRE(f.run(edit::makeAddGraphic(f.project, f.on(f.v1), shape, f.range(0, 20))));
 
     const auto text = io::writeOtio(f.project, f.sequenceId);
     REQUIRE(text);
-    CHECK(text->find("MissingReference") != std::string::npos);
+    CHECK(text->find("GeneratorReference") != std::string::npos);
 
     const auto back = io::readOtio(*text);
     REQUIRE(back);
@@ -145,6 +148,79 @@ TEST_CASE("A generated clip says it has no media", "[io][otio]") {
     REQUIRE(video.clips().size() == 1);
     CHECK_FALSE(video.clips()[0].source.isValid());
     CHECK(video.clips()[0].duration().frames() == 20);
+    CHECK(video.clips()[0].graphic.kind == model::GraphicKind::Rectangle);
+    CHECK(video.clips()[0].graphic.cornerRadius == Approx(12.0));
+    CHECK(video.clips()[0].graphic.width == Approx(300.0));
+    CHECK(video.clips()[0].graphic.red == Approx(0.25));
+}
+
+TEST_CASE("A text overlay's words and font survive the trip", "[io][otio]") {
+    Fixture f;
+    model::Graphic title;
+    title.kind = model::GraphicKind::Text;
+    title.text = "Chapter One";
+    title.family = "Georgia";
+    title.pointSize = 48.0;
+    title.bold = true;
+    title.alignment = 1;
+    REQUIRE(f.run(edit::makeAddGraphic(f.project, f.on(f.v1), title, f.range(0, 20))));
+
+    const auto text = io::writeOtio(f.project, f.sequenceId);
+    REQUIRE(text);
+    const auto back = io::readOtio(*text);
+    REQUIRE(back);
+    const model::Graphic& graphic =
+        back->sequences().front().videoTracks().front().clips()[0].graphic;
+    CHECK(graphic.kind == model::GraphicKind::Text);
+    CHECK(graphic.text == "Chapter One");
+    CHECK(graphic.family == "Georgia");
+    CHECK(graphic.pointSize == Approx(48.0));
+    CHECK(graphic.bold);
+    CHECK(graphic.alignment == 1);
+}
+
+TEST_CASE("A clip's rotation and crop survive the trip", "[io][otio]") {
+    Fixture f;
+    model::Clip source = f.clip(0, 20, 500);
+    source.transform.rotationDegrees = 90.0;
+    source.transform.cropLeft = 10.0;
+    source.transform.cropRight = 5.0;
+    source.transform.scaleX = 1.5;
+    REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.v1), source)));
+
+    const auto text = io::writeOtio(f.project, f.sequenceId);
+    REQUIRE(text);
+    const auto back = io::readOtio(*text);
+    REQUIRE(back);
+    const model::Transform& transform =
+        back->sequences().front().videoTracks().front().clips()[0].transform;
+    CHECK(transform.rotationDegrees == Approx(90.0));
+    CHECK(transform.cropLeft == Approx(10.0));
+    CHECK(transform.cropRight == Approx(5.0));
+    CHECK(transform.scaleX == Approx(1.5));
+}
+
+TEST_CASE("A cut with no transform at all stays a plain cut", "[io][otio]") {
+    // Written only where it is not the identity, so a plain cut is not
+    // dressed up with metadata every other reader has to ignore.
+    Fixture f;
+    REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.v1), f.clip(0, 20, 500))));
+    const auto text = io::writeOtio(f.project, f.sequenceId);
+    REQUIRE(text);
+    CHECK(text->find("\"transform\"") == std::string::npos);
+}
+
+TEST_CASE("A project's frame size survives the trip", "[io][otio]") {
+    Fixture f;
+    f.project.findSequence(f.sequenceId)->setSize(2560, 1440);
+    REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.v1), f.clip(0, 20, 500))));
+
+    const auto text = io::writeOtio(f.project, f.sequenceId);
+    REQUIRE(text);
+    const auto back = io::readOtio(*text);
+    REQUIRE(back);
+    CHECK(back->sequences().front().width() == 2560);
+    CHECK(back->sequences().front().height() == 1440);
 }
 
 TEST_CASE("Something that is not a timeline is refused", "[io][otio]") {

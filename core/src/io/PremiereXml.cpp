@@ -81,6 +81,67 @@ void writeTimecode(Node& parent, const time::RationalTime& at, const time::Ratio
     node.add("source", std::string{"source"});
 }
 
+/// A clip's placement in the frame, exactly as this program keeps it.
+///
+/// `xmeml` has filters for some of this in principle -- Basic Motion, Crop --
+/// but their parameters differ in units and convention from one program's idea
+/// of them to the next in ways not worth guessing at, the same reasoning
+/// `PremiereXml.h` gives for not writing grade filters. So the whole transform
+/// travels namespaced instead, the way a transition's kind already does:
+/// ignored by anything that does not know it, and exact for anything that
+/// does -- which today is only this reader.
+void writeTransform(Node& item, const model::Transform& transform) {
+    if (transform.isIdentity()) {
+        return;
+    }
+    item.add("zaro:positionX", std::to_string(transform.positionX));
+    item.add("zaro:positionY", std::to_string(transform.positionY));
+    item.add("zaro:scaleX", std::to_string(transform.scaleX));
+    item.add("zaro:scaleY", std::to_string(transform.scaleY));
+    item.add("zaro:rotationDegrees", std::to_string(transform.rotationDegrees));
+    item.add("zaro:anchorX", std::to_string(transform.anchorX));
+    item.add("zaro:anchorY", std::to_string(transform.anchorY));
+    item.add("zaro:opacity", std::to_string(transform.opacity));
+    item.add("zaro:cropLeft", std::to_string(transform.cropLeft));
+    item.add("zaro:cropRight", std::to_string(transform.cropRight));
+    item.add("zaro:cropTop", std::to_string(transform.cropTop));
+    item.add("zaro:cropBottom", std::to_string(transform.cropBottom));
+}
+
+/// A generated clip's shape or text.
+///
+/// `xmeml` does have a real "Text" generator, but its parameter set is a
+/// specific plugin's, not a standard every program agrees on -- the same gap
+/// `PremiereXml.h` already names for filters. So this writes its own
+/// generator id, `zaro.Graphic`, with every `Graphic` field namespaced
+/// underneath: skipped whole by a reader that has never heard of it, which
+/// leaves a clip of the right name and duration where the title was, and read
+/// back exactly by this one.
+void writeGraphic(Node& item, const model::Graphic& graphic) {
+    Node& node = item.add("zaro:graphic");
+    node.add("kind", std::string{model::toString(graphic.kind)});
+    node.add("width", std::to_string(graphic.width));
+    node.add("height", std::to_string(graphic.height));
+    node.add("centreX", std::to_string(graphic.centreX));
+    node.add("centreY", std::to_string(graphic.centreY));
+    node.add("feather", std::to_string(graphic.feather));
+    node.add("red", std::to_string(graphic.red));
+    node.add("green", std::to_string(graphic.green));
+    node.add("blue", std::to_string(graphic.blue));
+    node.add("alpha", std::to_string(graphic.alpha));
+    if (graphic.kind == model::GraphicKind::Rectangle) {
+        node.add("cornerRadius", std::to_string(graphic.cornerRadius));
+    }
+    if (graphic.kind == model::GraphicKind::Text) {
+        node.add("text", graphic.text);
+        node.add("family", graphic.family);
+        node.add("pointSize", std::to_string(graphic.pointSize));
+        node.addBool("bold", graphic.bold);
+        node.addBool("italic", graphic.italic);
+        node.add("alignment", static_cast<std::int64_t>(graphic.alignment));
+    }
+}
+
 /// The `<file>` element for a clip: the full definition the first time this
 /// media is mentioned, and a bare reference to that id every time after.
 ///
@@ -172,6 +233,42 @@ void writeClipItem(Node& track, const model::Project& project, const model::Clip
     if (media != nullptr) {
         writeFile(item, *media, sourceRate, emitted);
     }
+    writeTransform(item, clip.transform);
+    Node& sourceTrack = item.add("sourcetrack");
+    sourceTrack.add("mediatype", std::string{kind == model::TrackKind::Video ? "video" : "audio"});
+    sourceTrack.add("trackindex", std::int64_t{1});
+}
+
+/// A generated clip: no `<file>`, an effect that names the generator instead.
+///
+/// `<generatoritem>` rather than `<clipitem>` -- that is the format's own
+/// element for a clip that draws something instead of reading it, the same
+/// distinction OTIO's `GeneratorReference` makes.
+void writeGraphicItem(Node& track, const model::Clip& clip, model::TrackKind kind,
+                      std::int64_t index) {
+    const time::Rational sourceRate = clip.sourceRange.start().rate().isPositive()
+                                          ? clip.sourceRange.start().rate()
+                                          : clip.timelineRange.start().rate();
+
+    Node& item = track.add("generatoritem");
+    item.setAttribute("id", "generatoritem-" + std::to_string(index));
+    item.add("name", clip.name);
+    item.addBool("enabled", clip.enabled);
+    writeRate(item, sourceRate);
+    item.add("start", clip.start().frames());
+    item.add("end", clip.endExclusive().frames());
+    item.add("in", clip.sourceRange.start().frames());
+    item.add("out", clip.sourceRange.endExclusive().frames());
+
+    Node& effect = item.add("effect");
+    effect.add("name", std::string{"zaro Graphic"});
+    effect.add("effectid", std::string{"zaro.Graphic"});
+    effect.add("effecttype", std::string{"generator"});
+    effect.add("mediatype", std::string{"video"});
+
+    writeGraphic(item, clip.graphic);
+    writeTransform(item, clip.transform);
+
     Node& sourceTrack = item.add("sourcetrack");
     sourceTrack.add("mediatype", std::string{kind == model::TrackKind::Video ? "video" : "audio"});
     sourceTrack.add("trackindex", std::int64_t{1});
@@ -245,7 +342,11 @@ void writeTracks(Node& parent, const model::Project& project, const model::Seque
     for (const model::Track& track : tracks) {
         Node& node = parent.add("track");
         for (const model::Clip& clip : track.clips()) {
-            writeClipItem(node, project, clip, kind, nextItem++, emitted);
+            if (clip.graphic.isSet()) {
+                writeGraphicItem(node, clip, kind, nextItem++);
+            } else {
+                writeClipItem(node, project, clip, kind, nextItem++, emitted);
+            }
             // After the clip it leaves, which is where this format puts one and
             // the order a reader walks. Cross fades only: a fade lies inside
             // its clip and joins it to nothing, and `alignment` has no answer
@@ -392,6 +493,56 @@ model::MediaRefId resolveFile(const Node& fileNode, model::Project& project, Fil
     return added;
 }
 
+/// A `zaro:` field written as text, since this format has no way to state a
+/// real number other than as its decimal spelling.
+double doubleOf(const Node& node, const char* childName, double fallback) {
+    const std::string text = node.textOf(childName);
+    return text.empty() ? fallback : std::strtod(text.c_str(), nullptr);
+}
+
+/// The mirror of `writeTransform`. Every field defaults to identity, so an
+/// item with none of these -- everything from before this program wrote them,
+/// and everything from any other program -- comes back a plain cut.
+model::Transform readTransform(const Node& item) {
+    model::Transform transform;
+    transform.positionX = doubleOf(item, "zaro:positionX", transform.positionX);
+    transform.positionY = doubleOf(item, "zaro:positionY", transform.positionY);
+    transform.scaleX = doubleOf(item, "zaro:scaleX", transform.scaleX);
+    transform.scaleY = doubleOf(item, "zaro:scaleY", transform.scaleY);
+    transform.rotationDegrees = doubleOf(item, "zaro:rotationDegrees", transform.rotationDegrees);
+    transform.anchorX = doubleOf(item, "zaro:anchorX", transform.anchorX);
+    transform.anchorY = doubleOf(item, "zaro:anchorY", transform.anchorY);
+    transform.opacity = doubleOf(item, "zaro:opacity", transform.opacity);
+    transform.cropLeft = doubleOf(item, "zaro:cropLeft", transform.cropLeft);
+    transform.cropRight = doubleOf(item, "zaro:cropRight", transform.cropRight);
+    transform.cropTop = doubleOf(item, "zaro:cropTop", transform.cropTop);
+    transform.cropBottom = doubleOf(item, "zaro:cropBottom", transform.cropBottom);
+    return transform;
+}
+
+/// The mirror of `writeGraphic`.
+model::Graphic readGraphic(const Node& node) {
+    model::Graphic graphic;
+    graphic.kind = model::graphicKindFromString(node.textOf("kind").c_str());
+    graphic.width = doubleOf(node, "width", graphic.width);
+    graphic.height = doubleOf(node, "height", graphic.height);
+    graphic.centreX = doubleOf(node, "centreX", graphic.centreX);
+    graphic.centreY = doubleOf(node, "centreY", graphic.centreY);
+    graphic.cornerRadius = doubleOf(node, "cornerRadius", graphic.cornerRadius);
+    graphic.feather = doubleOf(node, "feather", graphic.feather);
+    graphic.red = doubleOf(node, "red", graphic.red);
+    graphic.green = doubleOf(node, "green", graphic.green);
+    graphic.blue = doubleOf(node, "blue", graphic.blue);
+    graphic.alpha = doubleOf(node, "alpha", graphic.alpha);
+    graphic.text = node.textOf("text");
+    graphic.family = node.textOf("family");
+    graphic.pointSize = doubleOf(node, "pointSize", graphic.pointSize);
+    graphic.bold = node.boolOf("bold", false);
+    graphic.italic = node.boolOf("italic", false);
+    graphic.alignment = static_cast<int>(node.intOf("alignment", 0));
+    return graphic;
+}
+
 void readTracks(const Node& parent, model::TrackKind kind, model::Project& project,
                 model::Sequence& sequence, const time::Rational& rate, FileTable& table) {
     std::int32_t number = 0;
@@ -436,11 +587,51 @@ void readTracks(const Node& parent, model::TrackKind kind, model::Project& proje
                                                time::RationalTime{sourceFrames, sourceRate}};
             clip.timelineRange = time::TimeRange{time::RationalTime{start, rate},
                                                  time::RationalTime{end - start, rate}};
+            clip.transform = readTransform(*item);
 
             // A track in this model may not hold overlapping clips, and nothing
             // stops a file from containing two that do -- a hand-written one, or
             // an exporter with an off-by-one. Skipped rather than asserted on:
             // an import is the one place where the input is somebody else's.
+            if (!track->isRangeFree(clip.timelineRange)) {
+                continue;
+            }
+            track->insert(std::move(clip));
+        }
+
+        // A generator this reader wrote itself: no media, drawn rather than
+        // read. One this reader did not write -- a title from real Premiere or
+        // Final Cut, a colour matte -- has no `zaro:graphic` and is skipped,
+        // the same call `writeClipItem`'s own fallback makes about a nested
+        // sequence or a multicam clip: the shape of the cut survives and what
+        // filled the slot does not.
+        for (const Node* item : trackNode->childrenNamed("generatoritem")) {
+            const std::int64_t start = item->intOf("start", -1);
+            const std::int64_t end = item->intOf("end", -1);
+            if (start < 0 || end <= start) {
+                continue;
+            }
+            const Node* graphicNode = item->child("zaro:graphic");
+            if (graphicNode == nullptr) {
+                continue;
+            }
+
+            const time::Rational sourceRate = rateOf(*item, rate);
+            const std::int64_t in = item->intOf("in", 0);
+            const std::int64_t out = item->intOf("out", -1);
+            const std::int64_t sourceFrames = out > in ? out - in : end - start;
+
+            model::Clip clip;
+            clip.id = project.ids().next<model::ClipTag>();
+            clip.name = item->textOf("name");
+            clip.enabled = item->boolOf("enabled", true);
+            clip.sourceRange = time::TimeRange{time::RationalTime{in, sourceRate},
+                                               time::RationalTime{sourceFrames, sourceRate}};
+            clip.timelineRange = time::TimeRange{time::RationalTime{start, rate},
+                                                 time::RationalTime{end - start, rate}};
+            clip.graphic = readGraphic(*graphicNode);
+            clip.transform = readTransform(*item);
+
             if (!track->isRangeFree(clip.timelineRange)) {
                 continue;
             }

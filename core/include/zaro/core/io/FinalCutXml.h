@@ -60,11 +60,19 @@ namespace zaro::io {
 /// Tracks, their order and their stacking; clip positions, source trims, names
 /// and enabled state; the media each clip reads, declared once; sequence name,
 /// size, frame rate, audio rate and start timecode; markers, including ones
-/// Final Cut attached to a clip rather than to the timeline.
+/// Final Cut attached to a clip rather than to the timeline. A clip's rotation,
+/// scale, position and crop, and a text or shape overlay's every field,
+/// survive a round trip through this reader -- as `zaro:` attributes this
+/// program invented, since FCPXML's own `<adjust-transform>` and a real title's
+/// `ref` belong to Final Cut's own plugins and generators. A graphic writes as
+/// a `<title>`, the format's own element for a text generator, so the shape of
+/// the cut is right even where the content is namespaced; a real title, from
+/// real Final Cut, has none of these attributes and is read the way any other
+/// title-shaped item with no known content is.
 ///
 /// ### What does not
 ///
-/// Grades, effects, masks, keyframes, transitions, audio processing, reversed
+/// Grades, masks, keyframes, other effects, audio processing, reversed
 /// playback, and track mute and lock — FCPXML has no word for a track, so it
 /// has none for a muted one either. Nor does an empty track survive: a lane is
 /// where a clip is, so a track with nothing on it has no lane.
@@ -73,13 +81,14 @@ namespace zaro::io {
 /// company: `xmeml` states a timeline range and a source range and a clip whose
 /// source is twice its timeline is a 200% clip on the way back in, while FCPXML
 /// puts a retime in a `<timeMap>` that is not written or read here. A clip that
-/// left at 200% arrives at 100%, over the frames it actually played. A nested sequence, an
-/// adjustment layer and a multicam clip each write as a positioned item with no media: the shape of
-/// the cut survives and what filled that slot does not. Final Cut's effects
-/// are named by identifiers belonging to Apple's own plugins, and writing
-/// those would be guessing — a grade that arrives wrong is harder to find than
-/// one that arrives absent. Effects found on the way in are skipped for the
-/// same reason, and the clip they were on is kept.
+/// left at 200% arrives at 100%, over the frames it actually played. A nested
+/// sequence, an adjustment layer and a multicam clip each write as a
+/// positioned item with no media: the shape of the cut survives and what
+/// filled that slot does not. Final Cut's own effects are named by identifiers
+/// belonging to Apple's own plugins, and writing those would be guessing — a
+/// grade that arrives wrong is harder to find than one that arrives absent.
+/// Effects found on the way in are skipped for the same reason, and the clip
+/// they were on is kept.
 
 /// Write one sequence as an FCPXML document.
 [[nodiscard]] Result<std::string> writeFcpXml(const model::Project& project,

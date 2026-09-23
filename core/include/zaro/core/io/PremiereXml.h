@@ -41,17 +41,24 @@ namespace zaro::io {
 ///
 /// Tracks, their order, mute and lock; clip positions, source trims, names and
 /// enabled state; the media each clip reads; sequence name, size, frame rate
-/// and start timecode; sequence markers. Speed changes survive as a
+/// and start timecode; sequence markers; cross fades and the handful of named
+/// transitions `xmeml` itself recognises. Speed changes survive as a
 /// consequence of both ranges being written — a clip whose source range is
-/// twice its timeline range is a 200% clip on the way back in.
+/// twice its timeline range is a 200% clip on the way back in. A clip's
+/// rotation, scale, position and crop, and a text or shape overlay's every
+/// field, survive a round trip through this reader too -- as `zaro:` elements
+/// this program invented, for the reason given below. A graphic writes as a
+/// `<generatoritem>`, the format's own element for a clip that draws something
+/// rather than reading it, so the shape of the cut is right even where the
+/// content is namespaced.
 ///
 /// ### What does not
 ///
-/// Grades, effects, masks, keyframes, transitions, audio processing and
-/// reversed playback. Nor do the things this model has and the format has no
-/// word for: a nested sequence, an adjustment layer and a multicam clip each
-/// write as a positioned item with no media, so the shape of the cut survives
-/// and what filled that slot does not. `xmeml` can express some of the rest as
+/// Grades, other effects, masks, keyframes, audio processing and reversed
+/// playback. Nor do the things this model has and the format has no word for:
+/// a nested sequence, an adjustment layer and a multicam clip each write as a
+/// positioned item with no media, so the shape of the cut survives and what
+/// filled that slot does not. `xmeml` can express some of the rest as
 /// `<filter>` elements
 /// whose parameter names are Premiere's own; writing them would be guessing at
 /// another program's plugin identifiers, and a grade that arrives wrong is

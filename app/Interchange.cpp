@@ -86,9 +86,9 @@ std::optional<Imported> importOtio(QWidget* parent) {
     // Tracks, clips, transitions and a track's enable -- read as mute -- are
     // what the reader takes from an OTIO file. The rest is this program's own
     // and has no OTIO spelling.
-    return importThrough(
-        parent, "Import OpenTimelineIO", "OpenTimelineIO (*.otio)", "OpenTimelineIO",
-        "Grades, effects, titles, markers, keyframes and speed changes", io::loadOtio);
+    return importThrough(parent, "Import OpenTimelineIO", "OpenTimelineIO (*.otio)",
+                         "OpenTimelineIO", "Grades, effects, markers, keyframes and speed changes",
+                         io::loadOtio);
 }
 
 std::optional<Imported> importPremiere(QWidget* parent) {

@@ -4,6 +4,7 @@
 #include <cctype>
 #include <charconv>
 #include <cstdint>
+#include <cstdlib>
 #include <fstream>
 #include <map>
 #include <optional>
@@ -90,6 +91,13 @@ bool attributeBool(const Node& node, std::string_view name, bool fallback) {
         return fallback;
     }
     return raw != "0" && raw != "false";
+}
+
+/// A plain decimal attribute -- this program's own, not one the DTD defines,
+/// so there is no seconds suffix or timebase to account for.
+double attributeDouble(const Node& node, std::string_view name, double fallback) {
+    const std::string raw = node.attribute(name);
+    return raw.empty() ? fallback : std::strtod(raw.c_str(), nullptr);
 }
 
 /// A rate stated as the duration of one of its frames, which is how FCPXML
@@ -380,6 +388,66 @@ void writeMarker(Node& parent, const model::Marker& marker, const time::Rational
     }
 }
 
+/// A clip's placement in the frame, exactly as this program keeps it.
+///
+/// FCPXML has real `<adjust-transform>` and `<adjust-crop>` elements, but the
+/// header already gives the reason none of that is written: their parameters
+/// are Final Cut's own, and a grade that arrives wrong is harder to find than
+/// one that arrives absent. So the whole transform travels as attributes this
+/// program invented, the same way `PremiereXml.cpp` uses `zaro:` elements --
+/// ignored by anything that does not know them, and exact for anything that
+/// does, which today is only this reader.
+void writeTransform(Node& item, const model::Transform& transform) {
+    if (transform.isIdentity()) {
+        return;
+    }
+    item.setAttribute("zaro:positionX", std::to_string(transform.positionX));
+    item.setAttribute("zaro:positionY", std::to_string(transform.positionY));
+    item.setAttribute("zaro:scaleX", std::to_string(transform.scaleX));
+    item.setAttribute("zaro:scaleY", std::to_string(transform.scaleY));
+    item.setAttribute("zaro:rotationDegrees", std::to_string(transform.rotationDegrees));
+    item.setAttribute("zaro:anchorX", std::to_string(transform.anchorX));
+    item.setAttribute("zaro:anchorY", std::to_string(transform.anchorY));
+    item.setAttribute("zaro:opacity", std::to_string(transform.opacity));
+    item.setAttribute("zaro:cropLeft", std::to_string(transform.cropLeft));
+    item.setAttribute("zaro:cropRight", std::to_string(transform.cropRight));
+    item.setAttribute("zaro:cropTop", std::to_string(transform.cropTop));
+    item.setAttribute("zaro:cropBottom", std::to_string(transform.cropBottom));
+}
+
+/// A generated clip's shape or text, as attributes on its `<title>`.
+///
+/// `<title>` is a real story element -- the one this format uses for a text
+/// generator -- but a real title names a `ref` into an effect resource that is
+/// one of Final Cut's own, which this program does not have one of. Written
+/// without a `ref`, the same way a nested sequence or a multicam clip already
+/// lands here with no content: the shape of the cut survives. Everything a
+/// `Graphic` actually is rides alongside as `zaro:` attributes, read back
+/// exactly by this reader and ignored by any other.
+void writeGraphic(Node& item, const model::Graphic& graphic) {
+    item.setAttribute("zaro:graphic-kind", model::toString(graphic.kind));
+    item.setAttribute("zaro:graphic-width", std::to_string(graphic.width));
+    item.setAttribute("zaro:graphic-height", std::to_string(graphic.height));
+    item.setAttribute("zaro:graphic-centreX", std::to_string(graphic.centreX));
+    item.setAttribute("zaro:graphic-centreY", std::to_string(graphic.centreY));
+    item.setAttribute("zaro:graphic-feather", std::to_string(graphic.feather));
+    item.setAttribute("zaro:graphic-red", std::to_string(graphic.red));
+    item.setAttribute("zaro:graphic-green", std::to_string(graphic.green));
+    item.setAttribute("zaro:graphic-blue", std::to_string(graphic.blue));
+    item.setAttribute("zaro:graphic-alpha", std::to_string(graphic.alpha));
+    if (graphic.kind == model::GraphicKind::Rectangle) {
+        item.setAttribute("zaro:graphic-cornerRadius", std::to_string(graphic.cornerRadius));
+    }
+    if (graphic.kind == model::GraphicKind::Text) {
+        item.setAttribute("zaro:graphic-text", graphic.text);
+        item.setAttribute("zaro:graphic-family", graphic.family);
+        item.setAttribute("zaro:graphic-pointSize", std::to_string(graphic.pointSize));
+        item.setAttribute("zaro:graphic-bold", graphic.bold ? "1" : "0");
+        item.setAttribute("zaro:graphic-italic", graphic.italic ? "1" : "0");
+        item.setAttribute("zaro:graphic-alignment", std::to_string(graphic.alignment));
+    }
+}
+
 void writeClipItem(Node& parent, const model::Project& project, const model::Clip& clip,
                    model::TrackKind kind, std::int32_t lane, const time::RationalTime& offset,
                    const std::map<std::uint64_t, std::string>& assetIds) {
@@ -387,12 +455,16 @@ void writeClipItem(Node& parent, const model::Project& project, const model::Cli
     const auto found = media == nullptr ? assetIds.end() : assetIds.find(media->id.value());
     const bool hasAsset = found != assetIds.end();
 
-    // A clip with no file is a gap that carries a name. A nested sequence, an
-    // adjustment layer, a title and a shape all land here: the shape of the cut
-    // survives and what filled the slot does not, which is the same bargain the
-    // FCP7 writer makes and for the same reason -- naming Final Cut's own
-    // generators would be guessing at another program's identifiers.
-    Node& item = parent.add(hasAsset ? "asset-clip" : "gap");
+    // A clip with no file and no graphic is a gap that carries a name. A
+    // nested sequence, an adjustment layer and a multicam clip land there: the
+    // shape of the cut survives and what filled the slot does not, which is
+    // the same bargain the FCP7 writer makes and for the same reason -- naming
+    // Final Cut's own generators would be guessing at another program's
+    // identifiers. A `Graphic` is different: this program does know what it
+    // is, so it gets `<title>`, the format's own element for a text
+    // generator, even though what actually describes it is namespaced rather
+    // than the format's own parameters.
+    Node& item = parent.add(hasAsset ? "asset-clip" : clip.graphic.isSet() ? "title" : "gap");
     if (hasAsset) {
         item.setAttribute("ref", found->second);
     }
@@ -414,6 +486,10 @@ void writeClipItem(Node& parent, const model::Project& project, const model::Cli
             item.setAttribute("audioRole", role);
         }
     }
+    if (clip.graphic.isSet()) {
+        writeGraphic(item, clip.graphic);
+    }
+    writeTransform(item, clip.transform);
 }
 
 // --- Reading ----------------------------------------------------------------
@@ -539,6 +615,11 @@ struct Item {
     model::AudioRole role{model::AudioRole::Unassigned};
     bool enabled{true};
     bool audio{false};
+    model::Transform transform;
+    /// Set only for a `<title>` this program wrote itself -- one with
+    /// `zaro:graphic-kind` -- and left at `GraphicKind::None` for a real
+    /// title, which has no content this reader understands.
+    model::Graphic graphic;
 };
 
 struct MarkerItem {
@@ -548,6 +629,53 @@ struct MarkerItem {
     std::string note;
     bool resolved{false};
 };
+
+/// The mirror of `writeTransform`. Every attribute defaults to identity, so an
+/// item with none of them -- everything from before this program wrote them,
+/// and everything from any other program -- comes back a plain cut.
+model::Transform readTransform(const Node& item) {
+    model::Transform transform;
+    transform.positionX = attributeDouble(item, "zaro:positionX", transform.positionX);
+    transform.positionY = attributeDouble(item, "zaro:positionY", transform.positionY);
+    transform.scaleX = attributeDouble(item, "zaro:scaleX", transform.scaleX);
+    transform.scaleY = attributeDouble(item, "zaro:scaleY", transform.scaleY);
+    transform.rotationDegrees =
+        attributeDouble(item, "zaro:rotationDegrees", transform.rotationDegrees);
+    transform.anchorX = attributeDouble(item, "zaro:anchorX", transform.anchorX);
+    transform.anchorY = attributeDouble(item, "zaro:anchorY", transform.anchorY);
+    transform.opacity = attributeDouble(item, "zaro:opacity", transform.opacity);
+    transform.cropLeft = attributeDouble(item, "zaro:cropLeft", transform.cropLeft);
+    transform.cropRight = attributeDouble(item, "zaro:cropRight", transform.cropRight);
+    transform.cropTop = attributeDouble(item, "zaro:cropTop", transform.cropTop);
+    transform.cropBottom = attributeDouble(item, "zaro:cropBottom", transform.cropBottom);
+    return transform;
+}
+
+/// The mirror of `writeGraphic`. Called only on a `<title>` that carries
+/// `zaro:graphic-kind`; a real one, from real Final Cut, has none and is left
+/// as a positioned item with no content, per `refOf`.
+model::Graphic readGraphic(const Node& node) {
+    model::Graphic graphic;
+    graphic.kind = model::graphicKindFromString(node.attribute("zaro:graphic-kind").c_str());
+    graphic.width = attributeDouble(node, "zaro:graphic-width", graphic.width);
+    graphic.height = attributeDouble(node, "zaro:graphic-height", graphic.height);
+    graphic.centreX = attributeDouble(node, "zaro:graphic-centreX", graphic.centreX);
+    graphic.centreY = attributeDouble(node, "zaro:graphic-centreY", graphic.centreY);
+    graphic.cornerRadius = attributeDouble(node, "zaro:graphic-cornerRadius", graphic.cornerRadius);
+    graphic.feather = attributeDouble(node, "zaro:graphic-feather", graphic.feather);
+    graphic.red = attributeDouble(node, "zaro:graphic-red", graphic.red);
+    graphic.green = attributeDouble(node, "zaro:graphic-green", graphic.green);
+    graphic.blue = attributeDouble(node, "zaro:graphic-blue", graphic.blue);
+    graphic.alpha = attributeDouble(node, "zaro:graphic-alpha", graphic.alpha);
+    graphic.text = node.attribute("zaro:graphic-text");
+    graphic.family = node.attribute("zaro:graphic-family");
+    graphic.pointSize = attributeDouble(node, "zaro:graphic-pointSize", graphic.pointSize);
+    graphic.bold = attributeBool(node, "zaro:graphic-bold", false);
+    graphic.italic = attributeBool(node, "zaro:graphic-italic", false);
+    graphic.alignment =
+        static_cast<int>(attributeInt(node, "zaro:graphic-alignment", graphic.alignment));
+    return graphic;
+}
 
 /// Flattens a spine and everything anchored to it into positioned items.
 ///
@@ -670,6 +798,10 @@ private:
         item.name = node.attribute("name");
         item.enabled = attributeBool(node, "enabled", true);
         item.role = audioRoleFrom(node.attribute("audioRole"));
+        item.transform = readTransform(node);
+        if (node.name == "title" && !node.attribute("zaro:graphic-kind").empty()) {
+            item.graphic = readGraphic(node);
+        }
 
         // A lane's sign is what says picture or sound, because that is what it
         // means: Final Cut puts sound below the storyline and nothing else
@@ -811,6 +943,8 @@ void buildTracks(const std::vector<Item>& items, bool audio, model::Project& pro
         clip.sourceRange =
             time::TimeRange{time::RationalTime::fromSeconds(item.sourceStart, sourceRate),
                             time::RationalTime::fromSeconds(item.duration, sourceRate)};
+        clip.transform = item.transform;
+        clip.graphic = item.graphic;
 
         if (clip.timelineRange.duration().frames() <= 0) {
             continue;

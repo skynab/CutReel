@@ -18,6 +18,22 @@ namespace zaro::io {
 /// not an absence. Everything else here follows from that: exporting writes the
 /// gaps out, importing accumulates the durations back into positions, and a
 /// round trip has to survive both.
+///
+/// **What survives a round trip.** Tracks, clips, gaps, positions and trims;
+/// media by URL; track mute; cross fades, written as a `Transition` every
+/// reader recognises, with the exact kind, direction, easing and softness
+/// alongside in `metadata.zaro` for one that knows it. A project's frame size,
+/// a clip's rotation, scale, position and crop, and a text or shape overlay's
+/// every field also survive -- OTIO has no schema for any of the three, so all
+/// three travel the same way a transition's extra fields do, in
+/// `metadata.zaro`, and a graphic writes as a `GeneratorReference`, OTIO's own
+/// schema for a clip that draws rather than reads. Ignored whole by a reader
+/// that does not know `zaro`, which is every reader but this one, and left
+/// with a clip of the right name and duration where the content was.
+///
+/// **What does not.** Grades, effects, markers, keyframes and speed changes:
+/// this model has all of them and OTIO has nowhere agreed for any of them to
+/// go.
 
 /// Write one sequence as an OTIO timeline.
 [[nodiscard]] Result<std::string> writeOtio(const model::Project& project,

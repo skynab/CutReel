@@ -44,6 +44,8 @@
 
 #include <zaro/Version.h>
 
+#include "zaro/core/media/Waveform.h"
+
 #include "About.h"
 #include "BackgroundWork.h"
 #include "ChannelPanel.h"
@@ -873,6 +875,30 @@ void PreviewWindow::adoptImported(model::Project imported, const QString& format
         // `checkMissingMedia` below says what is still missing regardless of
         // why.
         static_cast<void>(io::relinkInPlace(imported, sourceFolder.toStdString()));
+    }
+
+    // None of the three interchange formats probe the files they name -- OTIO
+    // has no field for it, and Premiere/Final Cut XML at best restate what the
+    // other program already believed, which is silent about the one thing that
+    // makes a still a still: `VideoStreamInfo::isStill`. Probed here, the same
+    // way `ProjectBin::importMedia` probes a file dropped into the bin, so a
+    // photograph imported through any of the three plays as the unbounded,
+    // stretchable clip the model means by a still rather than the fortieth of a
+    // second FFmpeg's container metadata invents for one. A file that fails to
+    // probe -- because the relink above did not find it -- is left exactly as
+    // the reader made it; `checkMissingMedia` is what says so.
+    for (model::MediaRef& ref : imported.mediaMutable()) {
+        auto probed = platform::ffmpeg::probe(ref.path);
+        if (!probed) {
+            continue;
+        }
+        ref.info = std::move(*probed);
+        if (auto hash = media::quickContentHash(ref.path)) {
+            ref.contentHash = *hash;
+        }
+        if (auto digest = media::contentDigest(ref.path)) {
+            ref.contentDigest = *digest;
+        }
     }
 
     // Adopted with no path, exactly as New does: what came in is a cut, not a
