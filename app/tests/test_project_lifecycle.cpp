@@ -13,6 +13,7 @@
 #include <QMessageBox>
 #include <QMimeData>
 #include <QPoint>
+#include <QPushButton>
 #include <QThread>
 #include <QUrl>
 #include <cstdint>
@@ -110,6 +111,62 @@ TEST_CASE("The Deliver panel renders a file", "[gui]") {
     zaro::app::testing::discard(deliverRoot);
     window.setWorkspace("Edit");
     QApplication::processEvents();
+}
+
+// A point marker -- what an ordinary "Add Marker" leaves, and what most
+// markers on a real timeline are -- is stored one frame long, not zero
+// (`Marker::isPoint()` says so explicitly). The Deliver panel's "Marker"
+// range once checked duration against zero to skip a marker with no range,
+// which never skipped a point marker at all: it queued a one-frame render at
+// wherever the marker sat, shown as "00:00:00:01" no matter how long the
+// timeline was.
+TEST_CASE("Deliver's Marker range skips a point marker rather than rendering one frame of it",
+          "[gui]") {
+    auto& window = zaro::app::testing::gui();
+    const zaro::app::testing::Rewind rewind;
+
+    app::DeliverPanel* deliver = window.deliver();
+    window.setWorkspace("Deliver");
+    QApplication::processEvents();
+
+    const auto sequenceId = window.project().activeSequence();
+    const auto rate = window.sequence()->frameRate();
+    const auto total = window.sequence()->duration().frames();
+    REQUIRE(total > 1);
+
+    auto added =
+        zaro::edit::makeAddMarker(window.project(), sequenceId, zaro::time::RationalTime{5, rate},
+                                  zaro::time::RationalTime{1, rate}, "note");
+    REQUIRE(added);
+    window.commands().execute(window.project(), std::move(*added));
+    deliver->refresh();
+
+    QPushButton* markerButton = nullptr;
+    for (QPushButton* button : deliver->findChildren<QPushButton*>()) {
+        if (button->text() == "Marker") {
+            markerButton = button;
+            break;
+        }
+    }
+    REQUIRE(markerButton != nullptr);
+    markerButton->click();
+
+    // The summary is what the toolbar shows, so it is read back the way a
+    // person would read it -- a timecode -- rather than reaching past the
+    // panel for the private frame count it was built from.
+    const QString summary = deliver->rangeSummary();
+    const std::string timecode = summary.section(QChar(0x00B7), 1).trimmed().toStdString();
+    const auto parsed = zaro::time::framesFromTimecodeString(timecode, rate);
+    REQUIRE(parsed.has_value());
+    if (*parsed != total) {
+        zaro::app::testing::failf(
+            "Marker range with only a point marker present should fall back to "
+            "the whole timeline (%lld frames); got %s (%lld frames)\n",
+            static_cast<long long>(total), summary.toUtf8().constData(),
+            static_cast<long long>(*parsed));
+    }
+    std::printf("  deliver marker range with only a point marker present: %s (whole timeline)\n",
+                summary.toUtf8().constData());
 }
 
 // Delivery: the curve a sequence goes out through, and the highlight

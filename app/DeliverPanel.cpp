@@ -746,7 +746,12 @@ std::pair<std::int64_t, std::int64_t> DeliverPanel::chosenRange() const {
             // so it is skipped: there would be nothing to render.
             const model::Marker* best = nullptr;
             for (const model::Marker& marker : seq->markers()) {
-                if (marker.range.duration().frames() <= 0) {
+                // `isPoint()` is the model's own word for "no range" -- a point
+                // marker is stored one frame long, not zero, so checking
+                // duration against zero here left every ordinary marker in:
+                // most markers are points, and a render of one frame at
+                // wherever it sat was what "Marker" range actually queued.
+                if (marker.isPoint()) {
                     continue;
                 }
                 if (marker.range.contains(playhead_.rescaledTo(seq->frameRate()))) {
