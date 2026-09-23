@@ -57,6 +57,15 @@ struct Imported {
     /// is the sort of absence somebody finds an hour later, in a grade that is
     /// not there, so it is not optional and not the window's to remember.
     QString lost;
+    /// The folder the imported file was read from.
+    ///
+    /// A path in an interchange file is almost never a path this machine has:
+    /// a different drive letter, a different mount, a Mac path opened on
+    /// Windows. The one place worth looking without being asked is beside the
+    /// file that was just read -- that is where an editor exporting for
+    /// another program, or handing a project back and forth, tends to put the
+    /// media too.
+    QString sourceFolder;
 };
 
 /// Ask for a file and read it.

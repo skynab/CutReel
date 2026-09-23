@@ -823,7 +823,7 @@ void PreviewWindow::exportOtio() {
 
 void PreviewWindow::importOtio() {
     if (auto read = interchange::importOtio(this)) {
-        adoptImported(std::move(read->project), read->format, read->lost);
+        adoptImported(std::move(read->project), read->format, read->lost, read->sourceFolder);
     }
 }
 
@@ -834,7 +834,7 @@ void PreviewWindow::exportPremiere() {
 
 void PreviewWindow::importPremiere() {
     if (auto read = interchange::importPremiere(this)) {
-        adoptImported(std::move(read->project), read->format, read->lost);
+        adoptImported(std::move(read->project), read->format, read->lost, read->sourceFolder);
     }
 }
 
@@ -845,17 +845,35 @@ void PreviewWindow::exportFinalCut() {
 
 void PreviewWindow::importFinalCut() {
     if (auto read = interchange::importFinalCut(this)) {
-        adoptImported(std::move(read->project), read->format, read->lost);
+        adoptImported(std::move(read->project), read->format, read->lost, read->sourceFolder);
     }
 }
 
 void PreviewWindow::adoptImported(model::Project imported, const QString& format,
-                                  const QString& lost) {
+                                  const QString& lost, const QString& sourceFolder) {
     // Read out before the move below, not after it.
     const model::Sequence& sequence = imported.sequences().front();
     const QString name = QString::fromStdString(sequence.name());
     const std::size_t tracks = sequence.videoTracks().size() + sequence.audioTracks().size();
     const std::size_t media = imported.media().size();
+
+    // A path inside an interchange file is almost never a path this machine
+    // has -- a different drive letter, a different mount, a Mac path opened
+    // on Windows. Rather than adopt the cut with every clip already marked
+    // missing, look beside the file it was just read from: that is where
+    // whoever made the export, or is handing the project back and forth,
+    // tends to keep the media too. Done here, before `adopt`, and applied
+    // straight to the media list rather than through a command: this is part
+    // of what "imported" means, not an edit somebody could undo back into
+    // missing footage.
+    if (!sourceFolder.isEmpty()) {
+        // The only way this fails is `sourceFolder` not being a folder, which
+        // it always is here -- it came from `QFileInfo::absolutePath()` on a
+        // file that was just read. Nothing to report if it somehow did:
+        // `checkMissingMedia` below says what is still missing regardless of
+        // why.
+        static_cast<void>(io::relinkInPlace(imported, sourceFolder.toStdString()));
+    }
 
     // Adopted with no path, exactly as New does: what came in is a cut, not a
     // project file, and letting Save write straight over the interchange file

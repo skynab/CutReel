@@ -2,6 +2,7 @@
 
 #include <QDir>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <utility>
 
 #include "zaro/core/Error.h"
@@ -56,7 +57,7 @@ std::optional<Imported> importThrough(QWidget* parent, const QString& title, con
         app::warn(parent, label, QString::fromStdString(read.error().toString()));
         return std::nullopt;
     }
-    return Imported{std::move(*read), label, lost};
+    return Imported{std::move(*read), label, lost, QFileInfo(path).absolutePath()};
 }
 
 }  // namespace

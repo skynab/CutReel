@@ -853,7 +853,8 @@ private:
     /// what was left behind is the part of an import worth getting right in
     /// one place. It is the sort of absence somebody finds an hour later, in a
     /// grade that is not there.
-    void adoptImported(model::Project imported, const QString& format, const QString& lost);
+    void adoptImported(model::Project imported, const QString& format, const QString& lost,
+                       const QString& sourceFolder);
 
     void trackMask();
 
