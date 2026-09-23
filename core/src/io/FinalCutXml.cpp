@@ -205,9 +205,12 @@ model::AudioRole audioRoleFrom(std::string text) {
 /// filters, adjustments and metadata, and walking into the wrong one would put
 /// a colour correction on the timeline as a clip.
 ///
-/// `transition` and `caption` are positioned like clips and are deliberately
-/// absent: neither has anywhere to go in this model, and stepping over them is
-/// what lets the cut around them survive.
+/// `caption` is positioned like a clip and deliberately absent: it has nowhere
+/// to go in this model, and stepping over it is what lets the cut around it
+/// survive. `transition` is absent from this list for a different reason --
+/// `SpineReader::read` intercepts it before reaching this check, the same way
+/// it intercepts `marker`, because a span between two clips is not a clip
+/// itself.
 bool isStoryElement(std::string_view name) noexcept {
     return name == "asset-clip" || name == "clip" || name == "gap" || name == "title" ||
            name == "video" || name == "audio" || name == "ref-clip" || name == "mc-clip" ||
@@ -492,6 +495,56 @@ void writeClipItem(Node& parent, const model::Project& project, const model::Cli
     writeTransform(item, clip.transform);
 }
 
+/// The name of the FCPXML built-in transition closest to `kind`.
+///
+/// FCPXML resolves a transition by name against Final Cut's own effect
+/// bundles, and "Cross Dissolve" and "Wipe" are the two spelled exactly this
+/// way in every version this program targets. Everything else is written as a
+/// cross dissolve of the right length rather than under a name nothing will
+/// match, the same fallback `PremiereXml.cpp` makes for the same reason. What
+/// was really meant rides alongside in `zaro:kind`.
+const char* fcpTransitionName(model::TransitionKind kind) noexcept {
+    switch (kind) {
+        case model::TransitionKind::Wipe:
+        case model::TransitionKind::Iris:
+            return "Wipe";
+        case model::TransitionKind::CrossDissolve:
+        case model::TransitionKind::Slide:
+        case model::TransitionKind::Push:
+        case model::TransitionKind::Zoom:
+        case model::TransitionKind::DipToBlack:
+        default:
+            return "Cross Dissolve";
+    }
+}
+
+/// A span across a cut, as this format's own `<transition>` story element.
+///
+/// `zaro:cut` is what makes this readable at all: a real Final Cut transition
+/// is placed and sized like this one, but says nothing about *which* instant
+/// inside its span is the join, and that is exactly the thing needed to find
+/// the two clips it sits between. Written exactly rather than guessed at on
+/// the way back in, the way `PremiereXml.cpp` guesses a centred one from the
+/// clips instead -- there, `alignment` at least narrows it to three answers;
+/// here there is nothing to narrow.
+void writeTransitionItem(Node& parent, const model::Transition& span, const time::RationalTime& cut,
+                         const time::RationalTime& offset, std::int32_t lane) {
+    Node& item = parent.add("transition");
+    item.setAttribute("name", fcpTransitionName(span.kind));
+    item.setAttribute("lane", std::to_string(lane));
+    item.setAttribute("offset", secondsText(offset));
+    item.setAttribute("duration", secondsText(span.range.duration()));
+    item.setAttribute("zaro:cut", secondsText(cut));
+    item.setAttribute("zaro:kind", model::toString(span.kind));
+    item.setAttribute("zaro:easing", model::toString(span.easing));
+    if (model::transitionTravels(span.kind)) {
+        item.setAttribute("zaro:direction", model::toString(span.direction));
+    }
+    if (model::transitionHasEdge(span.kind) && span.softness > 0.0) {
+        item.setAttribute("zaro:softness", std::to_string(span.softness));
+    }
+}
+
 // --- Reading ----------------------------------------------------------------
 
 /// The `<format>` resources, by id.
@@ -630,6 +683,20 @@ struct MarkerItem {
     bool resolved{false};
 };
 
+/// A span across a cut, flattened the way an `Item` is.
+struct TransitionItem {
+    std::int32_t lane{0};
+    /// The exact instant the span straddles -- from `zaro:cut`, since nothing
+    /// else the format states says which one it is. See `readTransitionItem`.
+    time::Rational cut;
+    time::Rational start;
+    time::Rational duration;
+    model::TransitionKind kind{model::TransitionKind::CrossDissolve};
+    model::TransitionDirection direction{model::TransitionDirection::Right};
+    model::TransitionEasing easing{model::TransitionEasing::Linear};
+    double softness{0.0};
+};
+
 /// The mirror of `writeTransform`. Every attribute defaults to identity, so an
 /// item with none of them -- everything from before this program wrote them,
 /// and everything from any other program -- comes back a plain cut.
@@ -692,6 +759,9 @@ public:
 
     [[nodiscard]] const std::vector<Item>& items() const noexcept { return items_; }
     [[nodiscard]] const std::vector<MarkerItem>& markers() const noexcept { return markers_; }
+    [[nodiscard]] const std::vector<TransitionItem>& transitions() const noexcept {
+        return transitions_;
+    }
 
     /// `sequential` is the difference between a spine and everything else: a
     /// spine's children follow one another, so one that states no offset starts
@@ -710,6 +780,10 @@ public:
         for (const Node& child : container.children) {
             if (child.name == "marker" || child.name == "chapter-marker") {
                 readMarker(child, containerOffset, containerStart);
+                continue;
+            }
+            if (child.name == "transition") {
+                readTransitionItem(child, containerOffset, containerStart, containerLane);
                 continue;
             }
             if (!isStoryElement(child.name) || (onlyFirst && taken)) {
@@ -832,9 +906,53 @@ private:
         markers_.push_back(std::move(marker));
     }
 
+    /// `zaro:cut` is what a real Final Cut `<transition>` never carries, so its
+    /// absence is the signal to leave the span alone -- the same call this
+    /// reader already makes about a real title's content.
+    void readTransitionItem(const Node& node, const time::Rational& containerOffset,
+                            const time::Rational& containerStart, std::int32_t containerLane) {
+        const std::string cutText = node.attribute("zaro:cut");
+        if (cutText.empty()) {
+            return;
+        }
+        const auto parsedCut = parseSeconds(cutText);
+        if (!parsedCut) {
+            return;
+        }
+        const time::Rational duration = attributeSeconds(node, "duration", time::Rational{});
+        if (!duration.isPositive()) {
+            return;
+        }
+        const time::Rational localOffset = attributeSeconds(node, "offset", containerStart);
+
+        TransitionItem item;
+        item.lane = containerLane + static_cast<std::int32_t>(attributeInt(node, "lane", 0));
+        item.cut = containerOffset + (*parsedCut - containerStart);
+        item.start = containerOffset + (localOffset - containerStart);
+        item.duration = duration;
+        if (const std::string kindText = node.attribute("zaro:kind"); !kindText.empty()) {
+            item.kind = model::transitionKindFromString(kindText.c_str());
+        }
+        if (const std::string easingText = node.attribute("zaro:easing"); !easingText.empty()) {
+            item.easing = model::transitionEasingFromString(easingText.c_str());
+        }
+        if (const std::string directionText = node.attribute("zaro:direction");
+            !directionText.empty()) {
+            model::TransitionDirection direction{};
+            if (model::transitionDirectionFromString(directionText.c_str(), direction)) {
+                item.direction = direction;
+            }
+        }
+        if (const std::string softText = node.attribute("zaro:softness"); !softText.empty()) {
+            item.softness = std::clamp(std::strtod(softText.c_str(), nullptr), 0.0, 1.0);
+        }
+        transitions_.push_back(item);
+    }
+
     const Resources& resources_;
     std::vector<Item> items_;
     std::vector<MarkerItem> markers_;
+    std::vector<TransitionItem> transitions_;
 };
 
 /// The media reference for an asset id, made the first time it is asked for.
@@ -901,8 +1019,9 @@ std::vector<std::int32_t> lanesOf(const std::vector<Item>& items, bool audio) {
     return lanes;
 }
 
-void buildTracks(const std::vector<Item>& items, bool audio, model::Project& project,
-                 model::Sequence& sequence, const time::Rational& rate, Resources& resources) {
+void buildTracks(const std::vector<Item>& items, const std::vector<TransitionItem>& transitions,
+                 bool audio, model::Project& project, model::Sequence& sequence,
+                 const time::Rational& rate, Resources& resources) {
     const model::TrackKind kind = audio ? model::TrackKind::Audio : model::TrackKind::Video;
     const std::vector<std::int32_t> lanes = lanesOf(items, audio);
 
@@ -958,6 +1077,48 @@ void buildTracks(const std::vector<Item>& items, bool audio, model::Project& pro
             continue;
         }
         track->insert(std::move(clip));
+    }
+
+    // After the clips, because a span names the two it joins and they have to
+    // exist first.
+    for (std::size_t i = 0; i < lanes.size(); ++i) {
+        model::Track* track = sequence.findTrack(trackIds[i]);
+        std::vector<model::Transition> spans;
+        for (const TransitionItem& item : transitions) {
+            if (item.lane != lanes[i]) {
+                continue;
+            }
+            const time::RationalTime cut = time::RationalTime::fromSeconds(item.cut, rate);
+            const model::Clip* incoming = track->clipAt(cut);
+            const model::Clip* outgoing = nullptr;
+            for (const model::Clip& candidate : track->clips()) {
+                if (candidate.endExclusive() == cut) {
+                    outgoing = &candidate;
+                }
+            }
+            // A join this reader wrote does land exactly on a cut; one that
+            // does not -- a hand-edited file, or clips this reader skipped as
+            // overlapping -- names a span with nothing under it to straddle.
+            if (outgoing == nullptr || incoming == nullptr) {
+                continue;
+            }
+            model::Transition span;
+            span.id = project.ids().next<model::TransitionTag>();
+            span.from = outgoing->id;
+            span.to = incoming->id;
+            span.range = time::TimeRange{time::RationalTime::fromSeconds(item.start, rate),
+                                         time::RationalTime::fromSeconds(item.duration, rate)};
+            span.kind = item.kind;
+            span.direction = item.direction;
+            span.easing = item.easing;
+            span.softness = item.softness;
+            if (span.range.duration().frames() > 0) {
+                spans.push_back(span);
+            }
+        }
+        if (!spans.empty()) {
+            track->setTransitions(std::move(spans));
+        }
     }
 }
 
@@ -1054,6 +1215,17 @@ Result<std::string> writeFcpXml(const model::Project& project, model::SequenceId
                     writeClipItem(gap, project, clip, kind,
                                   kind == model::TrackKind::Video ? lane : -lane,
                                   start + clip.start(), assetIds);
+                    // After the clip it leaves. Cross fades only: a fade lies
+                    // inside its clip and joins it to nothing, and there is no
+                    // second clip for a `<transition>` to sit between.
+                    for (const model::Transition& span : tracks[i].transitions()) {
+                        if (span.from == clip.id && span.isCrossFade()) {
+                            writeTransitionItem(gap, span, start + clip.endExclusive(),
+                                                start + span.range.start(),
+                                                kind == model::TrackKind::Video ? lane : -lane);
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -1122,6 +1294,7 @@ Result<model::Project> readFcpXml(const std::string& text) {
     // push the whole cut off the front of the timeline.
     std::vector<Item> items = reader.items();
     std::vector<MarkerItem> markers = reader.markers();
+    std::vector<TransitionItem> transitions = reader.transitions();
     if (tcStart.isPositive()) {
         const bool afterStart = std::all_of(
             items.begin(), items.end(), [&](const Item& item) { return !(item.offset < tcStart); });
@@ -1132,11 +1305,15 @@ Result<model::Project> readFcpXml(const std::string& text) {
             for (MarkerItem& marker : markers) {
                 marker.at -= tcStart;
             }
+            for (TransitionItem& item : transitions) {
+                item.cut -= tcStart;
+                item.start -= tcStart;
+            }
         }
     }
 
-    buildTracks(items, false, project, sequence, rate, resources);
-    buildTracks(items, true, project, sequence, rate, resources);
+    buildTracks(items, transitions, false, project, sequence, rate, resources);
+    buildTracks(items, transitions, true, project, sequence, rate, resources);
 
     std::vector<model::Marker> built;
     for (const MarkerItem& item : markers) {

@@ -558,6 +558,74 @@ TEST_CASE("A real Final Cut title with no zaro attributes is a positioned clip w
     CHECK_FALSE(video.clips()[0].source.isValid());
 }
 
+TEST_CASE("A transition round trips through FCPXML", "[io][finalcut][transition]") {
+    // FCPXML has a real `<transition>` story element, but nothing in it says
+    // which instant inside its span is the join -- `zaro:cut` is what makes
+    // this reader able to find the two clips it sits between.
+    Fixture f;
+    REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.v1), f.clip(0, 50, 500))));
+    REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.v1), f.clip(50, 50, 500))));
+    REQUIRE(f.run(edit::makeAddCrossDissolve(f.project, f.on(f.v1), f.at(50), f.at(20))));
+
+    const model::TransitionId id = f.track(f.v1).transitions().front().id;
+    edit::TransitionSettings settings;
+    settings.kind = model::TransitionKind::Wipe;
+    settings.direction = model::TransitionDirection::Left;
+    settings.softness = 0.25;
+    settings.easing = model::TransitionEasing::Out;
+    REQUIRE(f.run(edit::makeSetTransitionSettings(f.project, f.on(f.v1), id, settings)));
+    const auto wanted = f.track(f.v1).transitions().front().range;
+
+    const auto text = io::writeFcpXml(f.project, f.sequenceId);
+    REQUIRE(text);
+    // The format's own vocabulary, so an importer that never heard of this
+    // program still finds a wipe where one belongs.
+    CHECK(text->find("<transition ") != std::string::npos);
+    CHECK(text->find("name=\"Wipe\"") != std::string::npos);
+
+    const auto back = io::readFcpXml(*text);
+    REQUIRE(back);
+    const model::Track& video = back->sequences().front().videoTracks().front();
+    REQUIRE(video.transitions().size() == 1);
+    const model::Transition& span = video.transitions().front();
+
+    CHECK(span.range.start().frames() == wanted.start().frames());
+    CHECK(span.range.duration().frames() == wanted.duration().frames());
+    REQUIRE(video.clips().size() == 2);
+    CHECK(span.from == video.clips()[0].id);
+    CHECK(span.to == video.clips()[1].id);
+
+    CHECK(span.kind == model::TransitionKind::Wipe);
+    CHECK(span.direction == model::TransitionDirection::Left);
+    CHECK(span.softness == Catch::Approx(0.25));
+    CHECK(span.easing == model::TransitionEasing::Out);
+}
+
+TEST_CASE("A real Final Cut transition with no zaro:cut is left alone",
+          "[io][finalcut][transition]") {
+    // Real Final Cut writes `<transition>` too, but names no instant inside its
+    // span as the join -- there being nothing in the format that does -- so
+    // this reader has nothing to resolve it against and leaves the cut a plain
+    // one either side of it, rather than guessing which frame is the join.
+    const std::string text = R"(<fcpxml version="1.9">
+        <resources>
+          <format id="r1" frameDuration="1/25s" width="1920" height="1080"/>
+        </resources>
+        <library><event name="E"><project name="P"><sequence format="r1" duration="2s" tcStart="0s">
+          <spine>
+            <asset-clip lane="0" offset="0s" duration="44/25s" name="a"/>
+            <transition name="Cross Dissolve" lane="0" offset="44/25s" duration="12/25s"/>
+            <asset-clip lane="0" offset="50/25s" duration="50/25s" name="b"/>
+          </spine>
+        </sequence></project></event></library>
+      </fcpxml>)";
+
+    const auto back = io::readFcpXml(text);
+    REQUIRE(back);
+    const model::Track& video = back->sequences().front().videoTracks().front();
+    CHECK(video.transitions().empty());
+}
+
 TEST_CASE("A disabled clip and an audio role survive", "[io][finalcut]") {
     Fixture f;
     model::Clip clip = f.clip(0, 20);
