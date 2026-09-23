@@ -298,7 +298,7 @@ private:
     void paintTracks(QPainter& painter);
     void paintClips(QPainter& painter, const ui::TimelineLayout::Row& row);
     void paintKeyframes(QPainter& painter, const model::Clip& clip, const QRectF& body);
-    void dragKeyframeTo(int x);
+    void dragKeyframeTo(double x);
     /// `colour` is the clip family's own, so an audio clip's envelope is drawn
     /// in the same teal as the strip above it.
     void paintWaveform(QPainter& painter, const model::Clip& clip, const QRectF& body,
@@ -415,7 +415,7 @@ private:
     ///
     /// `y` as well as `x`: a clip may be moved to another row of its own kind,
     /// which is the only thing the vertical half of the gesture can mean.
-    void updateDrag(int x, int y);
+    void updateDrag(double x, int y);
     /// Make the move the drag has been previewing, on the way up.
     void commitMove();
     /// Leave the clips where they are and put copies of them where the drag
@@ -428,7 +428,7 @@ private:
     /// follows picture -- so a duplicate has to as well, or Alt-dragging a
     /// take would leave a copy of the picture with no sound under it.
     [[nodiscard]] std::vector<edit::ClipRef> selectionWithPartners() const;
-    void updateTrim(int x);
+    void updateTrim(double x);
     void finishDrag();
 
     /// Pull a time to the nearest edit point, unless the modifier is held.
@@ -527,7 +527,7 @@ private:
     /// paths run. Returns whether the tool consumed the press.
     bool pressWithTool(const ui::TimelineLayout::Hit* hit, int x, int y,
                        Qt::KeyboardModifiers modifiers);
-    void updateSlip(int x);
+    void updateSlip(double x);
     void updatePan(int x);
     /// Follow the pointer with the blade, so where a cut would land -- and what
     /// it would line up with -- is visible before the click rather than after.
@@ -671,7 +671,7 @@ private:
     /// opened the menu for the clip underneath -- two buttons disagreeing
     /// about what the pointer was on.
     void transitionMenu(const TransitionRef& ref, const QPoint& at);
-    void updateTransitionDrag(int x);
+    void updateTransitionDrag(double x);
 
     /// The keyframe being dragged, or an invalid clip id when none is.
     ///
@@ -707,11 +707,33 @@ private:
     QRect band_;
     Tool tool_{Tool::Select};
     /// Where a slip was last applied from, so each mouse move asks for the
-    /// difference rather than the whole gesture again.
-    int slipAnchorX_{0};
+    /// difference rather than the whole gesture again. A double, like `fineX_`
+    /// below, so a run of fine-adjustment moves accumulates sub-pixel motion
+    /// instead of rounding it away one event at a time.
+    double slipAnchorX_{0.0};
     /// Where a pan started, in pixels and in time.
     int panAnchorX_{0};
     time::RationalTime panAnchorScroll_{};
+    /// The pointer position a fine-adjustment drag is actually at, as opposed
+    /// to where the cursor is.
+    ///
+    /// Holding Ctrl or Shift during a move, a trim, a slip, a transition edge
+    /// or a keyframe drag scales further pointer motion down, for the frame
+    /// you cannot otherwise land on once a timeline pixel is several frames
+    /// wide. Scaling the *distance moved since the last event* rather than
+    /// recomputing from the press position is what lets the modifier be
+    /// pressed and released mid-drag without the clip jumping: `fineX_` is
+    /// where the scaled motion has actually accumulated to, `fineLastRawX_`
+    /// is the raw pixel it was last measured from, and `fineDragKind_` is
+    /// which drag it belongs to, so a new drag starts fresh from the pointer
+    /// rather than from wherever the last one left off.
+    double fineX_{0.0};
+    int fineLastRawX_{0};
+    Drag fineDragKind_{Drag::None};
+    /// Whether `kind` is a drag that fine adjustment applies to -- one that
+    /// places something in time by pixel position -- as opposed to a scrub, a
+    /// pan, a box select or a track resize, which stay 1:1 with the pointer.
+    [[nodiscard]] static bool isFineAdjustable(Drag kind) noexcept;
     /// The fraction of a frame a trackpad swipe has travelled but not yet spent.
     ///
     /// Scroll is a whole number of frames, and a swipe arrives as a stream of

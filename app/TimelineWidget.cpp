@@ -89,6 +89,12 @@ constexpr int kPillGap = 5;
 /// What a badge is shadowed with when it sits over a picture.
 const QColor kBadgeShadow{0, 0, 0, 170};
 
+/// How far a fine-adjustment drag (Ctrl or Shift held) moves for each pixel
+/// the pointer actually travels. A quarter speed is enough to land on a
+/// single frame at a zoom level where a pixel is normally several of them,
+/// without the drag feeling like it has stopped responding.
+constexpr double kFineDragFactor = 0.25;
+
 /// How close to a row's bottom edge counts as grabbing it.
 constexpr int kResizeGrabPixels = 4;
 /// The range a track height may be dragged to. The floor is what the three
@@ -1390,7 +1396,7 @@ void TimelineWidget::paintClips(QPainter& painter, const ui::TimelineLayout::Row
     }
 }
 
-void TimelineWidget::dragKeyframeTo(int x) {
+void TimelineWidget::dragKeyframeTo(double x) {
     const model::Sequence* seq = sequence();
     if (seq == nullptr || project_ == nullptr || commands_ == nullptr ||
         !keyframeDrag_.clip.isValid()) {
@@ -2159,7 +2165,7 @@ std::optional<TimelineWidget::TransitionRef> TimelineWidget::transitionBodyAt(in
     return std::nullopt;
 }
 
-void TimelineWidget::updateTransitionDrag(int x) {
+void TimelineWidget::updateTransitionDrag(double x) {
     model::Sequence* seq = project_->findSequence(sequenceId_);
     if (seq == nullptr || commands_ == nullptr || !transitionDrag_.transition.isValid()) {
         return;
@@ -2200,7 +2206,7 @@ void TimelineWidget::updateTransitionDrag(int x) {
     update();
 }
 
-void TimelineWidget::updateTrim(int x) {
+void TimelineWidget::updateTrim(double x) {
     model::Sequence* seq = project_->findSequence(sequenceId_);
     if (seq == nullptr || !selected_.isValid() || commands_ == nullptr) {
         return;
@@ -2540,9 +2546,54 @@ void TimelineWidget::mouseDoubleClickEvent(QMouseEvent* event) {
     QWidget::mouseDoubleClickEvent(event);
 }
 
+bool TimelineWidget::isFineAdjustable(Drag kind) noexcept {
+    switch (kind) {
+        case Drag::MoveClip:
+        case Drag::TrimIn:
+        case Drag::TrimOut:
+        case Drag::Slip:
+        case Drag::TransitionStart:
+        case Drag::TransitionEnd:
+        case Drag::Keyframe:
+            return true;
+        case Drag::None:
+        case Drag::Scrub:
+        case Drag::TrackHeight:
+        case Drag::Band:
+        case Drag::MaybeBand:
+        case Drag::Pan:
+            return false;
+    }
+    return false;
+}
+
 void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
     const int x = static_cast<int>(event->position().x());
     const int y = static_cast<int>(event->position().y());
+
+    // Ctrl or Shift, held while a clip is being moved, trimmed, slipped, a
+    // transition edge dragged or a keyframe dragged, slows the gesture down
+    // for a frame you cannot otherwise land on once a timeline pixel is
+    // several of them wide. `fineX_` is where the scaled motion has actually
+    // accumulated to, separate from the raw pointer, so releasing the
+    // modifier mid-drag does not snap the clip back to the cursor -- only
+    // further motion is affected. A drag that is not one of these tracks the
+    // pointer 1:1, as it always has.
+    double fineX = x;
+    if (isFineAdjustable(drag_)) {
+        if (fineDragKind_ != drag_) {
+            fineDragKind_ = drag_;
+            fineX_ = x;
+            fineLastRawX_ = x;
+        }
+        const bool fine = event->modifiers().testFlag(Qt::ControlModifier) ||
+                          event->modifiers().testFlag(Qt::ShiftModifier);
+        fineX_ += (x - fineLastRawX_) * (fine ? kFineDragFactor : 1.0);
+        fineLastRawX_ = x;
+        fineX = fineX_;
+    } else {
+        fineDragKind_ = Drag::None;
+    }
 
     if (drag_ == Drag::None) {
         updateHeaderHover(x, y);
@@ -2560,7 +2611,7 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
         return;
     }
     if (drag_ == Drag::Keyframe) {
-        dragKeyframeTo(x);
+        dragKeyframeTo(fineX);
         return;
     }
     if (drag_ == Drag::MaybeBand) {
@@ -2582,19 +2633,19 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
         return;
     }
     if (drag_ == Drag::MoveClip) {
-        updateDrag(x, y);
+        updateDrag(fineX, y);
         return;
     }
     if (drag_ == Drag::TrimIn || drag_ == Drag::TrimOut) {
-        updateTrim(x);
+        updateTrim(fineX);
         return;
     }
     if (drag_ == Drag::TransitionStart || drag_ == Drag::TransitionEnd) {
-        updateTransitionDrag(x);
+        updateTransitionDrag(fineX);
         return;
     }
     if (drag_ == Drag::Slip) {
-        updateSlip(x);
+        updateSlip(fineX);
         return;
     }
     if (drag_ == Drag::Pan) {
@@ -2620,7 +2671,7 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
     }
 }
 
-void TimelineWidget::updateDrag(int x, int y) {
+void TimelineWidget::updateDrag(double x, int y) {
     model::Sequence* seq = project_->findSequence(sequenceId_);
     if (seq == nullptr || !selected_.isValid() || commands_ == nullptr) {
         return;
@@ -2870,6 +2921,11 @@ void TimelineWidget::finishDrag() {
     }
     resizeTrack_ = model::TrackId{};
     drag_ = Drag::None;
+    // So the next drag is detected as a fresh one even when it turns out to be
+    // the same kind as this one -- two trims in a row are both `TrimOut`, and
+    // without this the second would pick up the first one's leftover fine-
+    // adjustment accumulator instead of starting from wherever it is pressed.
+    fineDragKind_ = Drag::None;
     rippleTrim_ = false;
     if (duplicating_) {
         duplicating_ = false;
@@ -3145,7 +3201,7 @@ void TimelineWidget::updateBladeHover(int x, int y) {
     update();
 }
 
-void TimelineWidget::updateSlip(int x) {
+void TimelineWidget::updateSlip(double x) {
     model::Sequence* seq = project_ != nullptr ? project_->findSequence(sequenceId_) : nullptr;
     if (seq == nullptr || !selected_.isValid() || commands_ == nullptr) {
         return;
