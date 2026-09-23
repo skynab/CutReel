@@ -622,7 +622,8 @@ private:
         Slip,
         Pan,
         TransitionStart,
-        TransitionEnd
+        TransitionEnd,
+        GainPoint
     };
 
     /// One transition, by the track it is on.
@@ -684,6 +685,30 @@ private:
         time::RationalTime time;
     };
     KeyframeDrag keyframeDrag_;
+
+    /// The gain-line point being dragged, or an invalid clip id when none is.
+    ///
+    /// `time` is fixed for the life of the drag -- this is a value-only
+    /// gesture, the vertical half of what the keyframe lane's diamond already
+    /// does horizontally -- so it is read once, at the press, from
+    /// `TimelineLayout::GainPointHit` rather than re-read from the pointer's x
+    /// on every move. `animated` says whether the clip already carries a
+    /// `GainDb` curve at the time of the press: if it does not, the drag
+    /// changes the clip's plain gain instead of starting one, so nudging a
+    /// clip's overall level does not silently turn it into an animated one.
+    struct GainDrag {
+        model::TrackId track;
+        model::ClipId clip;
+        time::RationalTime time;
+        bool animated{false};
+    };
+    GainDrag gainDrag_;
+    void updateGainPoint(int y);
+    /// The gain line drawn across an audio clip, and the dots where it is
+    /// actually keyed. Audio clips only; called from `paintClips`.
+    void paintGainLine(QPainter& painter, const model::Clip& clip,
+                       const ui::TimelineLayout::Row& row, const QRectF& body);
+
     Drag drag_{Drag::None};
     /// Where in the clip the drag started, so it does not jump to the pointer.
     time::RationalTime grabOffset_{};

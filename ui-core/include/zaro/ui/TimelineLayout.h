@@ -5,6 +5,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "zaro/core/model/Sequence.h"
@@ -184,6 +185,49 @@ public:
 
     /// Every instant at which this clip has a keyframe, in source time, sorted.
     [[nodiscard]] static std::vector<time::RationalTime> keyframeTimes(const model::Clip& clip);
+
+    // --- The audio gain line -------------------------------------------------
+
+    /// The decibel range the gain line spans, top to bottom of its band. A
+    /// fader nobody would ride past +12 or below -24 is not a range worth
+    /// reaching further than, and clamping here is what keeps a keyframe set
+    /// from the Effects panel, outside it, from drawing a line that has run
+    /// off the clip.
+    static constexpr double kGainLineMinDb = -24.0;
+    static constexpr double kGainLineMaxDb = 12.0;
+
+    /// Where the gain line's band sits inside a clip's row, in pixels down
+    /// from the row's own top: below the strip and the name, above the
+    /// keyframe lane -- the same margins the waveform is drawn inside, so the
+    /// two share one picture instead of drifting apart if either one's
+    /// margins change on their own.
+    [[nodiscard]] std::pair<double, double> gainLineBand(std::int32_t rowHeight) const noexcept;
+
+    /// The y a gain lands at, within a clip's row.
+    [[nodiscard]] double yForGainDb(double gainDb, std::int32_t rowTop,
+                                    std::int32_t rowHeight) const noexcept;
+    /// The gain a y within a clip's row means, clamped to the line's range.
+    [[nodiscard]] double gainDbForY(double y, std::int32_t rowTop,
+                                    std::int32_t rowHeight) const noexcept;
+
+    struct GainPointHit {
+        model::TrackId track;
+        model::ClipId clip;
+        /// An existing keyframe's time, in source time -- or, when none is
+        /// close enough, the time under the pointer, for a drag that will add
+        /// one there.
+        time::RationalTime time;
+        bool existing{false};
+    };
+
+    /// The gain line's point nearest a press: an existing keyframe close
+    /// enough in time to mean it, or the line itself, so a drag started here
+    /// can add a keyframe where none exists yet. Audio clips only, and only
+    /// within a few pixels of the curve -- a press elsewhere on the clip is a
+    /// move, not a nudge to the gain.
+    [[nodiscard]] std::optional<GainPointHit> hitTestGainPoint(const model::Sequence& sequence,
+                                                               std::int32_t x,
+                                                               std::int32_t y) const;
 
     /// Whether a point is in the ruler, where dragging scrubs the playhead.
     [[nodiscard]] bool isInRuler(std::int32_t x, std::int32_t y) const;

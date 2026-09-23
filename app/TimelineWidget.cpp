@@ -1331,6 +1331,7 @@ void TimelineWidget::paintClips(QPainter& painter, const ui::TimelineLayout::Row
 
         if (row.kind == model::TrackKind::Audio) {
             paintWaveform(painter, *clip, body, paint.strip);
+            paintGainLine(painter, *clip, row, body);
         }
 
         // Linked to something: said on the clip, because the consequence --
@@ -1431,6 +1432,38 @@ void TimelineWidget::dragKeyframeTo(double x) {
     // The drag now follows the keyframe to its new time, or the next move would
     // look for it where it no longer is.
     keyframeDrag_.time = target;
+    emit edited();
+    update();
+}
+
+void TimelineWidget::updateGainPoint(int y) {
+    if (project_ == nullptr || commands_ == nullptr || !gainDrag_.clip.isValid()) {
+        return;
+    }
+    model::Sequence* seq = project_->findSequence(sequenceId_);
+    if (seq == nullptr) {
+        return;
+    }
+    const model::Track* track = seq->findTrack(gainDrag_.track);
+    const model::Clip* clip = track != nullptr ? track->find(gainDrag_.clip) : nullptr;
+    const auto row = rowFor(gainDrag_.track);
+    if (clip == nullptr || !row) {
+        return;
+    }
+    const double gainDb = layout_.gainDbForY(y, row->top, row->height);
+
+    const edit::EditTarget target{sequenceId_, gainDrag_.track};
+    // A clip that was not already animated gets its plain gain changed
+    // instead of a curve started: nudging the overall level of a clip should
+    // not, on its own, turn it into a keyframed one.
+    auto built = gainDrag_.animated
+                     ? edit::makeSetKeyframe(*project_, target, gainDrag_.clip,
+                                             model::Param::GainDb, gainDrag_.time, gainDb)
+                     : edit::makeSetClipAudio(*project_, target, gainDrag_.clip, gainDb, clip->pan);
+    if (!built) {
+        return;
+    }
+    commands_->execute(*project_, std::move(*built));
     emit edited();
     update();
 }
@@ -1547,6 +1580,62 @@ void TimelineWidget::paintWaveform(QPainter& painter, const model::Clip& clip, c
         painter.drawLine(QPointF(x, midY - static_cast<double>(maximum) * halfHeight),
                          QPointF(x, midY - static_cast<double>(minimum) * halfHeight));
     }
+}
+
+void TimelineWidget::paintGainLine(QPainter& painter, const model::Clip& clip,
+                                   const ui::TimelineLayout::Row& row, const QRectF& body) {
+    const model::Sequence* seq = sequence();
+    if (seq == nullptr) {
+        return;
+    }
+
+    QColor line = theme::text();
+    line.setAlpha(190);
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setPen(QPen(line, 1.3));
+
+    // One vertex per pixel, the same walk `paintWaveform` makes across the
+    // clip -- so the line is drawn at exactly the resolution the pointer is
+    // hit-tested at, and a keyframe's shape between two points is not
+    // guessed at any coarser than the eye can already tell it apart.
+    QPainterPath path;
+    bool started = false;
+    const auto from = static_cast<int>(std::floor(body.left()));
+    const auto to = static_cast<int>(std::ceil(body.right()));
+    for (int x = from; x <= to; ++x) {
+        const time::RationalTime timelineTime = layout_.timeForX(x, seq->frameRate());
+        if (!clip.timelineRange.contains(timelineTime)) {
+            continue;
+        }
+        const double y = layout_.yForGainDb(clip.gainDbAt(timelineTime), row.top, row.height);
+        if (!started) {
+            path.moveTo(x, y);
+            started = true;
+        } else {
+            path.lineTo(x, y);
+        }
+    }
+    if (started) {
+        painter.drawPath(path);
+    }
+
+    // A dot at every instant this is actually keyed, so the line reads as
+    // something with points on it rather than a fixed level nobody set.
+    if (const model::Curve* curve = clip.animation.find(model::Param::GainDb); curve != nullptr) {
+        painter.setBrush(line);
+        for (const model::Keyframe& key : curve->keyframes()) {
+            const time::RationalTime timelineTime = clip.timelineTimeOf(key.time);
+            if (!clip.timelineRange.contains(timelineTime)) {
+                continue;
+            }
+            const double x = layout_.xForTime(timelineTime);
+            const double y = layout_.yForGainDb(key.value, row.top, row.height);
+            painter.drawEllipse(QPointF(x, y), 3.0, 3.0);
+        }
+        painter.setBrush(Qt::NoBrush);
+    }
+    painter.restore();
 }
 
 bool TimelineWidget::paintFilmstrip(QPainter& painter, const model::Clip& clip,
@@ -1978,6 +2067,37 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
             }
             keyframeDrag_ = KeyframeDrag{key->track, key->clip, key->time};
             drag_ = Drag::Keyframe;
+            update();
+            return;
+        }
+    }
+
+    // The gain line next, and tested for the same reason a keyframe diamond
+    // is: it is drawn across an audio clip's own body, so testing the clip
+    // first would start a move every time and the line could never be
+    // grabbed.
+    if (tool_ == Tool::Select) {
+        if (const auto gain = layout_.hitTestGainPoint(*seq, x, y)) {
+            if (gain->existing && event->modifiers().testFlag(Qt::AltModifier)) {
+                if (commands_ != nullptr) {
+                    auto built =
+                        edit::makeRemoveKeyframe(*project_, {sequenceId_, gain->track}, gain->clip,
+                                                 model::Param::GainDb, gain->time);
+                    if (built) {
+                        commands_->execute(*project_, std::move(*built));
+                        commands_->breakMerge();
+                        emit edited();
+                    }
+                }
+                update();
+                return;
+            }
+            const model::Track* track = seq->findTrack(gain->track);
+            const model::Clip* clip = track != nullptr ? track->find(gain->clip) : nullptr;
+            const bool animated =
+                clip != nullptr && clip->animation.find(model::Param::GainDb) != nullptr;
+            gainDrag_ = GainDrag{gain->track, gain->clip, gain->time, animated};
+            drag_ = Drag::GainPoint;
             update();
             return;
         }
@@ -2612,6 +2732,10 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
     }
     if (drag_ == Drag::Keyframe) {
         dragKeyframeTo(fineX);
+        return;
+    }
+    if (drag_ == Drag::GainPoint) {
+        updateGainPoint(y);
         return;
     }
     if (drag_ == Drag::MaybeBand) {
