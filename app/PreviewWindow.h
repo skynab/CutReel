@@ -26,16 +26,17 @@
 #include <QAction>
 #include <QApplication>
 #include <QComboBox>
+#include <QDockWidget>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QKeyEvent>
+#include <QMainWindow>
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QProgressDialog>
 #include <QPushButton>
 #include <QSettings>
-#include <QSplitter>
 #include <QStringList>
 #include <QSysInfo>
 #include <QTimer>
@@ -184,9 +185,10 @@ private:
 
     /// Every panel the window owns, and the sizes the design fixes them at.
     void createPanels();
-    /// Splitters rather than fixed layouts: panel sizes are a matter of what
-    /// someone is doing at the time, and the arrangement is remembered
-    /// between sessions.
+    /// Dock widgets rather than fixed layouts: where a panel sits, and how
+    /// big it is, is a matter of what someone is doing at the time, and the
+    /// arrangement -- including having dragged one somewhere else entirely --
+    /// is remembered between sessions.
     void buildViewerLayout();
     /// What the bin, the gallery, the strips and the source monitor do to
     /// each other when something in one of them is picked.
@@ -380,7 +382,7 @@ public:
     /// directory: ZARO_KEYMAP names the file.
     static void setKeymapPath(const QString& path) { ActionRouter::setKeymapPath(path); }
 
-    /// Where the remembered window geometry, workspace and splitter positions
+    /// Where the remembered window geometry, workspace and panel arrangement
     /// are kept.
     ///
     /// Overridable for the same reason the keymap is, and it bit harder. These
@@ -734,6 +736,16 @@ private:
 
     void buildMenus();
 
+    /// The Window menu, filled in twice: `buildMenus` makes it (and the Help
+    /// menu beside it) before the docks exist, and `buildDockMenuActions`
+    /// appends one toggle per dock once `buildWindowLayout` has made them.
+    QMenu* windowMenu_{nullptr};
+
+    /// One `toggleViewAction()` per dock, so a panel tabbed away or floated
+    /// off-screen -- not possible before this window had docks at all -- has
+    /// a way back that does not depend on remembering where it went.
+    void buildDockMenuActions();
+
     /// A Window-menu item that shows and hides one panel.
     template <typename F>
     void panelAction(QMenu* menu, const QString& text, F&& panel) {
@@ -784,13 +796,16 @@ public:
     /// the source to do it.
     void showProgram() { setProgramShown(true); }
 
-    /// Where a workspace's splitter sizes are remembered.
+    /// Where a workspace's dock arrangement is remembered.
     ///
-    /// Versioned, because restoring a size list into a splitter with a
-    /// different number of panes leaves the new ones at zero width -- which
-    /// looks exactly like a panel that failed to appear. Bump the number when
-    /// panes are added or removed from either splitter.
-    static QString layoutKey(const QString& workspace, const char* which);
+    /// One key per workspace: `QMainWindow::saveState`/`restoreState` keep
+    /// the whole dock host's arrangement -- which panel is where, tabbed with
+    /// what, floating and at what geometry -- in one blob, keyed by each
+    /// dock's object name rather than by its position in a list. `restoreState`
+    /// is given `kDockStateVersion` alongside the blob and refuses a mismatch
+    /// on its own, which is what the old `-vN` suffix on this string used to
+    /// have to be bumped by hand for.
+    static QString layoutKey(const QString& workspace);
 
     /// A workspace is which panels are up. Four arrangements, because there are
     /// four things people do with an editor, and each of them wants a different
@@ -894,10 +909,10 @@ private:
     void stepBack() { step(-1); }
     void stepForward() { step(1); }
 
-    /// Panel sizes and window geometry, remembered between sessions.
+    /// Panel arrangement and window geometry, remembered between sessions.
     ///
     /// Saved on close rather than continuously: writing settings on every drag
-    /// of a splitter is a lot of disk traffic for something only read once.
+    /// of a panel is a lot of disk traffic for something only read once.
     void saveWorkspace();
 
     void restoreWorkspace();
@@ -1141,8 +1156,36 @@ private:
     /// Which keystroke runs what, and everything that can be run.
     ActionRouter actions_{this};
     app::SourceMonitor* source_{nullptr};
-    QSplitter* topSplitter_{nullptr};
-    QSplitter* mainSplitter_{nullptr};
+
+    /// The dock host: an embedded `QMainWindow` used purely for its dock-area
+    /// machinery (drag/drop, floating, tabbing, versioned save/restore), sat
+    /// in page 0 of `bars_.workspaceStack` in place of what used to be a fixed
+    /// pair of `QSplitter`s. `PreviewWindow` itself stays a plain `QWidget` --
+    /// its own title bar, tool bar and status bar are untouched by this.
+    QMainWindow* dockHost_{nullptr};
+    /// The nine panels that can be dragged anywhere in `dockHost_`, tabbed
+    /// together, or floated. Everything else that used to live in the old
+    /// `topSplitter_` stays a plain sub-widget of one of these (`mixer_` and
+    /// `clipStrip_` inside `dockProgram_`, for instance) rather than becoming
+    /// independently dockable -- see `buildViewerLayout`.
+    QDockWidget* dockBin_{nullptr};
+    QDockWidget* dockPalette_{nullptr};
+    QDockWidget* dockAudioSide_{nullptr};
+    QDockWidget* dockProgram_{nullptr};
+    QDockWidget* dockEffects_{nullptr};
+    QDockWidget* dockGradeChain_{nullptr};
+    QDockWidget* dockChannel_{nullptr};
+    QDockWidget* dockScopes_{nullptr};
+    QDockWidget* dockTimeline_{nullptr};
+    /// Wrap one panel for `dockHost_`: an object name (for
+    /// `QMainWindow::saveState`, which keys by name), a title, the content,
+    /// and whether the content already draws its own header (see
+    /// `chrome::buildDockHeader`). Closeable unless `closable` is false.
+    QDockWidget* makeDock(const char* objectName, const QString& title, QWidget* content,
+                          bool showLabel, bool closable = true);
+    /// Rebuild the shipped default arrangement of the nine docks above, for a
+    /// first run and for "reset-panels".
+    void applyDefaultDockLayout();
 
     /// The chrome. None of it owns anything: every one of these is a child of
     /// the window, and Qt deletes them with it.

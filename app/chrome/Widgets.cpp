@@ -9,12 +9,15 @@
 #include <QAbstractItemModel>
 #include <QAbstractItemView>
 #include <QComboBox>
+#include <QCoreApplication>
 #include <QDesktopServices>
+#include <QDockWidget>
 #include <QEvent>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QKeySequence>
 #include <QLabel>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QRect>
 #include <QSize>
@@ -58,6 +61,58 @@ private:
     std::function<void()> sync_;
 };
 
+/// Relays a title bar widget's mouse events to the dock widget it belongs to.
+///
+/// `QDockWidget` implements dragging, floating and the redock preview
+/// entirely inside its own mousePress/Move/ReleaseEvent, reached only by
+/// events Qt delivers to the `QDockWidget` itself. `setTitleBarWidget`
+/// installs a real child widget over that area, which is in front of the
+/// dock widget as far as event delivery is concerned -- so without this, a
+/// dock with its own header widget could be resized and closed but never
+/// picked up and moved, which was the entire point of giving it one.
+class DockDragForwarder : public QObject {
+public:
+    DockDragForwarder(QDockWidget* dock, QObject* parent) : QObject{parent}, dock_{dock} {}
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override {
+        auto* header = qobject_cast<QWidget*>(watched);
+        if (header == nullptr || dock_ == nullptr) {
+            return false;
+        }
+        switch (event->type()) {
+            case QEvent::MouseButtonPress:
+            case QEvent::MouseMove:
+            case QEvent::MouseButtonRelease:
+            case QEvent::MouseButtonDblClick: {
+                auto* mouse = static_cast<QMouseEvent*>(event);
+                const QPointF dockPos = header->mapTo(dock_, mouse->position().toPoint());
+                QMouseEvent forwarded(mouse->type(), dockPos, dock_->mapToGlobal(dockPos.toPoint()),
+                                      mouse->button(), mouse->buttons(), mouse->modifiers());
+                QCoreApplication::sendEvent(dock_, &forwarded);
+                // A real drag carries the cursor away from this eight- or
+                // twenty-two-pixel strip almost immediately, and a widget
+                // only hears about the mouse while the cursor is over it --
+                // unless it has grabbed it. Without the grab, everything
+                // above forwards exactly one press and no moves at all,
+                // which looks identical to nothing having happened.
+                if (event->type() == QEvent::MouseButtonPress) {
+                    header->grabMouse();
+                } else if (event->type() == QEvent::MouseButtonRelease) {
+                    header->releaseMouse();
+                }
+                break;
+            }
+            default:
+                break;
+        }
+        return false;
+    }
+
+private:
+    QDockWidget* dock_{nullptr};
+};
+
 }  // namespace
 
 QPushButton* button(QWidget* parent, const QString& text, const QString& tip, bool checkable) {
@@ -93,6 +148,51 @@ QLabel* mutedLabel(QWidget* parent, const QString& text) {
     auto* label = new QLabel(text, parent);
     label->setProperty("muted", true);
     return label;
+}
+
+QWidget* buildDockHeader(QWidget* parent, const QString& title, bool showLabel,
+                         const std::function<void()>& onClose) {
+    auto* header = new QWidget(parent);
+    header->setObjectName("dock-header");
+    // One height for every dock, named or not: Qt's own drag-initiation
+    // hit-testing needs more room than an eight-pixel hairline gives it to
+    // work with -- measured directly, a grip that thin never starts a drag
+    // at all, which defeats the entire point of giving a dock a header.
+    header->setFixedHeight(22);
+    auto* row = new QHBoxLayout(header);
+    row->setContentsMargins(8, 0, 4, 0);
+    if (showLabel) {
+        auto* label = new QLabel(title, header);
+        label->setObjectName("dock-header-label");
+        // Transparent to the mouse: a label is not a control, and letting it
+        // eat the press is how a header with a name would stop being
+        // draggable by its name -- only by the blank space beside it, which
+        // is not where anybody reaches first.
+        label->setAttribute(Qt::WA_TransparentForMouseEvents);
+        row->addWidget(label);
+    }
+    // No name here otherwise: the panel underneath already says what it is
+    // (its own tab strip or sticky header), and a second title would just
+    // repeat it.
+    row->addStretch(1);
+    if (onClose) {
+        auto* close = new QPushButton(header);
+        close->setObjectName("dock-header-close");
+        close->setProperty("flat", true);
+        close->setFocusPolicy(Qt::NoFocus);
+        close->setIcon(app::icons::toolIcon(app::icons::Glyph::Close, 11));
+        close->setIconSize(QSize(11, 11));
+        close->setFixedSize(16, 16);
+        close->setToolTip(QObject::tr("Close"));
+        QObject::connect(close, &QPushButton::clicked, header, onClose);
+        row->addWidget(close);
+    }
+    // See DockDragForwarder: without this, dragging the header does nothing
+    // at all.
+    if (auto* dock = qobject_cast<QDockWidget*>(parent)) {
+        header->installEventFilter(new DockDragForwarder(dock, header));
+    }
+    return header;
 }
 
 void setElidedText(QLabel* label, const QString& text, Qt::TextElideMode mode) {

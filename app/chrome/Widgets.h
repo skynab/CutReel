@@ -85,6 +85,25 @@ struct Hooks {
     std::function<void(std::int32_t, std::int32_t)> chooseFrameSize;
 };
 
+/// A dock widget's title bar: a thin grip strip, with a name on it or not.
+///
+/// `showLabel` is false for a panel that already draws its own header or tab
+/// row inside its own content (the bin, the effect controls, the scopes) --
+/// giving one of those a second, named title bar would repeat what its own
+/// header already says, so it gets a blank strip to grab and drop by instead.
+/// Everything else has no header of its own and gets a name on the strip, or
+/// nobody dragging it would know what it was by looking at the frame alone.
+/// Both are the same height: a strip thin enough to read as "not a second
+/// header" turns out to be too thin for Qt's own drag-initiation hit-testing
+/// to ever start a drag from at all, which was tried and measured, not
+/// guessed.
+///
+/// `setTitleBarWidget` replaces Qt's own title bar wholesale, close button
+/// and all, so `onClose` puts one back when it is not empty -- left empty for
+/// the one dock (the timeline) that should not be closeable at all.
+QWidget* buildDockHeader(QWidget* parent, const QString& title, bool showLabel,
+                         const std::function<void()>& onClose = {});
+
 QWidget* buildTitleBar(QWidget* parent, Bars& bars);
 QWidget* buildStatusBar(QWidget* parent, Bars& bars);
 QWidget* buildToolPalette(QWidget* parent, Bars& bars,

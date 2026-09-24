@@ -370,6 +370,13 @@ QSplitter::handle:horizontal { width: 1px; }
 QSplitter::handle:vertical { height: 1px; }
 QSplitter::handle:hover { background: %ACCENT%; }
 
+/* The dock host's own separators, between docked panels. A different
+   selector from QSplitter::handle above even though it is the same hairline
+   look -- QMainWindow draws its internal splits through this one, not
+   through QSplitter. */
+QMainWindow::separator { background: %DIVIDER%; width: 1px; height: 1px; }
+QMainWindow::separator:hover { background: %ACCENT%; }
+
 QProgressBar {
     border: 1px solid %DIVIDER%; border-radius: 5px; background: %BG%;
     max-height: 8px; text-align: center; color: transparent;
@@ -397,6 +404,14 @@ QMessageBox QLabel { color: %TEXT%; }
     background: %BG%; border-bottom: 1px solid %DIVIDER%;
 }
 #chrome-statusbar { background: %BG%; border-top: 1px solid %DIVIDER%; }
+/* A dock's title bar. Plain and thin on purpose: the panel it belongs to
+   already has whatever chrome it needs, so this only has to say what the
+   panel is (when it says anything at all -- see chrome::buildDockHeader)
+   and give a place to grab it by. */
+#dock-header { background: %BG%; border-bottom: 1px solid %DIVIDER%; }
+#dock-header-label { color: %MUTED%; font-size: 11px; }
+#dock-header-close { border: none; border-radius: 3px; }
+#dock-header-close:hover { background: %HOVER%; }
 #chrome-statusbar QLabel, #chrome-toolbar QLabel[muted="true"],
 #chrome-timeline-bar QLabel[muted="true"], #chrome-viewer-bar QLabel[muted="true"] {
     color: %MUTED%; font-size: 11px;

@@ -89,6 +89,13 @@ QString versionText() {
 /// shot ever needs at once. See PreviewWindow::analyseInBackground.
 constexpr std::size_t kAnalysisCacheBytes = 64u * 1024u * 1024u;
 
+/// Passed to `dockHost_->saveState()`/`restoreState()` alongside each
+/// workspace's blob. `restoreState` refuses a blob saved under a different
+/// version on its own, so a real change to which docks exist or how they
+/// nest is retired by bumping this number, the same way the old `-vN` suffix
+/// on `layoutKey`'s string had to be bumped by hand.
+constexpr int kDockStateVersion = 1;
+
 }  // namespace
 
 PreviewWindow::PreviewWindow(model::Project project, io::LoadedProject loaded, std::string path) {
@@ -243,11 +250,11 @@ void PreviewWindow::createPanels() {
     // The same frames the timeline draws on its clips, from the same worker:
     // a bin row and a filmstrip cell of one file are the same decode.
     bin_->setThumbnailCache(thumbnails_);
-    // The width the design fixes the media pane at. Fixed rather than a
-    // range because the row inside it is fixed too -- a 64-pixel thumbnail,
-    // two lines of type and a dot -- and the pane has nothing that would
-    // use the extra space if it were given any.
-    bin_->setFixedWidth(296);
+    // The floor the design sets for the media pane: below it the row --
+    // a 64-pixel thumbnail, two lines of type and a dot -- starts
+    // truncating. Above the floor the splitter is free to give it more,
+    // for a longer file name or a bigger thumbnail to read at a glance.
+    bin_->setMinimumWidth(296);
 
     thumb_ = new app::FrameThumb(this);
     loudness_ = new app::LoudnessPanel(this);
@@ -272,6 +279,27 @@ void PreviewWindow::createPanels() {
     source_->setMinimumWidth(source_->minimumSizeHint().width());
 }
 
+QDockWidget* PreviewWindow::makeDock(const char* objectName, const QString& title, QWidget* content,
+                                     bool showLabel, bool closable) {
+    auto* dock = new QDockWidget(title, this);
+    // saveState()/restoreState() key a dock by this name, not by pointer or
+    // position -- an unnamed dock is one they silently fail to restore.
+    dock->setObjectName(QString::fromUtf8(objectName));
+    dock->setWidget(content);
+    QDockWidget::DockWidgetFeatures features =
+        QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable;
+    if (closable) {
+        features |= QDockWidget::DockWidgetClosable;
+    }
+    dock->setFeatures(features);
+    std::function<void()> onClose;
+    if (closable) {
+        onClose = [dock] { dock->close(); };
+    }
+    dock->setTitleBarWidget(chrome::buildDockHeader(dock, title, showLabel, onClose));
+    return dock;
+}
+
 void PreviewWindow::buildViewerLayout() {
     // Source and program side by side, each shown or not on its own.
     //
@@ -289,12 +317,6 @@ void PreviewWindow::buildViewerLayout() {
     wellRow->setSpacing(12);
     wellRow->addWidget(source_, 1);
     wellRow->addWidget(monitor_, 1);
-    // Scopes beside the picture rather than off in the parameter column,
-    // which is where the design puts them and where they are read: an
-    // instrument is compared against the frame it measures, and a glance
-    // that crosses the whole window is a glance nobody takes.
-    scopes_->setFixedWidth(330);
-    wellRow->addWidget(scopes_);
     bars_.noMonitorLabel = new QLabel("No monitor shown \u2014 turn on Source or Program", this);
     bars_.noMonitorLabel->setAlignment(Qt::AlignCenter);
     bars_.noMonitorLabel->setProperty("muted", true);
@@ -314,12 +336,11 @@ void PreviewWindow::buildViewerLayout() {
     programLayout->addWidget(mixer_, 1);
     programLayout->addWidget(clipStrip_);
     programLayout->addWidget(buildTransportBar());
+    dockProgram_ = makeDock("dock-program", tr("Program"), programColumn, /*showLabel=*/true);
 
-    topSplitter_ = new QSplitter(Qt::Horizontal, this);
-    topSplitter_->setHandleWidth(1);
     auto* leftColumn = new QWidget(this);
     leftColumn->setObjectName("audio-side");
-    leftColumn->setFixedWidth(262);
+    leftColumn->setMinimumWidth(262);
     auto* leftLayout = new QVBoxLayout(leftColumn);
     leftLayout->setContentsMargins(0, 0, 0, 0);
     leftLayout->setSpacing(0);
@@ -328,14 +349,13 @@ void PreviewWindow::buildViewerLayout() {
     leftLayout->addWidget(stems_);
     leftLayout->addStretch(1);
     bars_.audioSide = leftColumn;
+    dockAudioSide_ = makeDock("dock-audio-side", tr("Levels"), bars_.audioSide, /*showLabel=*/true);
 
-    topSplitter_->addWidget(bars_.audioSide);
     // The grading palette is the Color room's left column: the wheels, the
     // bars and the ramps, stacked. It used to run along the bottom, which is
     // where the timeline belongs -- a colourist reads the cut across and the
     // controls down, not the other way about.
-    topSplitter_->addWidget(palette_);
-    palette_->setFixedWidth(310);
+    palette_->setMinimumWidth(310);
     // The gallery is not a pane of its own: its two panels hang off the
     // palette's tab strip, beside Wheels and Bars, so that everything a
     // colourist reaches for while grading is in one column behind one row of
@@ -344,19 +364,29 @@ void PreviewWindow::buildViewerLayout() {
     palette_->addPage(tr("Gallery"), app::icons::Glyph::Camera, gallery_->stillsPage());
     palette_->addPage(tr("LUTs"), app::icons::Glyph::FolderOpen, gallery_->lutsPage());
     gallery_->hide();
-    topSplitter_->addWidget(bin_);
-    topSplitter_->addWidget(programColumn);
-    // Scopes share the parameter column: they are read while grading, and
-    // grading is done with the parameters in reach.
-    // The grade chain sits on top of the parameters it navigates, in one
-    // column rather than as a splitter pane: the node strip is a fixed
-    // 118 pixels and giving it a drag handle would invite somebody to
-    // squash a picture that has nothing to gain from being shorter.
-    auto* gradeColumn = new QWidget(this);
-    auto* gradeLayout = new QVBoxLayout(gradeColumn);
-    gradeLayout->setContentsMargins(0, 0, 0, 0);
-    gradeLayout->setSpacing(0);
-    bars_.nodesBox = new QWidget(gradeColumn);
+    dockPalette_ = makeDock("dock-palette", tr("Color"), palette_, /*showLabel=*/true);
+
+    // The media pane. No label on its header -- the bin already draws its own
+    // tab strip and search field, and a second name above that would be a
+    // second header for one panel.
+    dockBin_ = makeDock("dock-bin", tr("Project Bin"), bin_, /*showLabel=*/false);
+
+    // Scopes: read while grading, beside the picture rather than off in the
+    // parameter column, which is where the design used to put them, fixed at
+    // 330 pixels inside the viewer well. Its own dock now, like everything
+    // else: an instrument is compared against the frame it measures, and
+    // pinning it to one spot beside the monitor was never the point -- being
+    // reachable while grading was.
+    dockScopes_ = makeDock("dock-scopes", tr("Scopes"), scopes_, /*showLabel=*/false);
+
+    // The grade chain sits over the parameters it navigates. The two used to
+    // share one fixed column with no drag handle between them on purpose --
+    // the node strip is a fixed 118 pixels, and a handle there would have
+    // invited squashing a picture that had nothing to gain from being
+    // shorter. As two docks that floor is `bars_.nodesBox`'s own size hint
+    // rather than a splitter constraint, and they still default to the same
+    // stacked arrangement.
+    bars_.nodesBox = new QWidget(this);
     bars_.nodesBox->setObjectName("grade-nodes-box");
     auto* nodesLayout = new QVBoxLayout(bars_.nodesBox);
     nodesLayout->setContentsMargins(12, 10, 12, 10);
@@ -427,15 +457,15 @@ void PreviewWindow::buildViewerLayout() {
             &PreviewWindow::applyInputLut);
     connect(colorManagement_, &app::ColorManagement::deliveryChosen, this,
             [this](const model::Sequence::Output& wanted) { setDelivery(wanted); });
-    gradeLayout->addWidget(bars_.nodesBox);
-    gradeLayout->addWidget(effects_, 1);
+    dockGradeChain_ = makeDock("dock-grade-chain", tr("Grade Chain"), bars_.nodesBox,
+                               /*showLabel=*/true);
 
-    auto* rightColumn = new QSplitter(Qt::Vertical, this);
-    rightColumn->setHandleWidth(1);
-    rightColumn->addWidget(gradeColumn);
-    rightColumn->addWidget(channel_);
-    rightColumn->setStretchFactor(0, 4);
-    rightColumn->setStretchFactor(1, 4);
+    // No label -- the parameter panel's own sticky header already carries
+    // the clip's name and its own Inspector/Audio/Info/Transition tabs.
+    dockEffects_ = makeDock("dock-effects", tr("Effect Controls"), effects_, /*showLabel=*/false);
+
+    dockChannel_ = makeDock("dock-channel", tr("Channel Strip"), channel_, /*showLabel=*/true);
+
     // Floors, so no panel can be squeezed to a sliver by its neighbours. A
     // scope four pixels tall or a mixer with no meter is worse than one
     // that pushes the window wider: it looks like a broken panel rather
@@ -443,11 +473,6 @@ void PreviewWindow::buildViewerLayout() {
     effects_->setMinimumHeight(220);
     scopes_->setMinimumHeight(150);
     mixer_->setMinimumHeight(190);
-    topSplitter_->addWidget(rightColumn);
-    // By index-of rather than by a literal: the panes either side of the
-    // viewer have been reordered twice now, and a hard-coded 3 silently
-    // stretches whichever pane has drifted into that slot.
-    topSplitter_->setStretchFactor(topSplitter_->indexOf(programColumn), 3);
 }
 
 void PreviewWindow::wireWorkspacePanels() {
@@ -607,13 +632,27 @@ void PreviewWindow::wireWorkspacePanels() {
 }
 
 void PreviewWindow::buildWindowLayout() {
-    mainSplitter_ = new QSplitter(Qt::Vertical, this);
-    mainSplitter_->setHandleWidth(1);
-    mainSplitter_->addWidget(topSplitter_);
+    // An embedded QMainWindow, used purely for its dock-area machinery --
+    // drag, drop, float, tab, and versioned save/restore keyed by each
+    // dock's object name. It has a parent, so it is an ordinary child widget
+    // here rather than a top-level window; PreviewWindow's own title bar,
+    // tool bar and status bar, built below, are untouched by this.
+    dockHost_ = new QMainWindow(this);
+    dockHost_->setDockNestingEnabled(true);
+    // Without these the bottom dock area only runs under the centre column,
+    // stopping short of whatever is docked to the left -- the timeline used
+    // to span the full window width under everything, and should still.
+    dockHost_->setCorner(Qt::BottomLeftCorner, Qt::BottomDockWidgetArea);
+    dockHost_->setCorner(Qt::BottomRightCorner, Qt::BottomDockWidgetArea);
+
     bars_.timelinePane = buildTimelinePane();
-    mainSplitter_->addWidget(bars_.timelinePane);
-    mainSplitter_->setStretchFactor(0, 3);
-    mainSplitter_->setStretchFactor(1, 2);
+    // Movable and floatable like every other panel, but not closeable: no
+    // workspace has ever let the timeline be taken down, and giving it a
+    // close button would be a new way to lose it with no obvious way back.
+    dockTimeline_ = makeDock("dock-timeline", tr("Timeline"), bars_.timelinePane,
+                             /*showLabel=*/false, /*closable=*/false);
+
+    applyDefaultDockLayout();
 
     // Deliver is not a rearrangement of the edit panels, it is a different
     // screen: presets, settings and a render queue, with no timeline. So it
@@ -623,7 +662,7 @@ void PreviewWindow::buildWindowLayout() {
     connect(deliver_, &app::DeliverPanel::queueChanged, this, [this] { updateChrome(); });
 
     bars_.workspaceStack = new QStackedWidget(this);
-    bars_.workspaceStack->addWidget(mainSplitter_);
+    bars_.workspaceStack->addWidget(dockHost_);
     bars_.workspaceStack->addWidget(deliver_);
 
     auto* layout = new QVBoxLayout(this);
@@ -633,6 +672,26 @@ void PreviewWindow::buildWindowLayout() {
     layout->addWidget(buildToolBar());
     layout->addWidget(bars_.workspaceStack, 1);
     layout->addWidget(buildStatusBar());
+
+    buildDockMenuActions();
+}
+
+void PreviewWindow::applyDefaultDockLayout() {
+    // A first-pass approximation of the old fixed arrangement -- audio side
+    // | palette | bin, tabbed together since at most one of the three is
+    // ever visible in a given workspace; the viewer; the grade chain over
+    // the parameters, tabbed with scopes and the channel strip; the timeline
+    // the full width of the bottom. Not a pixel-parity goal, just somewhere
+    // sane to start before anybody has dragged anything.
+    dockHost_->addDockWidget(Qt::LeftDockWidgetArea, dockBin_);
+    dockHost_->splitDockWidget(dockBin_, dockProgram_, Qt::Horizontal);
+    dockHost_->splitDockWidget(dockProgram_, dockGradeChain_, Qt::Horizontal);
+    dockHost_->splitDockWidget(dockGradeChain_, dockEffects_, Qt::Vertical);
+    dockHost_->tabifyDockWidget(dockBin_, dockPalette_);
+    dockHost_->tabifyDockWidget(dockBin_, dockAudioSide_);
+    dockHost_->tabifyDockWidget(dockGradeChain_, dockScopes_);
+    dockHost_->tabifyDockWidget(dockEffects_, dockChannel_);
+    dockHost_->addDockWidget(Qt::BottomDockWidgetArea, dockTimeline_);
 }
 
 void PreviewWindow::wireEditingSignals() {
@@ -2689,7 +2748,18 @@ void PreviewWindow::bindCommands() {
             bars_.guidesButton->setChecked(on);
         }
     });
-    actions_.bind("reset-panels", [this] { setWorkspace(workspace_); });
+    // A real reset now, not just a resync: before docks could be dragged
+    // away, tabbed under something, or floated off-screen, re-running
+    // setWorkspace on the workspace already active was enough, since nothing
+    // could actually get lost. Now it can, so this puts every dock back
+    // where the shipped default puts it first -- addDockWidget et al. move a
+    // dock that is already in the layout rather than duplicating it -- and
+    // then goes through setWorkspace as usual so the visibility, the tabs
+    // and the newly-reset arrangement are saved and applied together.
+    actions_.bind("reset-panels", [this] {
+        applyDefaultDockLayout();
+        setWorkspace(workspace_);
+    });
     actions_.bind("hotkeys", [this] { showHotkeys(); });
     actions_.bind("about", [this] {
         app::About about{this};
@@ -2698,22 +2768,39 @@ void PreviewWindow::bindCommands() {
 }
 
 void PreviewWindow::buildMenus() {
+    // The Window menu's panel toggles are filled in later, by
+    // buildDockMenuActions -- the docks themselves do not exist until
+    // buildWindowLayout runs, which is after buildMenus in the constructor's
+    // order. Only the menu itself, and the items that need nothing but
+    // actions already bound, go in here.
     bars_.menuBar = chrome::buildMenuBar(
         this, actions_, kWorkspaces, bars_.workspaceActions,
         [this](const QString& name) { setWorkspace(name); },
         [this](QMenuBar* bar) {
-            QMenu* window = bar->addMenu("Window");
-            panelAction(window, "Project Bin", [this] { return bin_; });
-            panelAction(window, "Effect Controls",
-                        [this] { return static_cast<QWidget*>(effects_); });
-            panelAction(window, "Scopes", [this] { return static_cast<QWidget*>(scopes_); });
-            panelAction(window, "Audio Mixer", [this] { return static_cast<QWidget*>(mixer_); });
-            window->addSeparator();
-            menuItem(window, "reset-panels");
+            windowMenu_ = bar->addMenu("Window");
             QMenu* help = bar->addMenu("Help");
             menuItem(help, "hotkeys");
             menuItem(help, "about");
         });
+}
+
+void PreviewWindow::buildDockMenuActions() {
+    // toggleViewAction() is a checkable QAction a QDockWidget already keeps
+    // in sync with its own shown/hidden/floating state -- no manual
+    // aboutToShow resync needed, unlike panelAction below. The timeline is
+    // deliberately absent: it has no close button (see makeDock), so there
+    // is nothing here to give it a way back from.
+    for (QDockWidget* dock : {dockBin_, dockPalette_, dockAudioSide_, dockProgram_, dockEffects_,
+                              dockGradeChain_, dockChannel_, dockScopes_}) {
+        windowMenu_->addAction(dock->toggleViewAction());
+    }
+    // Not a dock: the mixer is a plain sub-widget of dockProgram_'s content,
+    // swapped for the viewer well by workspace rather than placed anywhere
+    // of its own (see buildViewerLayout), so it keeps the older, hand-written
+    // toggle instead of a QDockWidget's ready-made one.
+    panelAction(windowMenu_, "Audio Mixer", [this] { return static_cast<QWidget*>(mixer_); });
+    windowMenu_->addSeparator();
+    menuItem(windowMenu_, "reset-panels");
 }
 
 chrome::Hooks PreviewWindow::chromeHooks() {
@@ -2777,18 +2864,16 @@ void PreviewWindow::setProgramShown(bool on) {
     syncViewers();
 }
 
-QString PreviewWindow::layoutKey(const QString& workspace, const char* which) {
-    // -v6: the gallery stopped being a pane of its own -- its panels moved
-    // into the palette's tabs -- so the top splitter has one pane fewer.
-    // -v5: the grading palette moved from the bottom splitter to the left
-    // column, so a saved state restores sizes for a pane that is no longer in
-    // that splitter at all.
-    // -v4: Color gained the timeline pane. A layout saved before that was
-    // stored with the pane hidden, and restoring it over a pane that is now
-    // shown gives it zero height -- a timeline that is present, correct and
-    // invisible, which reads as the feature not being there at all. Bumping
-    // the key retires those layouts instead of restoring them.
-    return QString("workspace/%1/%2-v6").arg(workspace, QString::fromUtf8(which));
+QString PreviewWindow::layoutKey(const QString& workspace) {
+    // One key per workspace now, holding one QMainWindow::saveState() blob
+    // for the whole dock host -- which pane is where, tabbed with what,
+    // floating and at what geometry. Unlike the old per-splitter blobs this
+    // is keyed by each dock's object name rather than by its position in a
+    // list, so a pane added, removed or reordered does not by itself make a
+    // saved layout stale. Retiring a stale layout on a real shape change is
+    // `kDockStateVersion`'s job now, passed alongside this key to
+    // saveState()/restoreState() -- bump that constant instead of this string.
+    return QString("workspace/%1/dock").arg(workspace);
 }
 
 namespace {
@@ -2902,12 +2987,24 @@ void PreviewWindow::setWorkspace(const QString& name) {
     if (!kWorkspaces.contains(name)) {
         return;
     }
+    // Whether this is an actual change of room, as opposed to a re-run on the
+    // workspace already active -- which reset-panels does deliberately, to
+    // save and re-apply a just-rebuilt default, but which also happens any
+    // time something merely wants the tabs and visibility back in sync.
+    // `QMainWindow::restoreState` is not the inert operation
+    // `QSplitter::restoreState` was: it can re-seat every dock's widget in
+    // the layout even when nothing about the saved state actually differs,
+    // and doing that on every one of the dozens of calls this makes in a
+    // test run measurably destabilised the GPU-composited monitor beneath
+    // it. Skipping it when there is nothing to restore keeps the one thing
+    // it is for -- coming back to a workspace where a drag left it --
+    // without paying that cost on every call that is not one.
+    const bool switchingWorkspace = name != workspace_;
     // The arrangement of the workspace being left is remembered, so coming
-    // back to it finds the splitters where they were.
-    if (topSplitter_ != nullptr && !workspace_.isEmpty()) {
+    // back to it finds every dock where it was.
+    if (dockHost_ != nullptr && !workspace_.isEmpty()) {
         QSettings settings = makeSettings();
-        settings.setValue(layoutKey(workspace_, "top"), topSplitter_->saveState());
-        settings.setValue(layoutKey(workspace_, "main"), mainSplitter_->saveState());
+        settings.setValue(layoutKey(workspace_), dockHost_->saveState(kDockStateVersion));
     }
     workspace_ = name;
     const bool colour = name == "Color";
@@ -2929,9 +3026,9 @@ void PreviewWindow::setWorkspace(const QString& name) {
     // gesture that opens a file anywhere else.
     const bool gradingFile =
         colour && palette_->target() == app::ColorPalette::GradeTarget::MediaFile;
-    bin_->setVisible((!colour && !deliver && !audio) || gradingFile);
-    effects_->setVisible(!deliver && !audio);
-    scopes_->setVisible(colour);
+    dockBin_->setVisible((!colour && !deliver && !audio) || gradingFile);
+    dockEffects_->setVisible(!deliver && !audio);
+    dockScopes_->setVisible(colour);
     mixer_->setVisible(audio);
     // Color is a different room: the gallery replaces the bin and the grade
     // chain sits over the parameters. The timeline stays, though -- a colourist
@@ -2939,13 +3036,13 @@ void PreviewWindow::setWorkspace(const QString& name) {
     // comes next and how long it is. The shot strip is the quick way along it
     // and sits under the viewer; the timeline underneath is the cut itself.
     clipStrip_->setVisible(colour && !gradingFile);
-    bars_.nodesBox->setVisible(colour);
-    palette_->setVisible(colour);
-    bars_.timelinePane->setVisible(!deliver);
+    dockGradeChain_->setVisible(colour);
+    dockPalette_->setVisible(colour);
+    dockTimeline_->setVisible(!deliver);
     // Audio is a console: the mixer takes the centre, the loudness meter
     // and the channel's chain take the sides, and the picture stands down.
-    bars_.audioSide->setVisible(audio);
-    channel_->setVisible(audio);
+    dockAudioSide_->setVisible(audio);
+    dockChannel_->setVisible(audio);
     bars_.viewerWell->setVisible(!audio && !deliver);
     bars_.viewerBar->setVisible(!audio && !deliver);
     if (audio) {
@@ -2967,13 +3064,11 @@ void PreviewWindow::setWorkspace(const QString& name) {
          entry != bars_.workspaceActions.constEnd(); ++entry) {
         entry.value()->setChecked(entry.key() == name);
     }
-    QSettings settings = makeSettings();
-    if (const auto state = settings.value(layoutKey(name, "top")).toByteArray(); !state.isEmpty()) {
-        topSplitter_->restoreState(state);
-    }
-    if (const auto state = settings.value(layoutKey(name, "main")).toByteArray();
-        !state.isEmpty()) {
-        mainSplitter_->restoreState(state);
+    if (switchingWorkspace) {
+        QSettings settings = makeSettings();
+        if (const auto state = settings.value(layoutKey(name)).toByteArray(); !state.isEmpty()) {
+            dockHost_->restoreState(state, kDockStateVersion);
+        }
     }
     updateChrome();
 }
@@ -3148,21 +3243,20 @@ void PreviewWindow::saveWorkspace() {
     // arrangement restored into a different set of visible panels is a
     // collapsed bin and a mixer four pixels tall.
     settings.setValue("workspace/current", workspace_);
-    settings.setValue(layoutKey(workspace_, "top"), topSplitter_->saveState());
-    settings.setValue(layoutKey(workspace_, "main"), mainSplitter_->saveState());
+    settings.setValue(layoutKey(workspace_), dockHost_->saveState(kDockStateVersion));
 }
 
 void PreviewWindow::restoreWorkspace() {
     QSettings settings = makeSettings();
-    // Each restored only if it was stored, so a first run gets the
-    // stretch factors set above rather than a collapsed layout.
+    // Each restored only if it was stored, so a first run gets the default
+    // dock arrangement built above rather than an empty one.
     if (const auto geometry = settings.value("window/geometry").toByteArray();
         !geometry.isEmpty()) {
         restoreGeometry(geometry);
     }
     const QString wanted = settings.value("workspace/current", "Edit").toString();
-    // Always through setWorkspace, so the panels, the tabs and the splitter
-    // states are one decision rather than three that can disagree.
+    // Always through setWorkspace, so the panels, the tabs and the dock
+    // arrangement are one decision rather than three that can disagree.
     workspace_.clear();
     setWorkspace(kWorkspaces.contains(wanted) ? wanted : QString{"Edit"});
 }
