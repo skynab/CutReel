@@ -677,6 +677,17 @@ void PreviewWindow::buildWindowLayout() {
 }
 
 void PreviewWindow::applyDefaultDockLayout() {
+    // A floating dock ignores addDockWidget/splitDockWidget silently rather
+    // than rejoining the layout -- measured directly, driving reset-panels
+    // on a panel that had been dragged out left it floating right where it
+    // was, the one case "reset" most needs to undo. Un-floating every dock
+    // first, before rebuilding the arrangement below, is what makes this
+    // call a real reset rather than one that works only when nothing has
+    // been pulled out.
+    for (QDockWidget* dock : {dockBin_, dockPalette_, dockAudioSide_, dockProgram_, dockEffects_,
+                              dockGradeChain_, dockChannel_, dockScopes_, dockTimeline_}) {
+        dock->setFloating(false);
+    }
     // A first-pass approximation of the old fixed arrangement -- audio side
     // | palette | bin, tabbed together since at most one of the three is
     // ever visible in a given workspace; the viewer; the grade chain over
