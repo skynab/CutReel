@@ -412,6 +412,28 @@ QMessageBox QLabel { color: %TEXT%; }
 #dock-header-label { color: %MUTED%; font-size: 11px; }
 #dock-header-close { border: none; border-radius: 3px; }
 #dock-header-close:hover { background: %HOVER%; }
+/* Tabifying two or more docks together is the one place in this window Qt
+   draws its own tab bar rather than one built from the pill-tab buttons
+   everywhere else (the bin's Media/Effects/Titles/Audio row, the
+   inspector's Inspector/Audio/Info/Transition row) -- QDockWidget has no
+   equivalent of #dock-header for a shared tab strip. Styled to match those
+   rather than left at the platform's native tab chrome, which is the one
+   place a docked panel would otherwise look like it belonged to a
+   different application. */
+QTabBar { background: %BG%; border-bottom: 1px solid %DIVIDER%; }
+QTabBar::tab {
+    background: transparent; color: %MUTED%; border: none; border-radius: 5px;
+    margin: 3px 2px; padding: 3px 10px; font-size: 11px;
+    /* Once a stylesheet touches QTabBar at all, Qt stops sizing tabs from
+       the native style's own text-width calculation and falls back to a
+       much smaller default -- measured directly, "Grade Chain" and even
+       "Scopes" both came out elided to a few letters despite the dock
+       column around them being hundreds of pixels wide. An explicit
+       min-width is the standard way back to tabs sized for their label. */
+    min-width: 88px;
+}
+QTabBar::tab:hover { background: %BINHOVER%; color: %TEXT%; }
+QTabBar::tab:selected { background: %ACCENTWASH%; color: %ACCENT300%; }
 #chrome-statusbar QLabel, #chrome-toolbar QLabel[muted="true"],
 #chrome-timeline-bar QLabel[muted="true"], #chrome-viewer-bar QLabel[muted="true"] {
     color: %MUTED%; font-size: 11px;

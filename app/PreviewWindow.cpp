@@ -724,6 +724,21 @@ void PreviewWindow::applyDefaultDockLayout() {
     // restoring a previously-saved workspace already does -- which is why
     // *that* path never showed the bug, only the from-scratch one.
     dockHost_->restoreState(dockHost_->saveState(kDockStateVersion), kDockStateVersion);
+    // Reset Panels run from an already-large custom layout (as opposed to
+    // the from-scratch case the round-trip above fixes) can leave stale
+    // pixels from `monitor_` -- a QRhiWidget -- composited into the backing
+    // store where docks now smaller than before used to be: measured
+    // directly, the old frame stayed visibly bled across the Grade
+    // Chain/Scopes tab strip and the Inspector dock until an unrelated
+    // workspace switch forced a genuine full repaint. Nudging `monitor_`'s
+    // own size was not enough to reproduce that repaint. Nudging the
+    // top-level window's was, but it also briefly un-maximizes a maximized
+    // window by a pixel, leaving a sliver of desktop showing at the edge --
+    // measured directly as well. `dockHost_` is a plain child widget, not
+    // the top-level, so nudging it forces the same full repaint of the dock
+    // area without touching the real window's geometry at all.
+    dockHost_->resize(dockHost_->size() + QSize(1, 0));
+    dockHost_->resize(dockHost_->size() - QSize(1, 0));
 }
 
 void PreviewWindow::wireEditingSignals() {
