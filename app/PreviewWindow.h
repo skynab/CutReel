@@ -41,6 +41,7 @@
 #include <QSysInfo>
 #include <QTimer>
 #include <QWidget>
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
@@ -1177,6 +1178,17 @@ private:
     QDockWidget* dockChannel_{nullptr};
     QDockWidget* dockScopes_{nullptr};
     QDockWidget* dockTimeline_{nullptr};
+    /// All nine, in one place, so a function that means "every dock" says so
+    /// once. Two separate call sites hand-listing the same nine pointers is
+    /// exactly how `setGradeTarget` was left toggling `bin_` instead of
+    /// `dockBin_` after the migration that introduced these: one site got
+    /// updated, the other -- itself not one of these lists, but the same
+    /// kind of duplication -- did not, and nothing caught it. Built once
+    /// `dockTimeline_` exists, so only after `buildWindowLayout` has run.
+    [[nodiscard]] std::array<QDockWidget*, 9> allDocks() const {
+        return {dockBin_,        dockPalette_, dockAudioSide_, dockProgram_, dockEffects_,
+                dockGradeChain_, dockChannel_, dockScopes_,    dockTimeline_};
+    }
     /// Wrap one panel for `dockHost_`: an object name (for
     /// `QMainWindow::saveState`, which keys by name), a title, the content,
     /// and whether the content already draws its own header (see

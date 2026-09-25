@@ -235,13 +235,14 @@ void PreviewWindow::createPanels() {
     mixer_ = adopting(new app::MixerPanel(this));
     // Asked, not guessed.
     //
-    // This was 250, then 300, each time to stop the splitter squeezing the
-    // column until the value fields ran off the edge of it -- and each time a
-    // number chosen by eye rather than measured. The rows want 383, so the cap
+    // This was 250, then 300, each time to stop the column being squeezed
+    // until the value fields ran off the edge of it -- and each time a
+    // number chosen by eye rather than measured. The rows want 383, so a cap
     // of 330 cut every field short at every window size: "0.0 p" for "0.0 px",
     // a rotation with its degree sign gone. `EffectControls` measures its own
     // widest row now, so the only thing left to decide here is how much room
-    // above that the splitter may give it.
+    // above that the dock may give it -- floated or docked, the constraint
+    // is the same.
     effects_->setMaximumWidth(effects_->minimumWidth() + 30);
 
     // Monitor and parameters side by side, transport under them, timeline
@@ -376,7 +377,10 @@ void PreviewWindow::buildViewerLayout() {
     // 330 pixels inside the viewer well. Its own dock now, like everything
     // else: an instrument is compared against the frame it measures, and
     // pinning it to one spot beside the monitor was never the point -- being
-    // reachable while grading was.
+    // reachable while grading was. The floor comes with it, though: a
+    // vectorscope or a waveform read at a sliver of its old width is an
+    // instrument nobody can actually read.
+    scopes_->setMinimumWidth(280);
     dockScopes_ = makeDock("dock-scopes", tr("Scopes"), scopes_, /*showLabel=*/false);
 
     // The grade chain sits over the parameters it navigates. The two used to
@@ -684,8 +688,7 @@ void PreviewWindow::applyDefaultDockLayout() {
     // first, before rebuilding the arrangement below, is what makes this
     // call a real reset rather than one that works only when nothing has
     // been pulled out.
-    for (QDockWidget* dock : {dockBin_, dockPalette_, dockAudioSide_, dockProgram_, dockEffects_,
-                              dockGradeChain_, dockChannel_, dockScopes_, dockTimeline_}) {
+    for (QDockWidget* dock : allDocks()) {
         dock->setFloating(false);
     }
     // A first-pass approximation of the old fixed arrangement -- audio side
@@ -703,6 +706,24 @@ void PreviewWindow::applyDefaultDockLayout() {
     dockHost_->tabifyDockWidget(dockGradeChain_, dockScopes_);
     dockHost_->tabifyDockWidget(dockEffects_, dockChannel_);
     dockHost_->addDockWidget(Qt::BottomDockWidgetArea, dockTimeline_);
+    // The ratios the deleted splitters' stretch factors used to hold: the
+    // viewer three times as wide as either side column, and the panel row
+    // three units tall against the timeline's two. `resizeDocks` wants every
+    // dock in the split named, not just the one that differs, or the sizes
+    // it does not mention are left to whatever Qt's own even split gives
+    // them.
+    dockHost_->resizeDocks({dockBin_, dockProgram_, dockGradeChain_}, {1, 3, 1}, Qt::Horizontal);
+    dockHost_->resizeDocks({dockProgram_, dockTimeline_}, {3, 2}, Qt::Vertical);
+    // Built incrementally above, a nested split can be left reporting sane,
+    // in-bounds geometry for a dock that still does not actually paint --
+    // measured directly, on a column produced by a split-inside-a-split
+    // (dockEffects_ under dockGradeChain_) specifically, on a genuinely
+    // fresh settings file. Round-tripping the whole arrangement through
+    // `saveState`/`restoreState` once, immediately after building it,
+    // forces `QMainWindow` to commit a real layout pass the same way
+    // restoring a previously-saved workspace already does -- which is why
+    // *that* path never showed the bug, only the from-scratch one.
+    dockHost_->restoreState(dockHost_->saveState(kDockStateVersion), kDockStateVersion);
 }
 
 void PreviewWindow::wireEditingSignals() {
@@ -2801,8 +2822,10 @@ void PreviewWindow::buildDockMenuActions() {
     // aboutToShow resync needed, unlike panelAction below. The timeline is
     // deliberately absent: it has no close button (see makeDock), so there
     // is nothing here to give it a way back from.
-    for (QDockWidget* dock : {dockBin_, dockPalette_, dockAudioSide_, dockProgram_, dockEffects_,
-                              dockGradeChain_, dockChannel_, dockScopes_}) {
+    for (QDockWidget* dock : allDocks()) {
+        if (dock == dockTimeline_) {
+            continue;
+        }
         windowMenu_->addAction(dock->toggleViewAction());
     }
     // Not a dock: the mixer is a plain sub-widget of dockProgram_'s content,
@@ -2937,7 +2960,7 @@ void PreviewWindow::setGradeTarget(app::ColorPalette::GradeTarget target) {
     // names cuts, the bin names files.
     const bool gradingFile = target == app::ColorPalette::GradeTarget::MediaFile;
     if (workspace_ == "Color") {
-        bin_->setVisible(gradingFile);
+        dockBin_->setVisible(gradingFile);
         clipStrip_->setVisible(!gradingFile);
     }
     // The chain and the scopes are reading the other grade now, so everything

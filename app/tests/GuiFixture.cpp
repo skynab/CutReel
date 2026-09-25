@@ -251,6 +251,15 @@ void restoreFixtureProject() {
     window.adopt(std::move(project), std::move(*loaded), held.fixturePath);
 
     window.setWorkspace("Edit");
+    // Dock arrangement is chrome too, and setWorkspace alone no longer
+    // guarantees a clean one: it skips restoring the saved layout when the
+    // workspace was already Edit, which every test here starts as. A test
+    // that drags, floats, or closes a panel would otherwise hand the next
+    // one whatever state it left the docks in, with nothing in between to
+    // notice or undo it -- the same class of leak the tool and row-height
+    // resets below exist to prevent, just for panels instead of the
+    // timeline.
+    window.trigger("reset-panels");
     // The tool and the snapping switch are chrome, not project state, so undo
     // and a reload both leave them exactly where the last test put them. A
     // razor test that ends with the blade selected makes the next test's drag

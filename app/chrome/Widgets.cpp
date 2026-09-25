@@ -81,28 +81,46 @@ protected:
             return false;
         }
         switch (event->type()) {
-            case QEvent::MouseButtonPress:
-            case QEvent::MouseMove:
-            case QEvent::MouseButtonRelease:
-            case QEvent::MouseButtonDblClick: {
+            case QEvent::MouseButtonPress: {
                 auto* mouse = static_cast<QMouseEvent*>(event);
-                const QPointF dockPos = header->mapTo(dock_, mouse->position().toPoint());
-                QMouseEvent forwarded(mouse->type(), dockPos, dock_->mapToGlobal(dockPos.toPoint()),
-                                      mouse->button(), mouse->buttons(), mouse->modifiers());
-                QCoreApplication::sendEvent(dock_, &forwarded);
-                // A real drag carries the cursor away from this eight- or
-                // twenty-two-pixel strip almost immediately, and a widget
-                // only hears about the mouse while the cursor is over it --
-                // unless it has grabbed it. Without the grab, everything
-                // above forwards exactly one press and no moves at all,
-                // which looks identical to nothing having happened.
-                if (event->type() == QEvent::MouseButtonPress) {
-                    header->grabMouse();
-                } else if (event->type() == QEvent::MouseButtonRelease) {
-                    header->releaseMouse();
+                // Qt's own dock-drag machinery only ever starts on the left
+                // button; grabbing for a right-click (reaching for a context
+                // menu, say) would forward a press nothing downstream acts
+                // on while still stealing every mouse event in the
+                // application until release.
+                if (mouse->button() != Qt::LeftButton) {
+                    break;
                 }
+                forward(header, mouse);
+                header->grabMouse();
+                grabbed_ = true;
                 break;
             }
+            case QEvent::MouseMove:
+                // Only while actually dragging: a hover with no button down
+                // never grabbed, and forwarding it would do nothing useful.
+                if (grabbed_) {
+                    forward(header, static_cast<QMouseEvent*>(event));
+                }
+                break;
+            case QEvent::MouseButtonRelease:
+                // Tracked rather than released unconditionally: a
+                // double-click's own Press/Release pair already grabbed and
+                // released once before the synthesised DblClick arrives, so
+                // an unconditional release here would call releaseMouse() a
+                // second time with nothing left to release.
+                if (grabbed_) {
+                    forward(header, static_cast<QMouseEvent*>(event));
+                    header->releaseMouse();
+                    grabbed_ = false;
+                }
+                break;
+            case QEvent::MouseButtonDblClick:
+                // Forwarded so double-click-to-float still works, but it
+                // does not touch the grab: the Press/Release either side of
+                // it already keep that balanced.
+                forward(header, static_cast<QMouseEvent*>(event));
+                break;
             default:
                 break;
         }
@@ -110,7 +128,15 @@ protected:
     }
 
 private:
+    void forward(QWidget* header, QMouseEvent* mouse) {
+        const QPointF dockPos = header->mapTo(dock_, mouse->position().toPoint());
+        QMouseEvent forwarded(mouse->type(), dockPos, dock_->mapToGlobal(dockPos.toPoint()),
+                              mouse->button(), mouse->buttons(), mouse->modifiers());
+        QCoreApplication::sendEvent(dock_, &forwarded);
+    }
+
     QDockWidget* dock_{nullptr};
+    bool grabbed_{false};
 };
 
 }  // namespace
