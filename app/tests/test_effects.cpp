@@ -926,9 +926,9 @@ TEST_CASE("The inspector's tabs", "[gui]") {
     const auto& videoTrack = sequence.videoTracks().front();
     const auto videoClip = videoTrack.clips().front().id;
 
-    auto* inspectorTab = panel->findChild<QPushButton*>("inspector-tab-inspector");
-    auto* audioTab = panel->findChild<QPushButton*>("inspector-tab-audio");
-    auto* infoTab = panel->findChild<QPushButton*>("inspector-tab-info");
+    auto* inspectorTab = window.findChild<QPushButton*>("inspector-tab-inspector");
+    auto* audioTab = window.findChild<QPushButton*>("inspector-tab-audio");
+    auto* infoTab = window.findChild<QPushButton*>("inspector-tab-info");
     if (inspectorTab == nullptr || audioTab == nullptr || infoTab == nullptr) {
         zaro::app::testing::failf("the inspector has no tab strip\n");
     }
@@ -1020,8 +1020,8 @@ TEST_CASE("The inspector's tabs", "[gui]") {
     if (std::fabs(clipNow()->transform.opacity - 0.4) > 1e-6) {
         zaro::app::testing::failf("the panel did not write 0.4\n");
     }
-    for (auto* button : panel->findChildren<QPushButton*>("bin-glyph-button")) {
-        if (button->parentWidget() == panel->findChild<QWidget*>("inspector-tabbar")) {
+    for (auto* button : window.findChildren<QPushButton*>("bin-glyph-button")) {
+        if (button->parentWidget() == window.findChild<QWidget*>("inspector-tabbar")) {
             button->click();
         }
     }
@@ -1757,7 +1757,7 @@ TEST_CASE("The inspector shows a track when its header is picked", "[gui]") {
     }
 
     // A picture track contributes nothing to the mix, so its Audio tab is dark.
-    auto* audioTab = panel->findChild<QPushButton*>("inspector-tab-audio");
+    auto* audioTab = window.findChild<QPushButton*>("inspector-tab-audio");
     if (audioTab == nullptr || audioTab->isEnabled()) {
         zaro::app::testing::failf("a picture track is offered an Audio page\n");
     }

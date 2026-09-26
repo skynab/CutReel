@@ -86,6 +86,10 @@ struct Bars {
     QWidget* audioSide{nullptr};
     QWidget* nodesBox{nullptr};
     QWidget* timelinePane{nullptr};
+    /// The timeline's tool row, built by `buildTimelinePane` but left for the
+    /// caller to seat: it lives in the timeline dock's header, not above the
+    /// tracks, so the two are one bar rather than two.
+    QWidget* timelineTools{nullptr};
 };
 
 /// What the bars say, gathered from where each fact lives.

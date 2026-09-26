@@ -1259,7 +1259,7 @@ TEST_CASE("The Transition tab chooses what a cut does", "[gui]") {
     if (effects->pane() != zaro::app::EffectControls::Pane::Transition) {
         zaro::app::testing::failf("picking a transition did not put its page up\n");
     }
-    auto* tab = effects->findChild<QPushButton*>("inspector-tab-transition");
+    auto* tab = window.findChild<QPushButton*>("inspector-tab-transition");
     auto* kind = effects->findChild<QComboBox*>("transition-kind");
     auto* direction = effects->findChild<QComboBox*>("transition-direction");
     auto* duration = effects->findChild<QDoubleSpinBox*>("transition-duration");
@@ -1274,7 +1274,7 @@ TEST_CASE("The Transition tab chooses what a cut does", "[gui]") {
     // The other three describe a clip, and there is not one.
     for (const char* name :
          {"inspector-tab-inspector", "inspector-tab-audio", "inspector-tab-info"}) {
-        auto* other = effects->findChild<QPushButton*>(name);
+        auto* other = window.findChild<QPushButton*>(name);
         REQUIRE(other != nullptr);
         if (other->isEnabled()) {
             zaro::app::testing::failf("%s is enabled with a transition selected\n", name);
@@ -1287,12 +1287,19 @@ TEST_CASE("The Transition tab chooses what a cut does", "[gui]") {
     // than guessed.
     for (const char* name : {"inspector-tab-inspector", "inspector-tab-audio", "inspector-tab-info",
                              "inspector-tab-transition"}) {
-        auto* pill = effects->findChild<QPushButton*>(name);
+        // The strip is in the dock's header (the panel's own row is lifted
+        // there), and the header is as wide as the panel.
+        auto* pill = window.findChild<QPushButton*>(name);
         REQUIRE(pill != nullptr);
-        const int right = pill->mapTo(effects, QPoint{pill->width(), 0}).x();
-        INFO("tab " << name << " ends at " << right << " in a panel " << effects->width()
+        QWidget* header = pill->parentWidget();
+        while (header != nullptr && header->objectName() != "dock-header") {
+            header = header->parentWidget();
+        }
+        REQUIRE(header != nullptr);
+        const int right = pill->mapTo(header, QPoint{pill->width(), 0}).x();
+        INFO("tab " << name << " ends at " << right << " in a header " << header->width()
                     << " wide");
-        CHECK(right <= effects->width());
+        CHECK(right <= header->width());
     }
     auto* softness = effects->findChild<QDoubleSpinBox*>("transition-softness");
     auto* pacing = effects->findChild<QComboBox*>("transition-easing");
