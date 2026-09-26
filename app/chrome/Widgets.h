@@ -98,8 +98,12 @@ struct Hooks {
 /// `setTitleBarWidget` replaces Qt's own title bar wholesale, close button
 /// and all, so `onClose` puts one back when it is not empty -- left empty for
 /// the one dock (the timeline) that should not be closeable at all.
+///
+/// `tools`, when given, is seated in the header after the name and takes the
+/// remaining width -- the timeline's tool row, so its dock has one bar rather
+/// than a header with a toolbar under it.
 QWidget* buildDockHeader(QWidget* parent, const QString& title,
-                         const std::function<void()>& onClose = {});
+                         const std::function<void()>& onClose = {}, QWidget* tools = nullptr);
 
 QWidget* buildTitleBar(QWidget* parent, Bars& bars);
 QWidget* buildStatusBar(QWidget* parent, Bars& bars);

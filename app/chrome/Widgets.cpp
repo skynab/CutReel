@@ -201,7 +201,7 @@ QLabel* mutedLabel(QWidget* parent, const QString& text) {
 }
 
 QWidget* buildDockHeader(QWidget* parent, const QString& title,
-                         const std::function<void()>& onClose) {
+                         const std::function<void()>& onClose, QWidget* tools) {
     auto* header = new DockHeader(parent);
     header->setObjectName("dock-header");
     // Well over the ~20px below which Qt's drag-initiation hit-testing never
@@ -221,7 +221,12 @@ QWidget* buildDockHeader(QWidget* parent, const QString& title,
     // Full height, so the tab's own bottom border is the header's underline.
     tab->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
     row->addWidget(tab);
-    row->addStretch(1);
+    if (tools != nullptr) {
+        tools->setParent(header);
+        row->addWidget(tools, 1);
+    } else {
+        row->addStretch(1);
+    }
     if (onClose) {
         auto* close = new QPushButton(header);
         close->setObjectName("dock-header-close");
@@ -712,14 +717,14 @@ QWidget* buildTimelinePane(QWidget* parent, Bars& bars, ActionRouter& router, co
     column->setContentsMargins(0, 0, 0, 0);
     column->setSpacing(0);
 
+    // Not added to `pane`: the caller seats it in the dock's header (see
+    // Bars::timelineTools), whose own tab already says "Timeline".
     auto* bar = new QWidget(pane);
-    bar->setObjectName("chrome-timeline-bar");
-    bar->setFixedHeight(34);
+    bar->setObjectName("dock-header-tools");
+    bars.timelineTools = bar;
     auto* row = new QHBoxLayout(bar);
-    row->setContentsMargins(10, 0, 10, 0);
+    row->setContentsMargins(4, 0, 4, 0);
     row->setSpacing(8);
-    auto* title = new QLabel("Timeline", bar);
-    row->addWidget(title);
     bars.timelineLabel = mutedLabel(bar);
     row->addWidget(bars.timelineLabel);
     row->addWidget(separator(bar));
@@ -813,7 +818,6 @@ QWidget* buildTimelinePane(QWidget* parent, Bars& bars, ActionRouter& router, co
     runs(zoomIn, router, "zoom-in");
     row->addWidget(zoomIn);
 
-    column->addWidget(bar);
     column->addWidget(timelineWidget, 1);
     return pane;
 }

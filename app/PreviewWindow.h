@@ -1194,7 +1194,7 @@ private:
     /// and whether the content already draws its own header (see
     /// `chrome::buildDockHeader`). Closeable unless `closable` is false.
     QDockWidget* makeDock(const char* objectName, const QString& title, QWidget* content,
-                          bool closable = true);
+                          bool closable = true, QWidget* headerTools = nullptr);
     /// Rebuild the shipped default arrangement of the nine docks above, for a
     /// first run and for "reset-panels".
     void applyDefaultDockLayout();

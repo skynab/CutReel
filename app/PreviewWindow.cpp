@@ -35,6 +35,7 @@
 #include <QRegularExpression>
 #include <QSlider>
 #include <QStackedWidget>
+#include <QTabBar>
 #include <QTabWidget>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -97,6 +98,69 @@ constexpr std::size_t kAnalysisCacheBytes = 64u * 1024u * 1024u;
 /// nest is retired by bumping this number, the same way the old `-vN` suffix
 /// on `layoutKey`'s string had to be bumped by hand.
 constexpr int kDockStateVersion = 1;
+
+/// Right-click and double-click on the tabs of a tabbed dock group.
+///
+/// Qt's own way to pull a tab out -- drag it clear of the strip -- did not
+/// start a drag here when tried (measured: a vertical and a diagonal drag out
+/// of the strip both only reordered or selected the tab), which left a panel
+/// docked onto another one with no way to separate them once its own header
+/// was folded into the strip. So the strip gets a menu (Float, Close) and
+/// double-click floats, the same gesture a header already answers to.
+class DockTabBarFilter : public QObject {
+public:
+    DockTabBarFilter(std::function<QDockWidget*(quintptr)> resolve, QObject* parent)
+        : QObject{parent}, resolve_{std::move(resolve)} {}
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override {
+        auto* bar = qobject_cast<QTabBar*>(watched);
+        if (bar == nullptr) {
+            return false;
+        }
+        if (event->type() == QEvent::MouseButtonDblClick) {
+            auto* mouse = static_cast<QMouseEvent*>(event);
+            if (QDockWidget* dock = dockAt(bar, bar->tabAt(mouse->position().toPoint()))) {
+                floatLater(dock, mouse->globalPosition().toPoint());
+                return true;
+            }
+        } else if (event->type() == QEvent::ContextMenu) {
+            auto* menu = static_cast<QContextMenuEvent*>(event);
+            QDockWidget* dock = dockAt(bar, bar->tabAt(menu->pos()));
+            if (dock == nullptr) {
+                return false;
+            }
+            QMenu popup;
+            QAction* floatIt = popup.addAction(QObject::tr("Float"));
+            QAction* close = popup.addAction(QObject::tr("Close"));
+            close->setEnabled(dock->features().testFlag(QDockWidget::DockWidgetClosable));
+            QAction* chosen = popup.exec(menu->globalPos());
+            if (chosen == floatIt) {
+                floatLater(dock, menu->globalPos());
+            } else if (chosen == close) {
+                QTimer::singleShot(0, dock, [dock] { dock->close(); });
+            }
+            return true;
+        }
+        return false;
+    }
+
+private:
+    [[nodiscard]] QDockWidget* dockAt(QTabBar* bar, int index) const {
+        return index < 0 ? nullptr : resolve_(bar->tabData(index).value<quintptr>());
+    }
+
+    /// Deferred a turn: floating takes the tab out of the very strip whose
+    /// event is still being handled.
+    static void floatLater(QDockWidget* dock, QPoint where) {
+        QTimer::singleShot(0, dock, [dock, where] {
+            dock->setFloating(true);
+            dock->move(where - QPoint(60, 12));
+        });
+    }
+
+    std::function<QDockWidget*(quintptr)> resolve_;
+};
 
 }  // namespace
 
@@ -283,7 +347,7 @@ void PreviewWindow::createPanels() {
 }
 
 QDockWidget* PreviewWindow::makeDock(const char* objectName, const QString& title, QWidget* content,
-                                     bool closable) {
+                                     bool closable, QWidget* headerTools) {
     auto* dock = new QDockWidget(title, this);
     // saveState()/restoreState() key a dock by this name, not by pointer or
     // position -- an unnamed dock is one they silently fail to restore.
@@ -308,7 +372,7 @@ QDockWidget* PreviewWindow::makeDock(const char* objectName, const QString& titl
     if (closable) {
         onClose = [dock] { dock->close(); };
     }
-    dock->setTitleBarWidget(chrome::buildDockHeader(dock, title, onClose));
+    dock->setTitleBarWidget(chrome::buildDockHeader(dock, title, onClose, headerTools));
     return dock;
 }
 
@@ -696,8 +760,8 @@ void PreviewWindow::buildWindowLayout() {
     // Movable and floatable like every other panel, but not closeable: no
     // workspace has ever let the timeline be taken down, and giving it a
     // close button would be a new way to lose it with no obvious way back.
-    dockTimeline_ =
-        makeDock("dock-timeline", tr("Timeline"), bars_.timelinePane, /*closable=*/false);
+    dockTimeline_ = makeDock("dock-timeline", tr("Timeline"), bars_.timelinePane,
+                             /*closable=*/false, bars_.timelineTools);
 
     applyDefaultDockLayout();
     // Whenever a dock moves, joins or leaves a tab group, or is shown or hidden.
@@ -733,6 +797,30 @@ void PreviewWindow::buildWindowLayout() {
 }
 
 void PreviewWindow::syncDockHeaders() {
+    // Qt makes a tab strip when a group forms and drops it when it dissolves,
+    // so this is where a new one is found (see DockTabBarFilter).
+    for (QTabBar* bar : dockHost_->findChildren<QTabBar*>(QString{}, Qt::FindDirectChildrenOnly)) {
+        if (!bar->property("dockTabHook").toBool()) {
+            bar->setProperty("dockTabHook", true);
+            bar->installEventFilter(new DockTabBarFilter(
+                [this](quintptr id) -> QDockWidget* {
+                    for (QDockWidget* dock : allDocks()) {
+                        if (reinterpret_cast<quintptr>(dock) == id) {
+                            return dock;
+                        }
+                    }
+                    return nullptr;
+                },
+                bar));
+        }
+    }
+    // Never mid-drag: querying tab groups while Qt holds a gap item in place
+    // of the dragged dock crashed inside QMainWindow's layout (Qt6Widgets,
+    // access violation, redocking panes). Try again once the button is up.
+    if (QApplication::mouseButtons() != Qt::NoButton) {
+        QTimer::singleShot(50, this, [this] { syncDockHeaders(); });
+        return;
+    }
     for (QDockWidget* dock : allDocks()) {
         QWidget* header = dock->titleBarWidget();
         if (header == nullptr) {

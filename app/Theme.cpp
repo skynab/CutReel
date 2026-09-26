@@ -402,7 +402,7 @@ QMessageBox QLabel { color: %TEXT%; }
         R"(/* --- the window's own chrome ------------------------------------------- */
 
 #chrome-titlebar { background: %SURFACE%; border-bottom: 1px solid %DIVIDER%; }
-#chrome-toolbar, #chrome-timeline-bar, #chrome-viewer-bar {
+#chrome-toolbar, #chrome-viewer-bar {
     background: %BG%; border-bottom: 1px solid %DIVIDER%;
 }
 #chrome-statusbar { background: %BG%; border-top: 1px solid %DIVIDER%; }
@@ -431,7 +431,11 @@ QDockWidget[focused="true"] #dock-body { border-color: %ACCENT600%; }
     border-bottom: 2px solid %NEUTRAL600%;
 }
 QDockWidget[focused="true"] #dock-header-tab { color: %TEXT%; border-bottom-color: %ACCENT%; }
-#dock-header-close { border: none; border-radius: 4px; }
+/* The global QPushButton padding otherwise squeezes the 16px button's
+   content box; zeroed, then a little bottom padding lifts the glyph to the
+   tab label's centre line (the label's own underline makes that line sit
+   above the header's midpoint). */
+#dock-header-close { border: none; border-radius: 4px; padding: 0 0 5px 0; margin: 0; }
 #dock-header-close:hover { background: %HOVER%; }
 /* Tabifying docks together is the one place Qt draws its own tab bar
    instead of #dock-header. Styled as the same strip: 30px tall, tabs
@@ -457,7 +461,7 @@ QTabBar::tab:selected { color: %TEXT%; border-bottom-color: %ACCENT%; }
 /* The preview drawn while a dock is dragged over a place it can land. */
 QRubberBand { background: %ACCENTWASH%; border: 1px solid %ACCENT%; border-radius: 6px; }
 #chrome-statusbar QLabel, #chrome-toolbar QLabel[muted="true"],
-#chrome-timeline-bar QLabel[muted="true"], #chrome-viewer-bar QLabel[muted="true"] {
+#dock-header-tools QLabel[muted="true"], #chrome-viewer-bar QLabel[muted="true"] {
     color: %MUTED%; font-size: 11px;
 }
 /* A readout that can be pressed. It carries a border at rest rather than
