@@ -23,6 +23,8 @@ enum class Glyph {
     Magnifier,     ///< Zoom
     Magnet,        ///< Snapping
     Bookmark,      ///< Add marker
+    MarkerBack,    ///< Go to the previous marker
+    MarkerAhead,   ///< Go to the next marker
     Split,         ///< Razor at the playhead
     CrossFade,     ///< Add dissolve
     TextT,         ///< Put a title on the timeline

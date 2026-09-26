@@ -113,6 +113,131 @@ json writeTransition(const model::Transition& span, const time::RationalTime& cu
     return out;
 }
 
+/// A clip's placement in the frame, as this program's own extension.
+///
+/// OTIO has no schema for this -- it is a format for order and duration, not
+/// geometry -- so it travels in `metadata.zaro`, the same way a transition's
+/// kind does. Written only where it is not the identity, so a plain cut stays
+/// a plain cut to every other reader of the file.
+json writeTransform(const model::Transform& transform) {
+    json out = json::object();
+    if (transform.positionX != 0.0) {
+        out["positionX"] = transform.positionX;
+    }
+    if (transform.positionY != 0.0) {
+        out["positionY"] = transform.positionY;
+    }
+    if (transform.scaleX != 1.0) {
+        out["scaleX"] = transform.scaleX;
+    }
+    if (transform.scaleY != 1.0) {
+        out["scaleY"] = transform.scaleY;
+    }
+    if (transform.rotationDegrees != 0.0) {
+        out["rotationDegrees"] = transform.rotationDegrees;
+    }
+    if (transform.anchorX != 0.0) {
+        out["anchorX"] = transform.anchorX;
+    }
+    if (transform.anchorY != 0.0) {
+        out["anchorY"] = transform.anchorY;
+    }
+    if (transform.opacity != 1.0) {
+        out["opacity"] = transform.opacity;
+    }
+    if (transform.cropLeft != 0.0) {
+        out["cropLeft"] = transform.cropLeft;
+    }
+    if (transform.cropRight != 0.0) {
+        out["cropRight"] = transform.cropRight;
+    }
+    if (transform.cropTop != 0.0) {
+        out["cropTop"] = transform.cropTop;
+    }
+    if (transform.cropBottom != 0.0) {
+        out["cropBottom"] = transform.cropBottom;
+    }
+    return out;
+}
+
+model::Transform readTransform(const json& node) {
+    model::Transform transform;
+    if (!node.is_object()) {
+        return transform;
+    }
+    transform.positionX = node.value("positionX", transform.positionX);
+    transform.positionY = node.value("positionY", transform.positionY);
+    transform.scaleX = node.value("scaleX", transform.scaleX);
+    transform.scaleY = node.value("scaleY", transform.scaleY);
+    transform.rotationDegrees = node.value("rotationDegrees", transform.rotationDegrees);
+    transform.anchorX = node.value("anchorX", transform.anchorX);
+    transform.anchorY = node.value("anchorY", transform.anchorY);
+    transform.opacity = node.value("opacity", transform.opacity);
+    transform.cropLeft = node.value("cropLeft", transform.cropLeft);
+    transform.cropRight = node.value("cropRight", transform.cropRight);
+    transform.cropTop = node.value("cropTop", transform.cropTop);
+    transform.cropBottom = node.value("cropBottom", transform.cropBottom);
+    return transform;
+}
+
+/// A generated clip's shape or text, as `GeneratorReference.1`'s parameters.
+///
+/// `GeneratorReference` is OTIO's own schema for a clip that has no media and
+/// draws something instead -- bars, a slug, a title -- which is exactly what a
+/// `Graphic` is. `generator_kind` says which of this program's generators made
+/// it, so a round trip through another tool's OTIO still shows a clip with a
+/// name and a duration where the title was, even though that tool cannot draw
+/// the text itself.
+json writeGraphic(const model::Graphic& graphic) {
+    json out{{"kind", model::toString(graphic.kind)},
+             {"width", graphic.width},
+             {"height", graphic.height},
+             {"centreX", graphic.centreX},
+             {"centreY", graphic.centreY},
+             {"feather", graphic.feather},
+             {"red", graphic.red},
+             {"green", graphic.green},
+             {"blue", graphic.blue},
+             {"alpha", graphic.alpha}};
+    if (graphic.kind == model::GraphicKind::Rectangle) {
+        out["cornerRadius"] = graphic.cornerRadius;
+    }
+    if (graphic.kind == model::GraphicKind::Text) {
+        out["text"] = graphic.text;
+        out["family"] = graphic.family;
+        out["pointSize"] = graphic.pointSize;
+        out["bold"] = graphic.bold;
+        out["italic"] = graphic.italic;
+        out["alignment"] = graphic.alignment;
+    }
+    return out;
+}
+
+model::Graphic readGraphic(const json& node) {
+    model::Graphic graphic;
+    if (!node.is_object()) {
+        return graphic;
+    }
+    graphic.kind = model::graphicKindFromString(node.value("kind", std::string{}).c_str());
+    graphic.width = node.value("width", graphic.width);
+    graphic.height = node.value("height", graphic.height);
+    graphic.centreX = node.value("centreX", graphic.centreX);
+    graphic.centreY = node.value("centreY", graphic.centreY);
+    graphic.cornerRadius = node.value("cornerRadius", graphic.cornerRadius);
+    graphic.feather = node.value("feather", graphic.feather);
+    graphic.red = node.value("red", graphic.red);
+    graphic.green = node.value("green", graphic.green);
+    graphic.blue = node.value("blue", graphic.blue);
+    graphic.alpha = node.value("alpha", graphic.alpha);
+    graphic.text = node.value("text", graphic.text);
+    graphic.family = node.value("family", graphic.family);
+    graphic.pointSize = node.value("pointSize", graphic.pointSize);
+    graphic.bold = node.value("bold", graphic.bold);
+    graphic.italic = node.value("italic", graphic.italic);
+    graphic.alignment = node.value("alignment", graphic.alignment);
+    return graphic;
+}
+
 /// The schema family, without its version: "Clip.1" is a Clip.
 std::string schemaName(const json& node) {
     if (!node.is_object() || !node.contains("OTIO_SCHEMA")) {
@@ -169,10 +294,20 @@ Result<std::string> writeOtio(const model::Project& project, model::SequenceId s
                                                    {"target_url", urlForPath(media->path)},
                                                    {"name", media->name}};
                 } else if (clip.graphic.isSet()) {
-                    // A generated clip has no media. `MissingReference` is
-                    // OTIO's own way of saying so, and it survives a round trip
-                    // through a tool that has never heard of a shape layer.
-                    item["media_reference"] = json{{"OTIO_SCHEMA", "MissingReference.1"}};
+                    // A generated clip has no media. `GeneratorReference` is
+                    // OTIO's own way of saying so -- a clip that draws
+                    // something rather than reading it -- and it survives a
+                    // round trip through a tool that has never heard of a
+                    // shape layer: `generator_kind` names a generator it does
+                    // not know, and it is left with a clip of the right name
+                    // and duration where the title was.
+                    item["media_reference"] = json{{"OTIO_SCHEMA", "GeneratorReference.1"},
+                                                   {"generator_kind", "zaro.Graphic"},
+                                                   {"parameters", writeGraphic(clip.graphic)}};
+                }
+                if (!clip.transform.isIdentity()) {
+                    item["metadata"] =
+                        json{{"zaro", json{{"transform", writeTransform(clip.transform)}}}};
                 }
                 children.push_back(std::move(item));
                 cursor = clip.endExclusive();
@@ -213,6 +348,12 @@ Result<std::string> writeOtio(const model::Project& project, model::SequenceId s
          writeTime(sequence->startTime().rate().isPositive()
                        ? sequence->startTime().rescaledTo(sequence->frameRate())
                        : time::RationalTime{0, sequence->frameRate()})},
+        // OTIO has no field for a project's frame size -- it is a format for
+        // order and duration -- so this rides in `metadata.zaro` the way a
+        // transition's kind does, ignorable by every other reader and read
+        // back exactly by this one.
+        {"metadata",
+         json{{"zaro", json{{"width", sequence->width()}, {"height", sequence->height()}}}}},
         {"tracks",
          json{{"OTIO_SCHEMA", "Stack.1"}, {"name", "tracks"}, {"children", std::move(tracks)}}}};
     return timeline.dump(2);
@@ -269,6 +410,14 @@ Result<model::Project> readOtio(const std::string& text) {
     if (root.contains("global_start_time")) {
         if (auto start = readTime(root.at("global_start_time"), "global_start_time")) {
             sequence.setStartTime(*start);
+        }
+    }
+    {
+        const json meta = root.value("metadata", json::object());
+        const json mine = meta.is_object() ? meta.value("zaro", json::object()) : json::object();
+        if (mine.contains("width") && mine.contains("height")) {
+            sequence.setSize(mine.value("width", sequence.width()),
+                             mine.value("height", sequence.height()));
         }
     }
 
@@ -396,6 +545,18 @@ Result<model::Project> readOtio(const std::string& text) {
                     found = byUrl.emplace(url, project.addMedia(std::move(media))).first;
                 }
                 clip.source = found->second;
+            } else if (schemaName(reference) == "GeneratorReference" &&
+                       reference.value("generator_kind", std::string{}) == "zaro.Graphic") {
+                clip.graphic = readGraphic(reference.value("parameters", json::object()));
+            }
+
+            {
+                const json metaNode = child.value("metadata", json::object());
+                const json mine =
+                    metaNode.is_object() ? metaNode.value("zaro", json::object()) : json::object();
+                if (mine.contains("transform")) {
+                    clip.transform = readTransform(mine.at("transform"));
+                }
             }
 
             track->insert(clip);

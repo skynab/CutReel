@@ -7,11 +7,13 @@
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QGroupBox>
+#include <QMouseEvent>
 #include <cmath>
 #include <cstdint>
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "zaro/core/edit/Operations.h"
 #include "zaro/core/io/ProjectIo.h"
 
 #include "../AudioStrip.h"
@@ -506,6 +508,120 @@ TEST_CASE("A clip's own repair, set from the inspector", "[gui]") {
     }
 
     std::printf("  clip repair: 120 Hz high pass and 6:1, on the clip and not the track\n");
+
+    while (window.commands().canUndo()) {
+        window.commands().undo(window.project());
+    }
+}
+
+// The gain line: the rubber-band drawn across an audio clip showing its
+// GainDb over time. Dragged with no keyframe yet, it changes the clip's
+// plain gain rather than starting an animation; dragged near a point already
+// there, it moves that point's value and leaves its time alone -- the
+// vertical half of what the keyframe lane's diamond already does
+// horizontally.
+TEST_CASE("The gain line on an audio clip is dragged", "[gui]") {
+    auto& window = zaro::app::testing::gui();
+    const zaro::app::testing::Rewind rewind;
+    auto* timeline = window.timeline();
+    const auto& sequence = *window.sequence();
+    const auto sequenceId = sequence.id();
+    const auto& audioTrack = sequence.audioTracks().front();
+    if (audioTrack.clips().empty()) {
+        zaro::app::testing::failf("the fixture has no sound clip\n");
+    }
+    const auto trackId = audioTrack.id();
+    const auto clipId = audioTrack.clips().front().id;
+    const auto original = *audioTrack.find(clipId);
+
+    const auto row = timeline->rowFor(trackId);
+    REQUIRE(row.has_value());
+
+    const auto clipNow = [&]() -> const zaro::model::Clip* {
+        return window.project().findSequence(sequenceId)->findTrack(trackId)->find(clipId);
+    };
+
+    // A vertical drag at one x, the same shape `dragOnTimeline` gives a
+    // horizontal one.
+    const auto dragVertical = [timeline](int x, int fromY, int toY) {
+        const auto send = [&](QEvent::Type type, int y, Qt::MouseButton button,
+                              Qt::MouseButtons buttons) {
+            QMouseEvent event(type, QPointF(x, y), QPointF(x, y), button, buttons, Qt::NoModifier);
+            QCoreApplication::sendEvent(timeline, &event);
+        };
+        send(QEvent::MouseButtonPress, fromY, Qt::LeftButton, Qt::LeftButton);
+        constexpr int steps = 8;
+        for (int i = 1; i <= steps; ++i) {
+            send(QEvent::MouseMove, fromY + (toY - fromY) * i / steps, Qt::NoButton,
+                 Qt::LeftButton);
+        }
+        send(QEvent::MouseButtonRelease, toY, Qt::LeftButton, Qt::NoButton);
+        QApplication::processEvents();
+    };
+
+    const auto midTime =
+        original.start() +
+        zaro::time::RationalTime{original.duration().frames() / 2, original.start().rate()};
+    const int x = static_cast<int>(timeline->layout().xForTime(midTime));
+    const int fromY = static_cast<int>(
+        std::llround(timeline->layout().yForGainDb(original.gainDb, row->top, row->height)));
+    const int toY = static_cast<int>(
+        std::llround(timeline->layout().yForGainDb(original.gainDb - 6.0, row->top, row->height)));
+
+    dragVertical(x, fromY, toY);
+
+    const zaro::model::Clip* flatMoved = clipNow();
+    REQUIRE(flatMoved != nullptr);
+    if (flatMoved->animation.find(zaro::model::Param::GainDb) != nullptr) {
+        zaro::app::testing::failf("dragging the flat line started an animation\n");
+    }
+    if (std::fabs(flatMoved->gainDb - (original.gainDb - 6.0)) > 1.0) {
+        zaro::app::testing::failf(
+            "the flat gain line did not move the clip's gain (%.1f, wanted near %.1f)\n",
+            flatMoved->gainDb, original.gainDb - 6.0);
+    }
+    std::printf("  gain line: flat drag moved the clip from %.1f to %.1f dB\n", original.gainDb,
+                flatMoved->gainDb);
+
+    while (window.commands().canUndo()) {
+        window.commands().undo(window.project());
+    }
+
+    // Now with a keyframe already there: dragging near it moves its value,
+    // not its time.
+    zaro::model::Keyframe key;
+    key.time = original.sourceTimeAt(midTime);
+    key.value = 2.0;
+    auto built = zaro::edit::makeSetKeyframe(window.project(), {sequenceId, trackId}, clipId,
+                                             zaro::model::Param::GainDb, key.time, key.value);
+    REQUIRE(built.hasValue());
+    window.commands().execute(window.project(), std::move(*built));
+    window.commands().breakMerge();
+    QApplication::processEvents();
+
+    const int keyY =
+        static_cast<int>(std::llround(timeline->layout().yForGainDb(2.0, row->top, row->height)));
+    const int keyToY =
+        static_cast<int>(std::llround(timeline->layout().yForGainDb(-4.0, row->top, row->height)));
+    dragVertical(x, keyY, keyToY);
+
+    const zaro::model::Clip* keyed = clipNow();
+    REQUIRE(keyed != nullptr);
+    const zaro::model::Curve* curve = keyed->animation.find(zaro::model::Param::GainDb);
+    if (curve == nullptr || curve->keyframes().size() != 1) {
+        zaro::app::testing::failf("the drag lost or duplicated the keyframe (%zu left)\n",
+                                  curve == nullptr ? std::size_t{0} : curve->keyframes().size());
+    }
+    const zaro::model::Keyframe& moved = curve->keyframes().front();
+    if (moved.time != key.time) {
+        zaro::app::testing::failf("dragging the point's value also moved it in time\n");
+    }
+    if (std::fabs(moved.value - (-4.0)) > 1.0) {
+        zaro::app::testing::failf("the keyframe's value did not follow the drag (got %.1f)\n",
+                                  moved.value);
+    }
+    std::printf("  gain line: an existing keyframe moved from 2.0 to %.1f dB at the same instant\n",
+                moved.value);
 
     while (window.commands().canUndo()) {
         window.commands().undo(window.project());

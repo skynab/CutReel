@@ -17,8 +17,8 @@
 namespace zaro::app {
 
 ExportDialog::ExportDialog(const model::Project& project, model::SequenceId sequence,
-                           QWidget* parent)
-    : QDialog{parent}, project_{&project}, sequenceId_{sequence} {
+                           const QString& folder, QWidget* parent)
+    : QDialog{parent}, project_{&project}, sequenceId_{sequence}, folder_{folder} {
     setWindowTitle("Export");
     setModal(true);
 
@@ -86,8 +86,11 @@ ExportDialog::~ExportDialog() {
 }
 
 void ExportDialog::chooseFile() {
-    const QString chosen = QFileDialog::getSaveFileName(this, "Export to", path_->text(),
-                                                        "QuickTime (*.mov);;MPEG-4 (*.mp4)");
+    // Where the last export went, until something has been chosen here: the
+    // next export of a piece of work goes where the last one did.
+    const QString from = path_->text().isEmpty() ? folder_ : path_->text();
+    const QString chosen =
+        QFileDialog::getSaveFileName(this, "Export to", from, "QuickTime (*.mov);;MPEG-4 (*.mp4)");
     if (!chosen.isEmpty()) {
         path_->setText(chosen);
     }
@@ -102,6 +105,7 @@ void ExportDialog::start() {
         status_->setText("Choose a destination first.");
         return;
     }
+    exported_ = destination;
 
     platform::ffmpeg::RenderRequest request;
     request.outputPath = destination.toStdString();

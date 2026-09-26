@@ -7,6 +7,7 @@
 
 #include <string>
 
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include "zaro/core/edit/Operations.h"
@@ -427,18 +428,19 @@ TEST_CASE("Only the live take of an audition arrives", "[io][finalcut]") {
 }
 
 TEST_CASE("A clip with no media keeps its place", "[io][finalcut]") {
-    // A title, a shape, a nested sequence and an adjustment layer all write as
-    // a positioned gap with a name: the shape of the cut survives and what
-    // filled the slot does not.
+    // A nested sequence, an adjustment layer or a multicam clip all write as a
+    // positioned gap with a name: the shape of the cut survives and what
+    // filled the slot does not. A `Graphic` is different -- see the tests
+    // below -- so this one is left with no graphic at all.
     Fixture f;
     model::Clip clip = f.clip(10, 30);
     clip.source = {};
     clip.name = "Lower third";
-    clip.graphic.kind = model::GraphicKind::Rectangle;
     REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.v1), clip)));
 
     const auto text = io::writeFcpXml(f.project, f.sequenceId);
     REQUIRE(text);
+    CHECK(text->find("<gap") != std::string::npos);
 
     const auto back = io::readFcpXml(*text);
     REQUIRE(back);
@@ -449,6 +451,179 @@ TEST_CASE("A clip with no media keeps its place", "[io][finalcut]") {
     CHECK(video.clips()[0].duration().frames() == 30);
     CHECK_FALSE(video.clips()[0].source.isValid());
     CHECK(back->media().empty());
+}
+
+TEST_CASE("A clip's rotation and crop survive the trip", "[io][finalcut]") {
+    Fixture f;
+    model::Clip source = f.clip(0, 20, 500);
+    source.transform.rotationDegrees = 90.0;
+    source.transform.cropLeft = 10.0;
+    source.transform.cropRight = 5.0;
+    source.transform.scaleX = 1.5;
+    REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.v1), source)));
+
+    const auto text = io::writeFcpXml(f.project, f.sequenceId);
+    REQUIRE(text);
+    const auto back = io::readFcpXml(*text);
+    REQUIRE(back);
+    const model::Transform& transform =
+        back->sequences().front().videoTracks().front().clips()[0].transform;
+    CHECK(transform.rotationDegrees == Catch::Approx(90.0));
+    CHECK(transform.cropLeft == Catch::Approx(10.0));
+    CHECK(transform.cropRight == Catch::Approx(5.0));
+    CHECK(transform.scaleX == Catch::Approx(1.5));
+}
+
+TEST_CASE("A cut with no transform at all stays a plain cut", "[io][finalcut]") {
+    Fixture f;
+    REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.v1), f.clip(0, 20, 500))));
+    const auto text = io::writeFcpXml(f.project, f.sequenceId);
+    REQUIRE(text);
+    CHECK(text->find("zaro:") == std::string::npos);
+}
+
+TEST_CASE("A text overlay round trips as a title", "[io][finalcut]") {
+    Fixture f;
+    model::Graphic title;
+    title.kind = model::GraphicKind::Text;
+    title.text = "Chapter One";
+    title.family = "Georgia";
+    title.pointSize = 48.0;
+    title.bold = true;
+    title.alignment = 1;
+    REQUIRE(f.run(edit::makeAddGraphic(f.project, f.on(f.v1), title, f.range(0, 20))));
+
+    const auto text = io::writeFcpXml(f.project, f.sequenceId);
+    REQUIRE(text);
+    CHECK(text->find("<title") != std::string::npos);
+
+    const auto back = io::readFcpXml(*text);
+    REQUIRE(back);
+    const model::Track& video = back->sequences().front().videoTracks().front();
+    REQUIRE(video.clips().size() == 1);
+    CHECK_FALSE(video.clips()[0].source.isValid());
+    const model::Graphic& graphic = video.clips()[0].graphic;
+    CHECK(graphic.kind == model::GraphicKind::Text);
+    CHECK(graphic.text == "Chapter One");
+    CHECK(graphic.family == "Georgia");
+    CHECK(graphic.pointSize == Catch::Approx(48.0));
+    CHECK(graphic.bold);
+    CHECK(graphic.alignment == 1);
+}
+
+TEST_CASE("A shape's colour and corner radius survive the trip", "[io][finalcut]") {
+    Fixture f;
+    model::Graphic shape;
+    shape.kind = model::GraphicKind::Rectangle;
+    shape.cornerRadius = 12.0;
+    shape.width = 300.0;
+    shape.red = 0.25;
+    REQUIRE(f.run(edit::makeAddGraphic(f.project, f.on(f.v1), shape, f.range(0, 20))));
+
+    const auto text = io::writeFcpXml(f.project, f.sequenceId);
+    REQUIRE(text);
+    const auto back = io::readFcpXml(*text);
+    REQUIRE(back);
+    const model::Graphic& graphic =
+        back->sequences().front().videoTracks().front().clips()[0].graphic;
+    CHECK(graphic.kind == model::GraphicKind::Rectangle);
+    CHECK(graphic.cornerRadius == Catch::Approx(12.0));
+    CHECK(graphic.width == Catch::Approx(300.0));
+    CHECK(graphic.red == Catch::Approx(0.25));
+}
+
+TEST_CASE("A real Final Cut title with no zaro attributes is a positioned clip with no content",
+          "[io][finalcut]") {
+    // `writeGraphic` never wrote this one -- it is what real Final Cut writes
+    // for its own title generator, `ref` and all -- so it is read the way
+    // `refOf` already treats any title: kept in place, with no graphic and no
+    // media.
+    const std::string text = R"(<fcpxml version="1.9">
+        <resources>
+          <format id="r1" frameDuration="100/2500s" width="1920" height="1080"/>
+        </resources>
+        <library><event name="E"><project name="P"><sequence format="r1" duration="20/25s" tcStart="0s">
+          <spine>
+            <title ref="r2" offset="0s" duration="20/25s" name="Real Title"/>
+          </spine>
+        </sequence></project></event></library>
+      </fcpxml>)";
+
+    const auto back = io::readFcpXml(text);
+    REQUIRE(back);
+    const model::Track& video = back->sequences().front().videoTracks().front();
+    REQUIRE(video.clips().size() == 1);
+    CHECK(video.clips()[0].name == "Real Title");
+    CHECK_FALSE(video.clips()[0].graphic.isSet());
+    CHECK_FALSE(video.clips()[0].source.isValid());
+}
+
+TEST_CASE("A transition round trips through FCPXML", "[io][finalcut][transition]") {
+    // FCPXML has a real `<transition>` story element, but nothing in it says
+    // which instant inside its span is the join -- `zaro:cut` is what makes
+    // this reader able to find the two clips it sits between.
+    Fixture f;
+    REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.v1), f.clip(0, 50, 500))));
+    REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.v1), f.clip(50, 50, 500))));
+    REQUIRE(f.run(edit::makeAddCrossDissolve(f.project, f.on(f.v1), f.at(50), f.at(20))));
+
+    const model::TransitionId id = f.track(f.v1).transitions().front().id;
+    edit::TransitionSettings settings;
+    settings.kind = model::TransitionKind::Wipe;
+    settings.direction = model::TransitionDirection::Left;
+    settings.softness = 0.25;
+    settings.easing = model::TransitionEasing::Out;
+    REQUIRE(f.run(edit::makeSetTransitionSettings(f.project, f.on(f.v1), id, settings)));
+    const auto wanted = f.track(f.v1).transitions().front().range;
+
+    const auto text = io::writeFcpXml(f.project, f.sequenceId);
+    REQUIRE(text);
+    // The format's own vocabulary, so an importer that never heard of this
+    // program still finds a wipe where one belongs.
+    CHECK(text->find("<transition ") != std::string::npos);
+    CHECK(text->find("name=\"Wipe\"") != std::string::npos);
+
+    const auto back = io::readFcpXml(*text);
+    REQUIRE(back);
+    const model::Track& video = back->sequences().front().videoTracks().front();
+    REQUIRE(video.transitions().size() == 1);
+    const model::Transition& span = video.transitions().front();
+
+    CHECK(span.range.start().frames() == wanted.start().frames());
+    CHECK(span.range.duration().frames() == wanted.duration().frames());
+    REQUIRE(video.clips().size() == 2);
+    CHECK(span.from == video.clips()[0].id);
+    CHECK(span.to == video.clips()[1].id);
+
+    CHECK(span.kind == model::TransitionKind::Wipe);
+    CHECK(span.direction == model::TransitionDirection::Left);
+    CHECK(span.softness == Catch::Approx(0.25));
+    CHECK(span.easing == model::TransitionEasing::Out);
+}
+
+TEST_CASE("A real Final Cut transition with no zaro:cut is left alone",
+          "[io][finalcut][transition]") {
+    // Real Final Cut writes `<transition>` too, but names no instant inside its
+    // span as the join -- there being nothing in the format that does -- so
+    // this reader has nothing to resolve it against and leaves the cut a plain
+    // one either side of it, rather than guessing which frame is the join.
+    const std::string text = R"(<fcpxml version="1.9">
+        <resources>
+          <format id="r1" frameDuration="1/25s" width="1920" height="1080"/>
+        </resources>
+        <library><event name="E"><project name="P"><sequence format="r1" duration="2s" tcStart="0s">
+          <spine>
+            <asset-clip lane="0" offset="0s" duration="44/25s" name="a"/>
+            <transition name="Cross Dissolve" lane="0" offset="44/25s" duration="12/25s"/>
+            <asset-clip lane="0" offset="50/25s" duration="50/25s" name="b"/>
+          </spine>
+        </sequence></project></event></library>
+      </fcpxml>)";
+
+    const auto back = io::readFcpXml(text);
+    REQUIRE(back);
+    const model::Track& video = back->sequences().front().videoTracks().front();
+    CHECK(video.transitions().empty());
 }
 
 TEST_CASE("A disabled clip and an audio role survive", "[io][finalcut]") {

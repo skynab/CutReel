@@ -1,6 +1,6 @@
 // Handing a cut to another program, and taking one back.
 //
-// Three formats, five commands, and the knowledge of which file extension and
+// Three formats, six commands, and the knowledge of which file extension and
 // which dialog title belongs to which of them. That was six methods on
 // PreviewWindow, and with them four `zaro/core/io` headers on a header that
 // 105 files and every GUI test already parse. None of it is about the window.
@@ -32,15 +32,18 @@ namespace zaro::app::interchange {
 
 /// Write the sequence out, asking where first.
 ///
-/// Each shows its own file dialog and reports its own failure, because there is
-/// nothing for the caller to do about either. Silent when cancelled.
+/// Each shows its own file dialog, opened in `folder`, and reports its own
+/// failure, because there is nothing for the caller to do about either. Silent
+/// when cancelled.
 ///
-/// OTIO is export only. Importing one produces a project of its own, and
-/// replacing the open one needs a "save first?" that does not exist yet -- so
-/// that direction lives in cutreel-otio, where there is nothing to lose.
-void exportOtio(QWidget* parent, const model::Project& project, model::SequenceId sequence);
-void exportPremiere(QWidget* parent, const model::Project& project, model::SequenceId sequence);
-void exportFinalCut(QWidget* parent, const model::Project& project, model::SequenceId sequence);
+/// Returns the path written, or empty when nothing was: that is what the caller
+/// keeps as the place the next export starts.
+[[nodiscard]] QString exportOtio(QWidget* parent, const model::Project& project,
+                                 model::SequenceId sequence, const QString& folder);
+[[nodiscard]] QString exportPremiere(QWidget* parent, const model::Project& project,
+                                     model::SequenceId sequence, const QString& folder);
+[[nodiscard]] QString exportFinalCut(QWidget* parent, const model::Project& project,
+                                     model::SequenceId sequence, const QString& folder);
 
 /// A cut read back from another program, and the plain truth about it.
 struct Imported {
@@ -54,12 +57,22 @@ struct Imported {
     /// is the sort of absence somebody finds an hour later, in a grade that is
     /// not there, so it is not optional and not the window's to remember.
     QString lost;
+    /// The folder the imported file was read from.
+    ///
+    /// A path in an interchange file is almost never a path this machine has:
+    /// a different drive letter, a different mount, a Mac path opened on
+    /// Windows. The one place worth looking without being asked is beside the
+    /// file that was just read -- that is where an editor exporting for
+    /// another program, or handing a project back and forth, tends to put the
+    /// media too.
+    QString sourceFolder;
 };
 
 /// Ask for a file and read it.
 ///
 /// Empty when cancelled or unreadable; an unreadable file has already been
 /// reported, so an empty return needs no message of its own.
+[[nodiscard]] std::optional<Imported> importOtio(QWidget* parent);
 [[nodiscard]] std::optional<Imported> importPremiere(QWidget* parent);
 [[nodiscard]] std::optional<Imported> importFinalCut(QWidget* parent);
 

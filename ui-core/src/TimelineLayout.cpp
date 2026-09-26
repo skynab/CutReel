@@ -367,6 +367,95 @@ std::optional<TimelineLayout::KeyframeHit> TimelineLayout::hitTestKeyframe(
     return std::nullopt;
 }
 
+std::pair<double, double> TimelineLayout::gainLineBand(std::int32_t rowHeight) const noexcept {
+    // The same margins the waveform is drawn inside: below the strip and the
+    // name, above the keyframe lane.
+    const double top = 12.0;
+    const double bottom = static_cast<double>(rowHeight) - 2.0 - keyframeLaneHeight();
+    return {top, std::max(top + 4.0, bottom)};
+}
+
+double TimelineLayout::yForGainDb(double gainDb, std::int32_t rowTop,
+                                  std::int32_t rowHeight) const noexcept {
+    const auto [top, bottom] = gainLineBand(rowHeight);
+    const double clamped = std::clamp(gainDb, kGainLineMinDb, kGainLineMaxDb);
+    const double fraction = (clamped - kGainLineMinDb) / (kGainLineMaxDb - kGainLineMinDb);
+    // High gain draws near the top of the band, so the line rises the way a
+    // fader does.
+    return static_cast<double>(rowTop) + bottom - fraction * (bottom - top);
+}
+
+double TimelineLayout::gainDbForY(double y, std::int32_t rowTop,
+                                  std::int32_t rowHeight) const noexcept {
+    const auto [top, bottom] = gainLineBand(rowHeight);
+    const double local = std::clamp(y - static_cast<double>(rowTop), top, bottom);
+    const double fraction = (bottom - local) / (bottom - top);
+    return kGainLineMinDb + fraction * (kGainLineMaxDb - kGainLineMinDb);
+}
+
+std::optional<TimelineLayout::GainPointHit> TimelineLayout::hitTestGainPoint(
+    const model::Sequence& sequence, std::int32_t x, std::int32_t y) const {
+    if (isInHeaders(x) || isInRuler(x, y)) {
+        return std::nullopt;
+    }
+    const auto row = rowAt(sequence, y);
+    if (!row || row->kind != model::TrackKind::Audio) {
+        return std::nullopt;
+    }
+    const model::Track* track = sequence.findTrack(row->track);
+    if (track == nullptr) {
+        return std::nullopt;
+    }
+
+    const time::RationalTime timelineTime = timeForX(x, sequence.frameRate());
+    // Vertically, a thin line: this is the tolerance that decides whether a
+    // press is aimed at the gain line at all, and it has to lose to an
+    // ordinary press on the clip body most of the time or nudging the volume
+    // stops being possible to move the clip -- the line sits close to the
+    // clip's own vertical centre at 0dB, which is also where a hand aiming to
+    // drag the clip naturally lands. Horizontally, once the line is what is
+    // meant, an existing point is forgiven a few more pixels: it is a small
+    // target set deliberately, and it should be findable again without
+    // pixel-perfect aim.
+    constexpr std::int32_t kLineReach = 3;
+    constexpr std::int32_t kPointReach = 6;
+    for (const model::Clip& clip : track->clips()) {
+        if (!clip.timelineRange.contains(timelineTime)) {
+            continue;
+        }
+        // Found the clip under the pointer; there is only one at any given x,
+        // so whether or not it is close enough to the line, nothing else on
+        // this track can be the answer.
+        const double lineY = yForGainDb(clip.gainDbAt(timelineTime), row->top, row->height);
+        if (std::abs(static_cast<double>(y) - lineY) > static_cast<double>(kLineReach)) {
+            return std::nullopt;
+        }
+
+        // An existing keyframe close by in time wins over adding a new one --
+        // aiming near a point you already placed should pick it up rather
+        // than plant a second one beside it.
+        if (const model::Curve* curve = clip.animation.find(model::Param::GainDb);
+            curve != nullptr) {
+            const time::RationalTime* nearest = nullptr;
+            std::int32_t bestDistance = kPointReach + 1;
+            for (const model::Keyframe& key : curve->keyframes()) {
+                const auto centre = static_cast<std::int32_t>(
+                    std::llround(xForTime(clip.timelineTimeOf(key.time))));
+                const std::int32_t distance = std::abs(centre - x);
+                if (distance <= kPointReach && distance < bestDistance) {
+                    bestDistance = distance;
+                    nearest = &key.time;
+                }
+            }
+            if (nearest != nullptr) {
+                return GainPointHit{track->id(), clip.id, *nearest, true};
+            }
+        }
+        return GainPointHit{track->id(), clip.id, clip.baseSourceTimeAt(timelineTime), false};
+    }
+    return std::nullopt;
+}
+
 time::RationalTime TimelineLayout::rulerStep(const time::Rational& frameRate) const {
     const double frameSeconds = frameRate.isPositive() ? 1.0 / frameRate.toDouble() : 1.0 / 25.0;
 

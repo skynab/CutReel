@@ -1,6 +1,7 @@
 // Small widget factories, and the bars that are only widgets.
 #pragma once
 
+#include <QPoint>
 #include <QPushButton>
 #include <QString>
 #include <QStringList>
@@ -14,6 +15,7 @@
 #include "Bars.h"
 
 class QAbstractItemView;
+class QDockWidget;
 class QFrame;
 class QLabel;
 
@@ -84,6 +86,40 @@ struct Hooks {
     /// deliberately does not know how to ask for a number.
     std::function<void(std::int32_t, std::int32_t)> chooseFrameSize;
 };
+
+/// A dock widget's header, drawn as the docking mockup's tab strip: the
+/// panel's name as a single tab (accent underline while the dock holds the
+/// focus, a neutral one otherwise) and a close button on the right. Every
+/// dock gets a name, including panels that draw their own tab row inside --
+/// the mockup names every card.
+///
+/// The strip is 30px, and must stay well over 20: a strip thinner than that
+/// never starts a drag at all under Qt's own drag-initiation hit-testing --
+/// measured, not guessed.
+///
+/// `setTitleBarWidget` replaces Qt's own title bar wholesale, close button
+/// and all, so `onClose` puts one back when it is not empty -- left empty for
+/// the one dock (the timeline) that should not be closeable at all.
+///
+/// `tools`, when given, is seated in the header after the name and takes the
+/// remaining width -- the timeline's tool row, so its dock has one bar rather
+/// than a header with a toolbar under it.
+QWidget* buildDockHeader(QWidget* parent, const QString& title,
+                         const std::function<void()>& onClose = {}, QWidget* tools = nullptr);
+
+/// Start dragging `dock` by its header, as if the pointer had just been
+/// pressed on it -- for a dock that has just been floated out from under a
+/// pointer that is already down (a tab pulled off a strip), so the drag
+/// carries on as an ordinary header drag and can be dropped back anywhere.
+/// `at` is where on the header the pointer is taken to be, and the dock is
+/// moved to put that point under the pointer.
+void beginDockDrag(QDockWidget* dock, QPoint at);
+
+/// Detach the first row of a panel's own layout -- its tab strip or toolbar --
+/// and hand it back, for `buildDockHeader`'s `tools`. Null, and the panel
+/// untouched, when the first item is not a widget. Lifting the row means a
+/// panel's dock has one bar instead of a header with a second bar under it.
+QWidget* liftFirstRow(QWidget* panel);
 
 QWidget* buildTitleBar(QWidget* parent, Bars& bars);
 QWidget* buildStatusBar(QWidget* parent, Bars& bars);

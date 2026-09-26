@@ -25,9 +25,14 @@ class ExportDialog : public QDialog {
     Q_OBJECT
 
 public:
-    ExportDialog(const model::Project& project, model::SequenceId sequence,
+    /// `folder` is where Browse opens until a file has been chosen.
+    ExportDialog(const model::Project& project, model::SequenceId sequence, const QString& folder,
                  QWidget* parent = nullptr);
     ~ExportDialog() override;
+
+    /// The file the last render was started to, or empty if none was. Read
+    /// once the dialog has closed, to remember where exports go.
+    [[nodiscard]] QString exported() const { return exported_; }
 
 private:
     void chooseFile();
@@ -37,6 +42,8 @@ private:
 
     const model::Project* project_;
     model::SequenceId sequenceId_;
+    QString folder_;
+    QString exported_;
 
     QLineEdit* path_{nullptr};
     QCheckBox* withAudio_{nullptr};

@@ -213,6 +213,64 @@ TEST_CASE("Trimming a clip's out point with the mouse, and undoing it", "[gui]")
     }
 }
 
+// Fine adjustment: holding Ctrl or Shift during a drag scales pointer motion
+// down, for the frame you cannot otherwise land on once a timeline pixel
+// covers several of them. Driven through the same trim gesture as the test
+// above, over the same pixel travel, once at full speed and once with Ctrl
+// held throughout.
+TEST_CASE("Ctrl during a trim moves the edge in finer steps than the pointer travelled", "[gui]") {
+    auto& window = zaro::app::testing::gui();
+    const zaro::app::testing::Rewind rewind;
+    auto* timeline = window.timeline();
+    const auto& sequence = *window.sequence();
+    const auto& videoTrack = sequence.videoTracks().front();
+    const auto original = videoTrack.clips().front();
+    const auto row = timeline->rowFor(videoTrack.id());
+    REQUIRE(row.has_value());
+    const int y = row->top + row->height / 2;
+
+    const int outX = static_cast<int>(timeline->layout().xForTime(original.endExclusive()));
+    int pressX = 0;
+    for (const int offset : {2, 3, 4, 5, 6}) {
+        const auto hit = timeline->layout().hitTest(sequence, outX - offset, y);
+        if (hit && hit->clip == original.id &&
+            hit->part == zaro::ui::TimelineLayout::Part::OutEdge) {
+            pressX = outX - offset;
+            break;
+        }
+    }
+    REQUIRE(pressX != 0);
+    const int travel = 120;
+
+    dragOnTimeline(timeline, pressX, pressX - travel, y);
+    const zaro::model::Clip* full =
+        window.project().findSequence(sequence.id())->videoTracks().front().find(original.id);
+    REQUIRE(full != nullptr);
+    const std::int64_t fullShortened = original.duration().frames() - full->duration().frames();
+    REQUIRE(fullShortened > 0);
+
+    window.commands().undo(window.project());
+
+    dragOnTimeline(timeline, pressX, pressX - travel, y, Qt::ControlModifier);
+    const zaro::model::Clip* fine =
+        window.project().findSequence(sequence.id())->videoTracks().front().find(original.id);
+    REQUIRE(fine != nullptr);
+    const std::int64_t fineShortened = original.duration().frames() - fine->duration().frames();
+
+    std::printf("  fine trim over %dpx: %lld frames at full speed, %lld frames with Ctrl held\n",
+                travel, static_cast<long long>(fullShortened),
+                static_cast<long long>(fineShortened));
+    if (fineShortened <= 0) {
+        zaro::app::testing::failf("a fine-adjustment trim did not move the edge at all\n");
+    }
+    if (fineShortened >= fullShortened) {
+        zaro::app::testing::failf(
+            "holding Ctrl during a trim should move the edge less than the same drag at full "
+            "speed (%lld frames held vs %lld frames full speed)\n",
+            static_cast<long long>(fineShortened), static_cast<long long>(fullShortened));
+    }
+}
+
 // Linked cutting: picture and sound are one edit. The operation is
 // unit-tested; what this checks is that the blade in the window
 // reaches it, since a razor that cuts only the track under the pointer

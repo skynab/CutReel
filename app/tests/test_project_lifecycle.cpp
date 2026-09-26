@@ -7,9 +7,13 @@
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QElapsedTimer>
+#include <QImage>
 #include <QList>
+#include <QMenu>
+#include <QMessageBox>
 #include <QMimeData>
 #include <QPoint>
+#include <QPushButton>
 #include <QThread>
 #include <QUrl>
 #include <cstdint>
@@ -107,6 +111,118 @@ TEST_CASE("The Deliver panel renders a file", "[gui]") {
     zaro::app::testing::discard(deliverRoot);
     window.setWorkspace("Edit");
     QApplication::processEvents();
+}
+
+// A point marker -- what an ordinary "Add Marker" leaves, and what most
+// markers on a real timeline are -- is stored one frame long, not zero
+// (`Marker::isPoint()` says so explicitly). The Deliver panel's "Marker"
+// range once checked duration against zero to skip a marker with no range,
+// which never skipped a point marker at all: it queued a one-frame render at
+// wherever the marker sat, shown as "00:00:00:01" no matter how long the
+// timeline was.
+TEST_CASE("Deliver's Marker range skips a point marker rather than rendering one frame of it",
+          "[gui]") {
+    auto& window = zaro::app::testing::gui();
+    const zaro::app::testing::Rewind rewind;
+
+    app::DeliverPanel* deliver = window.deliver();
+    window.setWorkspace("Deliver");
+    QApplication::processEvents();
+
+    const auto sequenceId = window.project().activeSequence();
+    const auto rate = window.sequence()->frameRate();
+    const auto total = window.sequence()->duration().frames();
+    REQUIRE(total > 1);
+
+    auto added =
+        zaro::edit::makeAddMarker(window.project(), sequenceId, zaro::time::RationalTime{5, rate},
+                                  zaro::time::RationalTime{1, rate}, "note");
+    REQUIRE(added);
+    window.commands().execute(window.project(), std::move(*added));
+    deliver->refresh();
+
+    QPushButton* markerButton = nullptr;
+    for (QPushButton* button : deliver->findChildren<QPushButton*>()) {
+        if (button->text() == "Marker") {
+            markerButton = button;
+            break;
+        }
+    }
+    REQUIRE(markerButton != nullptr);
+    markerButton->click();
+
+    // The summary is what the toolbar shows, so it is read back the way a
+    // person would read it -- a timecode -- rather than reaching past the
+    // panel for the private frame count it was built from.
+    const QString summary = deliver->rangeSummary();
+    const std::string timecode = summary.section(QChar(0x00B7), 1).trimmed().toStdString();
+    const auto parsed = zaro::time::framesFromTimecodeString(timecode, rate);
+    REQUIRE(parsed.has_value());
+    if (*parsed != total) {
+        zaro::app::testing::failf(
+            "Marker range with only a point marker present should fall back to "
+            "the whole timeline (%lld frames); got %s (%lld frames)\n",
+            static_cast<long long>(total), summary.toUtf8().constData(),
+            static_cast<long long>(*parsed));
+    }
+    std::printf("  deliver marker range with only a point marker present: %s (whole timeline)\n",
+                summary.toUtf8().constData());
+}
+
+// The previous/next marker buttons either side of Add Marker on the timeline:
+// they move the playhead the way the menu items do, and grey out when there is
+// no marker in that direction.
+TEST_CASE("Stepping between markers from the timeline buttons", "[gui]") {
+    auto& window = zaro::app::testing::gui();
+    const zaro::app::testing::Rewind rewind;
+
+    auto* previous = window.findChild<QPushButton*>("timeline-previous-marker");
+    auto* next = window.findChild<QPushButton*>("timeline-next-marker");
+    if (previous == nullptr || next == nullptr) {
+        zaro::app::testing::failf("the timeline has no previous/next marker buttons\n");
+        return;
+    }
+
+    const auto sequenceId = window.project().activeSequence();
+    const auto rate = window.sequence()->frameRate();
+    REQUIRE(window.sequence()->duration().frames() > 20);
+    for (const std::int64_t frame : {5, 15}) {
+        auto added = zaro::edit::makeAddMarker(window.project(), sequenceId,
+                                               zaro::time::RationalTime{frame, rate},
+                                               zaro::time::RationalTime{0, rate}, "note");
+        REQUIRE(added);
+        window.commands().execute(window.project(), std::move(*added));
+    }
+
+    window.setPosition(zaro::time::RationalTime{0, rate});
+    QApplication::processEvents();
+    if (previous->isEnabled() || !next->isEnabled()) {
+        zaro::app::testing::failf("at the start, only Next should be enabled\n");
+        return;
+    }
+
+    next->click();
+    QApplication::processEvents();
+    if (window.position() != zaro::time::RationalTime{5, rate}) {
+        zaro::app::testing::failf("Next did not land on the first marker\n");
+        return;
+    }
+    next->click();
+    QApplication::processEvents();
+    if (window.position() != zaro::time::RationalTime{15, rate}) {
+        zaro::app::testing::failf("Next did not land on the second marker\n");
+        return;
+    }
+    if (!previous->isEnabled() || next->isEnabled()) {
+        zaro::app::testing::failf("on the last marker, only Previous should be enabled\n");
+        return;
+    }
+
+    previous->click();
+    QApplication::processEvents();
+    if (window.position() != zaro::time::RationalTime{5, rate}) {
+        zaro::app::testing::failf("Previous did not land back on the first marker\n");
+    }
 }
 
 // Delivery: the curve a sequence goes out through, and the highlight
@@ -1484,5 +1600,91 @@ TEST_CASE("The toolbar's frame size dropdown resizes the sequence", "[gui]") {
     if (!box->currentText().contains(QString::number(wasWidth))) {
         zaro::app::testing::failf("after undo the dropdown still says '%s'\n",
                                   box->currentText().toUtf8().constData());
+    }
+}
+
+// A message box wears the theme's ground, not the platform's. The windowsvista
+// style paints one with the native task-dialog panels -- white above, grey under
+// the buttons -- and the palette's light text on that is unreadable. Grabbed
+// rather than shown, so nothing pops up in front of whoever is at the machine.
+TEST_CASE("File > Import holds every import, OpenTimelineIO included", "[gui]") {
+    auto& window = zaro::app::testing::gui();
+    QMenu* imports = nullptr;
+    for (QMenu* menu : window.findChildren<QMenu*>()) {
+        const auto* parent = qobject_cast<QMenu*>(menu->parent());
+        if (menu->title() == "Import" && parent != nullptr && parent->title() == "File") {
+            imports = menu;
+        }
+    }
+    if (imports == nullptr) {
+        zaro::app::testing::failf("File has no Import submenu\n");
+    }
+
+    // The same shape as Export: every way in is under it, and none is left
+    // loose on File itself.
+    QStringList ids;
+    for (QAction* action : imports->actions()) {
+        if (!action->isSeparator()) {
+            ids << action->objectName();
+        }
+    }
+    CHECK(ids == QStringList{"import-media", "import-otio", "import-premiere", "import-finalcut"});
+    for (QAction* action : qobject_cast<QMenu*>(imports->parent())->actions()) {
+        CHECK_FALSE(action->objectName().startsWith("import-"));
+    }
+}
+
+// A still frame goes straight to the export folder with nothing to answer, and
+// a second still of the same frame is a second file rather than the first
+// written over.
+TEST_CASE("Export Still Frame writes to the export folder without asking", "[gui]") {
+    auto& window = zaro::app::testing::gui();
+    const std::filesystem::path scratch =
+        std::filesystem::temp_directory_path() / "zaro-selftest-stills";
+    std::error_code code;
+    std::filesystem::remove_all(scratch, code);
+    std::filesystem::create_directories(scratch, code);
+    PreviewWindow::makeSettings().setValue("export/folder",
+                                           QString::fromStdString(scratch.string()));
+
+    auto* still = window.findChild<QAction*>("export-still");
+    if (still == nullptr) {
+        zaro::app::testing::failf("there is no Export Still Frame item\n");
+    }
+    still->trigger();
+    still->trigger();
+    QApplication::processEvents();
+
+    std::vector<std::filesystem::path> written;
+    for (const auto& entry : std::filesystem::directory_iterator(scratch, code)) {
+        if (entry.path().extension() == ".png") {
+            written.push_back(entry.path());
+        }
+    }
+    const bool readable =
+        !written.empty() && !QImage(QString::fromStdString(written.front().string())).isNull();
+    PreviewWindow::makeSettings().remove("export/folder");
+    std::filesystem::remove_all(scratch, code);
+
+    if (written.size() != 2) {
+        zaro::app::testing::failf("two stills of one frame left %zu files\n", written.size());
+    }
+    CHECK(readable);
+}
+
+TEST_CASE("A message box is drawn dark, like the rest of the window", "[gui]") {
+    zaro::app::testing::gui();
+    QMessageBox message(QMessageBox::Information, "Premiere XML",
+                        "Imported \"Sequence 01\": 6 tracks, 7 media files.", QMessageBox::Ok);
+    message.setInformativeText(
+        "Grades, effects, transitions and keyframes do not cross this "
+        "format and were not read. Save to keep this as a project.");
+    message.adjustSize();
+    const QImage image = message.grab().toImage();
+
+    const double gray = meanGray(image);
+    if (gray > 110.0) {
+        zaro::app::testing::failf("the message box grabbed at mean gray %.1f; the theme is dark\n",
+                                  gray);
     }
 }

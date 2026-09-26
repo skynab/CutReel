@@ -527,3 +527,92 @@ TEST_CASE("a clip with no animation has nothing in its keyframe lane", "[hit][ke
     // Nor do the headers or the ruler, which are not part of any clip.
     CHECK_FALSE(layout.hitTestKeyframe(f.sequence(), 10, row.top + row.height - 2).has_value());
 }
+
+TEST_CASE("the gain line's y and dB round trip through each other", "[gain]") {
+    const TimelineLayout layout = makeLayout();
+    for (const double db : {-24.0, -12.0, -6.0, 0.0, 6.0, 12.0}) {
+        const double y = layout.yForGainDb(db, 0, 50);
+        CHECK(layout.gainDbForY(y, 0, 50) == Approx(db).margin(0.05));
+    }
+    // Out of range clamps to the ends of the band rather than drawing off it.
+    CHECK(layout.yForGainDb(40.0, 0, 50) == Approx(layout.yForGainDb(12.0, 0, 50)));
+    CHECK(layout.yForGainDb(-100.0, 0, 50) == Approx(layout.yForGainDb(-24.0, 0, 50)));
+    // Higher gain draws nearer the top of the band, the way a fader rises.
+    CHECK(layout.yForGainDb(6.0, 0, 50) < layout.yForGainDb(-6.0, 0, 50));
+}
+
+TEST_CASE("a clip's flat gain is where the gain line is hit, with no keyframe to show for it",
+          "[gain]") {
+    testing::Fixture f;
+    model::Clip placed = f.clip(100, 50, 500);
+    placed.gainDb = -6.0;
+    REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.a1), placed)));
+
+    const TimelineLayout layout = makeLayout();
+    const auto row = layout.rows(f.sequence()).back();  // audio rows are laid out below video
+    REQUIRE(row.kind == model::TrackKind::Audio);
+    const auto x = static_cast<std::int32_t>(layout.xForTime(f.at(110)));
+    const auto y =
+        static_cast<std::int32_t>(std::llround(layout.yForGainDb(-6.0, row.top, row.height)));
+
+    const auto hit = layout.hitTestGainPoint(f.sequence(), x, y);
+    REQUIRE(hit.has_value());
+    CHECK(hit->clip == placed.id);
+    CHECK_FALSE(hit->existing);
+
+    // Off the line -- up near the clip's own strip, where the name goes -- is
+    // not a hit at all.
+    CHECK_FALSE(layout.hitTestGainPoint(f.sequence(), x, row.top + 2).has_value());
+}
+
+TEST_CASE("an existing gain keyframe is picked up rather than planting a second one", "[gain]") {
+    testing::Fixture f;
+    model::Clip placed = f.clip(100, 50, 500);
+    REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.a1), placed)));
+
+    model::Clip* clip = f.track(f.a1).find(placed.id);
+    REQUIRE(clip != nullptr);
+    model::Keyframe key;
+    key.time = clip->sourceTimeAt(f.at(110));
+    key.value = 3.0;
+    clip->animation.curve(model::Param::GainDb).set(key);
+
+    const TimelineLayout layout = makeLayout();
+    const auto row = layout.rows(f.sequence()).back();
+    REQUIRE(row.kind == model::TrackKind::Audio);
+    const auto x = static_cast<std::int32_t>(layout.xForTime(f.at(110)));
+    const auto y =
+        static_cast<std::int32_t>(std::llround(layout.yForGainDb(3.0, row.top, row.height)));
+
+    const auto hit = layout.hitTestGainPoint(f.sequence(), x, y);
+    REQUIRE(hit.has_value());
+    CHECK(hit->existing);
+    CHECK(hit->time == key.time);
+
+    // A few pixels off in x still catches the same point -- a keyframe
+    // grabbable only on its exact pixel is one nobody can drag.
+    const auto near = layout.hitTestGainPoint(f.sequence(), x + 3, y);
+    REQUIRE(near.has_value());
+    CHECK(near->existing);
+    CHECK(near->time == key.time);
+
+    // Far enough away in time that it is a different instant on the line
+    // altogether: adding a keyframe there, not moving this one.
+    const auto farX = static_cast<std::int32_t>(layout.xForTime(f.at(130)));
+    const auto farY =
+        static_cast<std::int32_t>(std::llround(layout.yForGainDb(0.0, row.top, row.height)));
+    const auto far = layout.hitTestGainPoint(f.sequence(), farX, farY);
+    REQUIRE(far.has_value());
+    CHECK_FALSE(far->existing);
+}
+
+TEST_CASE("the gain line is on audio tracks only", "[gain]") {
+    testing::Fixture f;
+    REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.v1), f.clip(100, 50, 500))));
+
+    const TimelineLayout layout = makeLayout();
+    const auto row = layout.rows(f.sequence()).front();
+    REQUIRE(row.kind == model::TrackKind::Video);
+    const auto x = static_cast<std::int32_t>(layout.xForTime(f.at(110)));
+    CHECK_FALSE(layout.hitTestGainPoint(f.sequence(), x, row.top + row.height / 2).has_value());
+}

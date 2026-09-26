@@ -65,6 +65,16 @@ struct RelinkReport {
 [[nodiscard]] Result<RelinkReport> findRelinks(const model::Project& project,
                                                const std::string& root);
 
+/// The same search as `findRelinks`, applied straight to the project rather
+/// than reported for somebody to approve.
+///
+/// For the one place an unattended relink is the right thing: a project that
+/// was just read from an interchange file, before it is anything a person has
+/// looked at or could undo into footage that was missing on purpose. Everyone
+/// else calls `findRelinks` and applies what they choose through
+/// `edit::makeRelinkMedia`, which is undoable.
+[[nodiscard]] Result<RelinkReport> relinkInPlace(model::Project& project, const std::string& root);
+
 /// One file gathered into the destination folder.
 struct ConsolidatedFile {
     model::MediaRefId media;

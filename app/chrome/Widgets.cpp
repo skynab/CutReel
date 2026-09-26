@@ -9,12 +9,15 @@
 #include <QAbstractItemModel>
 #include <QAbstractItemView>
 #include <QComboBox>
+#include <QCoreApplication>
 #include <QDesktopServices>
+#include <QDockWidget>
 #include <QEvent>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QKeySequence>
 #include <QLabel>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QRect>
 #include <QSize>
@@ -58,6 +61,122 @@ private:
     std::function<void()> sync_;
 };
 
+constexpr int kDockHeaderHeight = 30;
+
+/// A dock header that can report no height at all. `QDockWidget` sizes its
+/// title area from the title bar widget's `sizeHint()` whether or not the
+/// widget is shown, so hiding a header alone leaves a blank band where it
+/// was; a header in the "collapsed" state answers zero instead.
+class DockHeader : public QWidget {
+public:
+    using QWidget::QWidget;
+
+    [[nodiscard]] QSize sizeHint() const override {
+        // Always the height it is drawn at, never what its contents ask for:
+        // the dock sizes its title area from this, and a lifted toolbar
+        // whose sliders want more than 30px made the timeline's area 36 --
+        // the header sat centred in it, three pixels below the dock's top,
+        // so the gap above the timeline was three wider than every other.
+        QSize size = QWidget::sizeHint();
+        size.setHeight(kDockHeaderHeight);
+        return collapsedSize(size);
+    }
+    [[nodiscard]] QSize minimumSizeHint() const override {
+        // Width capped: a panel's own row lifted in here is wider than some
+        // docks are allowed to be (the effect controls have a maximum), and
+        // the header must clip rather than force the dock wider.
+        QSize size = collapsedSize(QWidget::minimumSizeHint());
+        size.setWidth(std::min(size.width(), 120));
+        return size;
+    }
+
+private:
+    [[nodiscard]] QSize collapsedSize(QSize size) const {
+        if (property("collapsed").toBool()) {
+            size.setHeight(0);
+        }
+        return size;
+    }
+};
+
+/// Relays a title bar widget's mouse events to the dock widget it belongs to.
+///
+/// `QDockWidget` implements dragging, floating and the redock preview
+/// entirely inside its own mousePress/Move/ReleaseEvent, reached only by
+/// events Qt delivers to the `QDockWidget` itself. `setTitleBarWidget`
+/// installs a real child widget over that area, which is in front of the
+/// dock widget as far as event delivery is concerned -- so without this, a
+/// dock with its own header widget could be resized and closed but never
+/// picked up and moved, which was the entire point of giving it one.
+class DockDragForwarder : public QObject {
+public:
+    DockDragForwarder(QDockWidget* dock, QObject* parent) : QObject{parent}, dock_{dock} {}
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override {
+        auto* header = qobject_cast<QWidget*>(watched);
+        if (header == nullptr || dock_ == nullptr) {
+            return false;
+        }
+        switch (event->type()) {
+            case QEvent::MouseButtonPress: {
+                auto* mouse = static_cast<QMouseEvent*>(event);
+                // Qt's own dock-drag machinery only ever starts on the left
+                // button; grabbing for a right-click (reaching for a context
+                // menu, say) would forward a press nothing downstream acts
+                // on while still stealing every mouse event in the
+                // application until release.
+                if (mouse->button() != Qt::LeftButton) {
+                    break;
+                }
+                forward(header, mouse);
+                header->grabMouse();
+                grabbed_ = true;
+                break;
+            }
+            case QEvent::MouseMove:
+                // Only while actually dragging: a hover with no button down
+                // never grabbed, and forwarding it would do nothing useful.
+                if (grabbed_) {
+                    forward(header, static_cast<QMouseEvent*>(event));
+                }
+                break;
+            case QEvent::MouseButtonRelease:
+                // Tracked rather than released unconditionally: a
+                // double-click's own Press/Release pair already grabbed and
+                // released once before the synthesised DblClick arrives, so
+                // an unconditional release here would call releaseMouse() a
+                // second time with nothing left to release.
+                if (grabbed_) {
+                    forward(header, static_cast<QMouseEvent*>(event));
+                    header->releaseMouse();
+                    grabbed_ = false;
+                }
+                break;
+            case QEvent::MouseButtonDblClick:
+                // Forwarded so double-click-to-float still works, but it
+                // does not touch the grab: the Press/Release either side of
+                // it already keep that balanced.
+                forward(header, static_cast<QMouseEvent*>(event));
+                break;
+            default:
+                break;
+        }
+        return false;
+    }
+
+private:
+    void forward(QWidget* header, QMouseEvent* mouse) {
+        const QPointF dockPos = header->mapTo(dock_, mouse->position().toPoint());
+        QMouseEvent forwarded(mouse->type(), dockPos, dock_->mapToGlobal(dockPos.toPoint()),
+                              mouse->button(), mouse->buttons(), mouse->modifiers());
+        QCoreApplication::sendEvent(dock_, &forwarded);
+    }
+
+    QDockWidget* dock_{nullptr};
+    bool grabbed_{false};
+};
+
 }  // namespace
 
 QPushButton* button(QWidget* parent, const QString& text, const QString& tip, bool checkable) {
@@ -93,6 +212,87 @@ QLabel* mutedLabel(QWidget* parent, const QString& text) {
     auto* label = new QLabel(text, parent);
     label->setProperty("muted", true);
     return label;
+}
+
+QWidget* buildDockHeader(QWidget* parent, const QString& title,
+                         const std::function<void()>& onClose, QWidget* tools) {
+    auto* header = new DockHeader(parent);
+    header->setObjectName("dock-header");
+    // Well over the ~20px below which Qt's drag-initiation hit-testing never
+    // starts a drag at all -- an eight-pixel hairline was measured doing
+    // exactly that.
+    header->setFixedHeight(kDockHeaderHeight);
+    auto* row = new QHBoxLayout(header);
+    row->setContentsMargins(2, 0, 4, 0);
+    row->setSpacing(0);
+    auto* tab = new QLabel(title, header);
+    tab->setObjectName("dock-header-tab");
+    // Transparent to the mouse: a label is not a control, and letting it eat
+    // the press is how a header with a name would stop being draggable by
+    // its name -- only by the blank space beside it, which is not where
+    // anybody reaches first.
+    tab->setAttribute(Qt::WA_TransparentForMouseEvents);
+    // Full height, so the tab's own bottom border is the header's underline.
+    tab->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
+    row->addWidget(tab);
+    if (tools != nullptr) {
+        header->setProperty("hasTools", true);
+        tools->setParent(header);
+        // Inside the header's own 1px border, top and bottom: a lifted row
+        // built for a 34px bar of its own (the viewer's, the bin's) otherwise
+        // overflows the header and paints over its bottom edge.
+        tools->setFixedHeight(kDockHeaderHeight - 2);
+        // The rules that strip a lifted row's own bar chrome are keyed to the
+        // header as its ancestor, and a widget that was polished before it
+        // was reparented into it keeps its old look -- the viewer bar kept its
+        // bottom border, a second line above the header's own.
+        tools->style()->unpolish(tools);
+        tools->style()->polish(tools);
+        row->addWidget(tools, 1);
+    } else {
+        row->addStretch(1);
+    }
+    if (onClose) {
+        auto* close = new QPushButton(header);
+        close->setObjectName("dock-header-close");
+        close->setProperty("flat", true);
+        close->setFocusPolicy(Qt::NoFocus);
+        close->setIcon(app::icons::toolIcon(app::icons::Glyph::Close, 11));
+        close->setIconSize(QSize(11, 11));
+        close->setFixedSize(16, 16);
+        close->setToolTip(QObject::tr("Close"));
+        QObject::connect(close, &QPushButton::clicked, header, onClose);
+        row->addWidget(close);
+    }
+    // See DockDragForwarder: without this, dragging the header does nothing
+    // at all.
+    if (auto* dock = qobject_cast<QDockWidget*>(parent)) {
+        header->installEventFilter(new DockDragForwarder(dock, header));
+    }
+    return header;
+}
+
+void beginDockDrag(QDockWidget* dock, QPoint at) {
+    QWidget* header = dock != nullptr ? dock->titleBarWidget() : nullptr;
+    if (header == nullptr) {
+        return;
+    }
+    dock->move(QCursor::pos() - at - header->mapTo(dock, QPoint{0, 0}));
+    // Through the header rather than to the dock: DockDragForwarder, on the
+    // header, is what forwards the press and then holds the pointer, so the
+    // moves that follow keep reaching the dock.
+    QMouseEvent press(QEvent::MouseButtonPress, QPointF{at}, QPointF{header->mapToGlobal(at)},
+                      Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+    QCoreApplication::sendEvent(header, &press);
+}
+
+QWidget* liftFirstRow(QWidget* panel) {
+    QLayout* layout = panel != nullptr ? panel->layout() : nullptr;
+    if (layout == nullptr || layout->count() == 0 || layout->itemAt(0)->widget() == nullptr) {
+        return nullptr;
+    }
+    std::unique_ptr<QLayoutItem> item{layout->takeAt(0)};
+    return item->widget();
 }
 
 void setElidedText(QLabel* label, const QString& text, Qt::TextElideMode mode) {
@@ -252,13 +452,12 @@ void runs(QPushButton* button, ActionRouter& router, const char* actionId) {
                      [&router, id = std::string{actionId}] { router.trigger(id); });
 }
 
-/// The Add Title tooltip, with whatever key is actually bound to it.
+/// A tooltip, with whatever key is actually bound to the action it runs.
 ///
 /// Written from the keymap rather than spelled out, for two reasons: the
 /// shortcut is rebindable, and `Ctrl+Shift+T` is not what a Mac shows -- Qt
 /// renders the same binding as the platform writes it.
-QString titleTip(const std::string& shortcut) {
-    const QString base = QStringLiteral("Add a title at the playhead");
+QString keyedTip(const QString& base, const std::string& shortcut) {
     if (shortcut.empty()) {
         return base;
     }
@@ -456,7 +655,11 @@ QWidget* buildViewerBar(QWidget* parent, Bars& bars, ActionRouter& router, const
 
     auto* segment = new QWidget(bar);
     segment->setObjectName("segment-group");
-    segment->setFixedHeight(28);
+    // Two shorter than the header's inner height (28), so its outline sits
+    // clear of the header's edges: the tabs are 22 (the least the button style
+    // allows) plus the 2px margin either side, which the layout does not
+    // shrink for the outline.
+    segment->setFixedHeight(26);
     auto* segmentRow = new QHBoxLayout(segment);
     segmentRow->setContentsMargins(2, 2, 2, 2);
     segmentRow->setSpacing(2);
@@ -465,7 +668,7 @@ QWidget* buildViewerBar(QWidget* parent, Bars& bars, ActionRouter& router, const
     // The dot is what says "toggle" rather than "tab": two tabs in a group mean
     // one of them is on, and these two are independent.
     for (QPushButton* tab : {bars.sourceTab, bars.programTab}) {
-        tab->setFixedHeight(24);
+        tab->setFixedHeight(22);
         tab->setIconSize(QSize(13, 13));
         segmentRow->addWidget(tab);
     }
@@ -565,14 +768,14 @@ QWidget* buildTimelinePane(QWidget* parent, Bars& bars, ActionRouter& router, co
     column->setContentsMargins(0, 0, 0, 0);
     column->setSpacing(0);
 
+    // Not added to `pane`: the caller seats it in the dock's header (see
+    // Bars::timelineTools), whose own tab already says "Timeline".
     auto* bar = new QWidget(pane);
-    bar->setObjectName("chrome-timeline-bar");
-    bar->setFixedHeight(34);
+    bar->setObjectName("dock-header-tools");
+    bars.timelineTools = bar;
     auto* row = new QHBoxLayout(bar);
-    row->setContentsMargins(10, 0, 10, 0);
+    row->setContentsMargins(4, 0, 4, 0);
     row->setSpacing(8);
-    auto* title = new QLabel("Timeline", bar);
-    row->addWidget(title);
     bars.timelineLabel = mutedLabel(bar);
     row->addWidget(bars.timelineLabel);
     row->addWidget(separator(bar));
@@ -595,7 +798,8 @@ QWidget* buildTimelinePane(QWidget* parent, Bars& bars, ActionRouter& router, co
     // there. It sits with the razor and the dissolve because all three do the
     // same kind of thing: put something down where the playhead is.
     QPushButton* titleButton = iconButton(bar, app::icons::Glyph::TextT,
-                                          titleTip(router.keymap().shortcutFor("add-title")));
+                                          keyedTip(QStringLiteral("Add a title at the playhead"),
+                                                   router.keymap().shortcutFor("add-title")));
     // Named, so the test that presses it can find it. The bin's own Add Title
     // button already answers to "add-title"; this one says where it is, or a
     // search from the window would turn up two buttons and pick either.
@@ -609,10 +813,27 @@ QWidget* buildTimelinePane(QWidget* parent, Bars& bars, ActionRouter& router, co
     QObject::connect(bars.snapButton, &QPushButton::clicked, bars.snapButton, hooks.setSnapEnabled);
     row->addWidget(bars.snapButton);
 
+    // Previous, add, next: the add button between the two that move between
+    // markers, so the three read as one group.
+    bars.previousMarkerButton =
+        iconButton(bar, app::icons::Glyph::MarkerBack,
+                   keyedTip(QStringLiteral("Go to the previous marker"),
+                            router.keymap().shortcutFor("previous-marker")));
+    bars.previousMarkerButton->setObjectName("timeline-previous-marker");
+    runs(bars.previousMarkerButton, router, "previous-marker");
+    row->addWidget(bars.previousMarkerButton);
+
     QPushButton* markerButton =
         iconButton(bar, app::icons::Glyph::Bookmark, "Add a marker at the playhead (M)");
     runs(markerButton, router, "add-marker");
     row->addWidget(markerButton);
+
+    bars.nextMarkerButton = iconButton(bar, app::icons::Glyph::MarkerAhead,
+                                       keyedTip(QStringLiteral("Go to the next marker"),
+                                                router.keymap().shortcutFor("next-marker")));
+    bars.nextMarkerButton->setObjectName("timeline-next-marker");
+    runs(bars.nextMarkerButton, router, "next-marker");
+    row->addWidget(bars.nextMarkerButton);
 
     row->addStretch(1);
 
@@ -666,7 +887,6 @@ QWidget* buildTimelinePane(QWidget* parent, Bars& bars, ActionRouter& router, co
     runs(zoomIn, router, "zoom-in");
     row->addWidget(zoomIn);
 
-    column->addWidget(bar);
     column->addWidget(timelineWidget, 1);
     return pane;
 }

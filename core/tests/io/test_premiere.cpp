@@ -339,6 +339,104 @@ TEST_CASE("A clip with no media keeps its place", "[io][premiere]") {
     CHECK_FALSE(video.clips()[0].source.isValid());
 }
 
+TEST_CASE("A clip's rotation and crop survive the trip", "[io][premiere]") {
+    Fixture f;
+    model::Clip source = f.clip(0, 20, 500);
+    source.transform.rotationDegrees = 90.0;
+    source.transform.cropLeft = 10.0;
+    source.transform.cropRight = 5.0;
+    source.transform.scaleX = 1.5;
+    REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.v1), source)));
+
+    const auto text = io::writePremiereXml(f.project, f.sequenceId);
+    REQUIRE(text);
+    const auto back = io::readPremiereXml(*text);
+    REQUIRE(back);
+    const model::Transform& transform =
+        back->sequences().front().videoTracks().front().clips()[0].transform;
+    CHECK(transform.rotationDegrees == Catch::Approx(90.0));
+    CHECK(transform.cropLeft == Catch::Approx(10.0));
+    CHECK(transform.cropRight == Catch::Approx(5.0));
+    CHECK(transform.scaleX == Catch::Approx(1.5));
+}
+
+TEST_CASE("A cut with no transform at all stays a plain cut", "[io][premiere]") {
+    Fixture f;
+    REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.v1), f.clip(0, 20, 500))));
+    const auto text = io::writePremiereXml(f.project, f.sequenceId);
+    REQUIRE(text);
+    CHECK(text->find("zaro:") == std::string::npos);
+}
+
+TEST_CASE("A text overlay round trips as a generator item", "[io][premiere]") {
+    Fixture f;
+    model::Graphic title;
+    title.kind = model::GraphicKind::Text;
+    title.text = "Chapter One";
+    title.family = "Georgia";
+    title.pointSize = 48.0;
+    title.bold = true;
+    title.alignment = 1;
+    REQUIRE(f.run(edit::makeAddGraphic(f.project, f.on(f.v1), title, f.range(0, 20))));
+
+    const auto text = io::writePremiereXml(f.project, f.sequenceId);
+    REQUIRE(text);
+    CHECK(text->find("<generatoritem") != std::string::npos);
+
+    const auto back = io::readPremiereXml(*text);
+    REQUIRE(back);
+    const model::Track& video = back->sequences().front().videoTracks().front();
+    REQUIRE(video.clips().size() == 1);
+    CHECK_FALSE(video.clips()[0].source.isValid());
+    const model::Graphic& graphic = video.clips()[0].graphic;
+    CHECK(graphic.kind == model::GraphicKind::Text);
+    CHECK(graphic.text == "Chapter One");
+    CHECK(graphic.family == "Georgia");
+    CHECK(graphic.pointSize == Catch::Approx(48.0));
+    CHECK(graphic.bold);
+    CHECK(graphic.alignment == 1);
+}
+
+TEST_CASE("A shape's colour and corner radius survive the trip", "[io][premiere]") {
+    Fixture f;
+    model::Graphic shape;
+    shape.kind = model::GraphicKind::Rectangle;
+    shape.cornerRadius = 12.0;
+    shape.width = 300.0;
+    shape.red = 0.25;
+    REQUIRE(f.run(edit::makeAddGraphic(f.project, f.on(f.v1), shape, f.range(0, 20))));
+
+    const auto text = io::writePremiereXml(f.project, f.sequenceId);
+    REQUIRE(text);
+    const auto back = io::readPremiereXml(*text);
+    REQUIRE(back);
+    const model::Graphic& graphic =
+        back->sequences().front().videoTracks().front().clips()[0].graphic;
+    CHECK(graphic.kind == model::GraphicKind::Rectangle);
+    CHECK(graphic.cornerRadius == Catch::Approx(12.0));
+    CHECK(graphic.width == Catch::Approx(300.0));
+    CHECK(graphic.red == Catch::Approx(0.25));
+}
+
+TEST_CASE("A generator item this reader did not write is skipped, not guessed at",
+          "[io][premiere]") {
+    // A real Premiere title or colour matte: `writeGraphicItem` never produced
+    // it, so there is no `zaro:graphic` to read, and the clip is left out
+    // rather than treated as a shape it never described.
+    const std::string text = R"(<xmeml version="4"><sequence>
+        <rate><timebase>25</timebase><ntsc>FALSE</ntsc></rate>
+        <media><video><track>
+          <generatoritem><name>Bars</name><start>0</start><end>20</end><in>0</in><out>20</out>
+            <effect><name>Bars and Tone</name><effectid>Bars and Tone</effectid></effect>
+          </generatoritem>
+        </track></video></media>
+      </sequence></xmeml>)";
+
+    const auto back = io::readPremiereXml(text);
+    REQUIRE(back);
+    CHECK(back->sequences().front().videoTracks().front().clips().empty());
+}
+
 TEST_CASE("Something that is not an xmeml document is refused", "[io][premiere]") {
     CHECK_FALSE(io::readPremiereXml("not xml at all"));
     CHECK_FALSE(io::readPremiereXml("<otherthing/>"));

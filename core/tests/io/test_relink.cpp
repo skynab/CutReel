@@ -163,6 +163,41 @@ TEST_CASE("relinking points the project at the new file and re-takes its digest"
     CHECK(project.findMedia(id)->path != now);
 }
 
+TEST_CASE("relinking in place points the project at the found file directly", "[relink]") {
+    Scratch scratch;
+    const std::string now = scratch.write("new/shot.mov", "the picture");
+
+    model::Project project;
+    const auto id = addMedia(project, (scratch.root / "gone" / "shot.mov").string(), {});
+
+    auto report = io::relinkInPlace(project, scratch.root.string());
+    REQUIRE(report);
+    REQUIRE(report->matches.size() == 1);
+
+    const model::MediaRef* media = project.findMedia(id);
+    REQUIRE(media != nullptr);
+    CHECK(media->path == now);
+    CHECK_FALSE(media->contentDigest.empty());
+}
+
+TEST_CASE("relinking in place leaves media alone when nothing under the folder matches",
+          "[relink]") {
+    Scratch scratch;
+    scratch.write("something/else.mov", "not it");
+
+    model::Project project;
+    const std::string was = (scratch.root / "gone" / "shot.mov").string();
+    const auto id = addMedia(project, was, {});
+
+    auto report = io::relinkInPlace(project, scratch.root.string());
+    REQUIRE(report);
+    CHECK(report->matches.empty());
+
+    const model::MediaRef* media = project.findMedia(id);
+    REQUIRE(media != nullptr);
+    CHECK(media->path == was);
+}
+
 TEST_CASE("relinking to a file that is not there is refused", "[relink]") {
     Scratch scratch;
     model::Project project;

@@ -115,6 +115,28 @@ Result<RelinkReport> findRelinks(const model::Project& project, const std::strin
     return report;
 }
 
+Result<RelinkReport> relinkInPlace(model::Project& project, const std::string& root) {
+    auto report = findRelinks(project, root);
+    if (!report) {
+        return report;
+    }
+    for (const RelinkMatch& match : report->matches) {
+        for (model::MediaRef& media : project.mediaMutable()) {
+            if (media.id != match.media) {
+                continue;
+            }
+            media.path = match.found;
+            if (auto digest = media::contentDigest(match.found)) {
+                media.contentDigest = *digest;
+            }
+            // The cache key described the old file's timestamp; kept, it would
+            // hand back the old file's waveform for the new one.
+            media.contentHash.clear();
+        }
+    }
+    return report;
+}
+
 Result<ConsolidateReport> consolidate(const model::Project& project,
                                       const std::string& destination) {
     std::error_code code;

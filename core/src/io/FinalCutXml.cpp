@@ -4,6 +4,7 @@
 #include <cctype>
 #include <charconv>
 #include <cstdint>
+#include <cstdlib>
 #include <fstream>
 #include <map>
 #include <optional>
@@ -90,6 +91,13 @@ bool attributeBool(const Node& node, std::string_view name, bool fallback) {
         return fallback;
     }
     return raw != "0" && raw != "false";
+}
+
+/// A plain decimal attribute -- this program's own, not one the DTD defines,
+/// so there is no seconds suffix or timebase to account for.
+double attributeDouble(const Node& node, std::string_view name, double fallback) {
+    const std::string raw = node.attribute(name);
+    return raw.empty() ? fallback : std::strtod(raw.c_str(), nullptr);
 }
 
 /// A rate stated as the duration of one of its frames, which is how FCPXML
@@ -197,9 +205,12 @@ model::AudioRole audioRoleFrom(std::string text) {
 /// filters, adjustments and metadata, and walking into the wrong one would put
 /// a colour correction on the timeline as a clip.
 ///
-/// `transition` and `caption` are positioned like clips and are deliberately
-/// absent: neither has anywhere to go in this model, and stepping over them is
-/// what lets the cut around them survive.
+/// `caption` is positioned like a clip and deliberately absent: it has nowhere
+/// to go in this model, and stepping over it is what lets the cut around it
+/// survive. `transition` is absent from this list for a different reason --
+/// `SpineReader::read` intercepts it before reaching this check, the same way
+/// it intercepts `marker`, because a span between two clips is not a clip
+/// itself.
 bool isStoryElement(std::string_view name) noexcept {
     return name == "asset-clip" || name == "clip" || name == "gap" || name == "title" ||
            name == "video" || name == "audio" || name == "ref-clip" || name == "mc-clip" ||
@@ -380,6 +391,66 @@ void writeMarker(Node& parent, const model::Marker& marker, const time::Rational
     }
 }
 
+/// A clip's placement in the frame, exactly as this program keeps it.
+///
+/// FCPXML has real `<adjust-transform>` and `<adjust-crop>` elements, but the
+/// header already gives the reason none of that is written: their parameters
+/// are Final Cut's own, and a grade that arrives wrong is harder to find than
+/// one that arrives absent. So the whole transform travels as attributes this
+/// program invented, the same way `PremiereXml.cpp` uses `zaro:` elements --
+/// ignored by anything that does not know them, and exact for anything that
+/// does, which today is only this reader.
+void writeTransform(Node& item, const model::Transform& transform) {
+    if (transform.isIdentity()) {
+        return;
+    }
+    item.setAttribute("zaro:positionX", std::to_string(transform.positionX));
+    item.setAttribute("zaro:positionY", std::to_string(transform.positionY));
+    item.setAttribute("zaro:scaleX", std::to_string(transform.scaleX));
+    item.setAttribute("zaro:scaleY", std::to_string(transform.scaleY));
+    item.setAttribute("zaro:rotationDegrees", std::to_string(transform.rotationDegrees));
+    item.setAttribute("zaro:anchorX", std::to_string(transform.anchorX));
+    item.setAttribute("zaro:anchorY", std::to_string(transform.anchorY));
+    item.setAttribute("zaro:opacity", std::to_string(transform.opacity));
+    item.setAttribute("zaro:cropLeft", std::to_string(transform.cropLeft));
+    item.setAttribute("zaro:cropRight", std::to_string(transform.cropRight));
+    item.setAttribute("zaro:cropTop", std::to_string(transform.cropTop));
+    item.setAttribute("zaro:cropBottom", std::to_string(transform.cropBottom));
+}
+
+/// A generated clip's shape or text, as attributes on its `<title>`.
+///
+/// `<title>` is a real story element -- the one this format uses for a text
+/// generator -- but a real title names a `ref` into an effect resource that is
+/// one of Final Cut's own, which this program does not have one of. Written
+/// without a `ref`, the same way a nested sequence or a multicam clip already
+/// lands here with no content: the shape of the cut survives. Everything a
+/// `Graphic` actually is rides alongside as `zaro:` attributes, read back
+/// exactly by this reader and ignored by any other.
+void writeGraphic(Node& item, const model::Graphic& graphic) {
+    item.setAttribute("zaro:graphic-kind", model::toString(graphic.kind));
+    item.setAttribute("zaro:graphic-width", std::to_string(graphic.width));
+    item.setAttribute("zaro:graphic-height", std::to_string(graphic.height));
+    item.setAttribute("zaro:graphic-centreX", std::to_string(graphic.centreX));
+    item.setAttribute("zaro:graphic-centreY", std::to_string(graphic.centreY));
+    item.setAttribute("zaro:graphic-feather", std::to_string(graphic.feather));
+    item.setAttribute("zaro:graphic-red", std::to_string(graphic.red));
+    item.setAttribute("zaro:graphic-green", std::to_string(graphic.green));
+    item.setAttribute("zaro:graphic-blue", std::to_string(graphic.blue));
+    item.setAttribute("zaro:graphic-alpha", std::to_string(graphic.alpha));
+    if (graphic.kind == model::GraphicKind::Rectangle) {
+        item.setAttribute("zaro:graphic-cornerRadius", std::to_string(graphic.cornerRadius));
+    }
+    if (graphic.kind == model::GraphicKind::Text) {
+        item.setAttribute("zaro:graphic-text", graphic.text);
+        item.setAttribute("zaro:graphic-family", graphic.family);
+        item.setAttribute("zaro:graphic-pointSize", std::to_string(graphic.pointSize));
+        item.setAttribute("zaro:graphic-bold", graphic.bold ? "1" : "0");
+        item.setAttribute("zaro:graphic-italic", graphic.italic ? "1" : "0");
+        item.setAttribute("zaro:graphic-alignment", std::to_string(graphic.alignment));
+    }
+}
+
 void writeClipItem(Node& parent, const model::Project& project, const model::Clip& clip,
                    model::TrackKind kind, std::int32_t lane, const time::RationalTime& offset,
                    const std::map<std::uint64_t, std::string>& assetIds) {
@@ -387,12 +458,16 @@ void writeClipItem(Node& parent, const model::Project& project, const model::Cli
     const auto found = media == nullptr ? assetIds.end() : assetIds.find(media->id.value());
     const bool hasAsset = found != assetIds.end();
 
-    // A clip with no file is a gap that carries a name. A nested sequence, an
-    // adjustment layer, a title and a shape all land here: the shape of the cut
-    // survives and what filled the slot does not, which is the same bargain the
-    // FCP7 writer makes and for the same reason -- naming Final Cut's own
-    // generators would be guessing at another program's identifiers.
-    Node& item = parent.add(hasAsset ? "asset-clip" : "gap");
+    // A clip with no file and no graphic is a gap that carries a name. A
+    // nested sequence, an adjustment layer and a multicam clip land there: the
+    // shape of the cut survives and what filled the slot does not, which is
+    // the same bargain the FCP7 writer makes and for the same reason -- naming
+    // Final Cut's own generators would be guessing at another program's
+    // identifiers. A `Graphic` is different: this program does know what it
+    // is, so it gets `<title>`, the format's own element for a text
+    // generator, even though what actually describes it is namespaced rather
+    // than the format's own parameters.
+    Node& item = parent.add(hasAsset ? "asset-clip" : clip.graphic.isSet() ? "title" : "gap");
     if (hasAsset) {
         item.setAttribute("ref", found->second);
     }
@@ -413,6 +488,60 @@ void writeClipItem(Node& parent, const model::Project& project, const model::Cli
         if (const char* role = audioRoleText(clip.role); role[0] != '\0') {
             item.setAttribute("audioRole", role);
         }
+    }
+    if (clip.graphic.isSet()) {
+        writeGraphic(item, clip.graphic);
+    }
+    writeTransform(item, clip.transform);
+}
+
+/// The name of the FCPXML built-in transition closest to `kind`.
+///
+/// FCPXML resolves a transition by name against Final Cut's own effect
+/// bundles, and "Cross Dissolve" and "Wipe" are the two spelled exactly this
+/// way in every version this program targets. Everything else is written as a
+/// cross dissolve of the right length rather than under a name nothing will
+/// match, the same fallback `PremiereXml.cpp` makes for the same reason. What
+/// was really meant rides alongside in `zaro:kind`.
+const char* fcpTransitionName(model::TransitionKind kind) noexcept {
+    switch (kind) {
+        case model::TransitionKind::Wipe:
+        case model::TransitionKind::Iris:
+            return "Wipe";
+        case model::TransitionKind::CrossDissolve:
+        case model::TransitionKind::Slide:
+        case model::TransitionKind::Push:
+        case model::TransitionKind::Zoom:
+        case model::TransitionKind::DipToBlack:
+        default:
+            return "Cross Dissolve";
+    }
+}
+
+/// A span across a cut, as this format's own `<transition>` story element.
+///
+/// `zaro:cut` is what makes this readable at all: a real Final Cut transition
+/// is placed and sized like this one, but says nothing about *which* instant
+/// inside its span is the join, and that is exactly the thing needed to find
+/// the two clips it sits between. Written exactly rather than guessed at on
+/// the way back in, the way `PremiereXml.cpp` guesses a centred one from the
+/// clips instead -- there, `alignment` at least narrows it to three answers;
+/// here there is nothing to narrow.
+void writeTransitionItem(Node& parent, const model::Transition& span, const time::RationalTime& cut,
+                         const time::RationalTime& offset, std::int32_t lane) {
+    Node& item = parent.add("transition");
+    item.setAttribute("name", fcpTransitionName(span.kind));
+    item.setAttribute("lane", std::to_string(lane));
+    item.setAttribute("offset", secondsText(offset));
+    item.setAttribute("duration", secondsText(span.range.duration()));
+    item.setAttribute("zaro:cut", secondsText(cut));
+    item.setAttribute("zaro:kind", model::toString(span.kind));
+    item.setAttribute("zaro:easing", model::toString(span.easing));
+    if (model::transitionTravels(span.kind)) {
+        item.setAttribute("zaro:direction", model::toString(span.direction));
+    }
+    if (model::transitionHasEdge(span.kind) && span.softness > 0.0) {
+        item.setAttribute("zaro:softness", std::to_string(span.softness));
     }
 }
 
@@ -539,6 +668,11 @@ struct Item {
     model::AudioRole role{model::AudioRole::Unassigned};
     bool enabled{true};
     bool audio{false};
+    model::Transform transform;
+    /// Set only for a `<title>` this program wrote itself -- one with
+    /// `zaro:graphic-kind` -- and left at `GraphicKind::None` for a real
+    /// title, which has no content this reader understands.
+    model::Graphic graphic;
 };
 
 struct MarkerItem {
@@ -548,6 +682,67 @@ struct MarkerItem {
     std::string note;
     bool resolved{false};
 };
+
+/// A span across a cut, flattened the way an `Item` is.
+struct TransitionItem {
+    std::int32_t lane{0};
+    /// The exact instant the span straddles -- from `zaro:cut`, since nothing
+    /// else the format states says which one it is. See `readTransitionItem`.
+    time::Rational cut;
+    time::Rational start;
+    time::Rational duration;
+    model::TransitionKind kind{model::TransitionKind::CrossDissolve};
+    model::TransitionDirection direction{model::TransitionDirection::Right};
+    model::TransitionEasing easing{model::TransitionEasing::Linear};
+    double softness{0.0};
+};
+
+/// The mirror of `writeTransform`. Every attribute defaults to identity, so an
+/// item with none of them -- everything from before this program wrote them,
+/// and everything from any other program -- comes back a plain cut.
+model::Transform readTransform(const Node& item) {
+    model::Transform transform;
+    transform.positionX = attributeDouble(item, "zaro:positionX", transform.positionX);
+    transform.positionY = attributeDouble(item, "zaro:positionY", transform.positionY);
+    transform.scaleX = attributeDouble(item, "zaro:scaleX", transform.scaleX);
+    transform.scaleY = attributeDouble(item, "zaro:scaleY", transform.scaleY);
+    transform.rotationDegrees =
+        attributeDouble(item, "zaro:rotationDegrees", transform.rotationDegrees);
+    transform.anchorX = attributeDouble(item, "zaro:anchorX", transform.anchorX);
+    transform.anchorY = attributeDouble(item, "zaro:anchorY", transform.anchorY);
+    transform.opacity = attributeDouble(item, "zaro:opacity", transform.opacity);
+    transform.cropLeft = attributeDouble(item, "zaro:cropLeft", transform.cropLeft);
+    transform.cropRight = attributeDouble(item, "zaro:cropRight", transform.cropRight);
+    transform.cropTop = attributeDouble(item, "zaro:cropTop", transform.cropTop);
+    transform.cropBottom = attributeDouble(item, "zaro:cropBottom", transform.cropBottom);
+    return transform;
+}
+
+/// The mirror of `writeGraphic`. Called only on a `<title>` that carries
+/// `zaro:graphic-kind`; a real one, from real Final Cut, has none and is left
+/// as a positioned item with no content, per `refOf`.
+model::Graphic readGraphic(const Node& node) {
+    model::Graphic graphic;
+    graphic.kind = model::graphicKindFromString(node.attribute("zaro:graphic-kind").c_str());
+    graphic.width = attributeDouble(node, "zaro:graphic-width", graphic.width);
+    graphic.height = attributeDouble(node, "zaro:graphic-height", graphic.height);
+    graphic.centreX = attributeDouble(node, "zaro:graphic-centreX", graphic.centreX);
+    graphic.centreY = attributeDouble(node, "zaro:graphic-centreY", graphic.centreY);
+    graphic.cornerRadius = attributeDouble(node, "zaro:graphic-cornerRadius", graphic.cornerRadius);
+    graphic.feather = attributeDouble(node, "zaro:graphic-feather", graphic.feather);
+    graphic.red = attributeDouble(node, "zaro:graphic-red", graphic.red);
+    graphic.green = attributeDouble(node, "zaro:graphic-green", graphic.green);
+    graphic.blue = attributeDouble(node, "zaro:graphic-blue", graphic.blue);
+    graphic.alpha = attributeDouble(node, "zaro:graphic-alpha", graphic.alpha);
+    graphic.text = node.attribute("zaro:graphic-text");
+    graphic.family = node.attribute("zaro:graphic-family");
+    graphic.pointSize = attributeDouble(node, "zaro:graphic-pointSize", graphic.pointSize);
+    graphic.bold = attributeBool(node, "zaro:graphic-bold", false);
+    graphic.italic = attributeBool(node, "zaro:graphic-italic", false);
+    graphic.alignment =
+        static_cast<int>(attributeInt(node, "zaro:graphic-alignment", graphic.alignment));
+    return graphic;
+}
 
 /// Flattens a spine and everything anchored to it into positioned items.
 ///
@@ -564,6 +759,9 @@ public:
 
     [[nodiscard]] const std::vector<Item>& items() const noexcept { return items_; }
     [[nodiscard]] const std::vector<MarkerItem>& markers() const noexcept { return markers_; }
+    [[nodiscard]] const std::vector<TransitionItem>& transitions() const noexcept {
+        return transitions_;
+    }
 
     /// `sequential` is the difference between a spine and everything else: a
     /// spine's children follow one another, so one that states no offset starts
@@ -582,6 +780,10 @@ public:
         for (const Node& child : container.children) {
             if (child.name == "marker" || child.name == "chapter-marker") {
                 readMarker(child, containerOffset, containerStart);
+                continue;
+            }
+            if (child.name == "transition") {
+                readTransitionItem(child, containerOffset, containerStart, containerLane);
                 continue;
             }
             if (!isStoryElement(child.name) || (onlyFirst && taken)) {
@@ -670,6 +872,10 @@ private:
         item.name = node.attribute("name");
         item.enabled = attributeBool(node, "enabled", true);
         item.role = audioRoleFrom(node.attribute("audioRole"));
+        item.transform = readTransform(node);
+        if (node.name == "title" && !node.attribute("zaro:graphic-kind").empty()) {
+            item.graphic = readGraphic(node);
+        }
 
         // A lane's sign is what says picture or sound, because that is what it
         // means: Final Cut puts sound below the storyline and nothing else
@@ -700,9 +906,53 @@ private:
         markers_.push_back(std::move(marker));
     }
 
+    /// `zaro:cut` is what a real Final Cut `<transition>` never carries, so its
+    /// absence is the signal to leave the span alone -- the same call this
+    /// reader already makes about a real title's content.
+    void readTransitionItem(const Node& node, const time::Rational& containerOffset,
+                            const time::Rational& containerStart, std::int32_t containerLane) {
+        const std::string cutText = node.attribute("zaro:cut");
+        if (cutText.empty()) {
+            return;
+        }
+        const auto parsedCut = parseSeconds(cutText);
+        if (!parsedCut) {
+            return;
+        }
+        const time::Rational duration = attributeSeconds(node, "duration", time::Rational{});
+        if (!duration.isPositive()) {
+            return;
+        }
+        const time::Rational localOffset = attributeSeconds(node, "offset", containerStart);
+
+        TransitionItem item;
+        item.lane = containerLane + static_cast<std::int32_t>(attributeInt(node, "lane", 0));
+        item.cut = containerOffset + (*parsedCut - containerStart);
+        item.start = containerOffset + (localOffset - containerStart);
+        item.duration = duration;
+        if (const std::string kindText = node.attribute("zaro:kind"); !kindText.empty()) {
+            item.kind = model::transitionKindFromString(kindText.c_str());
+        }
+        if (const std::string easingText = node.attribute("zaro:easing"); !easingText.empty()) {
+            item.easing = model::transitionEasingFromString(easingText.c_str());
+        }
+        if (const std::string directionText = node.attribute("zaro:direction");
+            !directionText.empty()) {
+            model::TransitionDirection direction{};
+            if (model::transitionDirectionFromString(directionText.c_str(), direction)) {
+                item.direction = direction;
+            }
+        }
+        if (const std::string softText = node.attribute("zaro:softness"); !softText.empty()) {
+            item.softness = std::clamp(std::strtod(softText.c_str(), nullptr), 0.0, 1.0);
+        }
+        transitions_.push_back(item);
+    }
+
     const Resources& resources_;
     std::vector<Item> items_;
     std::vector<MarkerItem> markers_;
+    std::vector<TransitionItem> transitions_;
 };
 
 /// The media reference for an asset id, made the first time it is asked for.
@@ -769,8 +1019,9 @@ std::vector<std::int32_t> lanesOf(const std::vector<Item>& items, bool audio) {
     return lanes;
 }
 
-void buildTracks(const std::vector<Item>& items, bool audio, model::Project& project,
-                 model::Sequence& sequence, const time::Rational& rate, Resources& resources) {
+void buildTracks(const std::vector<Item>& items, const std::vector<TransitionItem>& transitions,
+                 bool audio, model::Project& project, model::Sequence& sequence,
+                 const time::Rational& rate, Resources& resources) {
     const model::TrackKind kind = audio ? model::TrackKind::Audio : model::TrackKind::Video;
     const std::vector<std::int32_t> lanes = lanesOf(items, audio);
 
@@ -811,6 +1062,8 @@ void buildTracks(const std::vector<Item>& items, bool audio, model::Project& pro
         clip.sourceRange =
             time::TimeRange{time::RationalTime::fromSeconds(item.sourceStart, sourceRate),
                             time::RationalTime::fromSeconds(item.duration, sourceRate)};
+        clip.transform = item.transform;
+        clip.graphic = item.graphic;
 
         if (clip.timelineRange.duration().frames() <= 0) {
             continue;
@@ -824,6 +1077,48 @@ void buildTracks(const std::vector<Item>& items, bool audio, model::Project& pro
             continue;
         }
         track->insert(std::move(clip));
+    }
+
+    // After the clips, because a span names the two it joins and they have to
+    // exist first.
+    for (std::size_t i = 0; i < lanes.size(); ++i) {
+        model::Track* track = sequence.findTrack(trackIds[i]);
+        std::vector<model::Transition> spans;
+        for (const TransitionItem& item : transitions) {
+            if (item.lane != lanes[i]) {
+                continue;
+            }
+            const time::RationalTime cut = time::RationalTime::fromSeconds(item.cut, rate);
+            const model::Clip* incoming = track->clipAt(cut);
+            const model::Clip* outgoing = nullptr;
+            for (const model::Clip& candidate : track->clips()) {
+                if (candidate.endExclusive() == cut) {
+                    outgoing = &candidate;
+                }
+            }
+            // A join this reader wrote does land exactly on a cut; one that
+            // does not -- a hand-edited file, or clips this reader skipped as
+            // overlapping -- names a span with nothing under it to straddle.
+            if (outgoing == nullptr || incoming == nullptr) {
+                continue;
+            }
+            model::Transition span;
+            span.id = project.ids().next<model::TransitionTag>();
+            span.from = outgoing->id;
+            span.to = incoming->id;
+            span.range = time::TimeRange{time::RationalTime::fromSeconds(item.start, rate),
+                                         time::RationalTime::fromSeconds(item.duration, rate)};
+            span.kind = item.kind;
+            span.direction = item.direction;
+            span.easing = item.easing;
+            span.softness = item.softness;
+            if (span.range.duration().frames() > 0) {
+                spans.push_back(span);
+            }
+        }
+        if (!spans.empty()) {
+            track->setTransitions(std::move(spans));
+        }
     }
 }
 
@@ -920,6 +1215,17 @@ Result<std::string> writeFcpXml(const model::Project& project, model::SequenceId
                     writeClipItem(gap, project, clip, kind,
                                   kind == model::TrackKind::Video ? lane : -lane,
                                   start + clip.start(), assetIds);
+                    // After the clip it leaves. Cross fades only: a fade lies
+                    // inside its clip and joins it to nothing, and there is no
+                    // second clip for a `<transition>` to sit between.
+                    for (const model::Transition& span : tracks[i].transitions()) {
+                        if (span.from == clip.id && span.isCrossFade()) {
+                            writeTransitionItem(gap, span, start + clip.endExclusive(),
+                                                start + span.range.start(),
+                                                kind == model::TrackKind::Video ? lane : -lane);
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -988,6 +1294,7 @@ Result<model::Project> readFcpXml(const std::string& text) {
     // push the whole cut off the front of the timeline.
     std::vector<Item> items = reader.items();
     std::vector<MarkerItem> markers = reader.markers();
+    std::vector<TransitionItem> transitions = reader.transitions();
     if (tcStart.isPositive()) {
         const bool afterStart = std::all_of(
             items.begin(), items.end(), [&](const Item& item) { return !(item.offset < tcStart); });
@@ -998,11 +1305,15 @@ Result<model::Project> readFcpXml(const std::string& text) {
             for (MarkerItem& marker : markers) {
                 marker.at -= tcStart;
             }
+            for (TransitionItem& item : transitions) {
+                item.cut -= tcStart;
+                item.start -= tcStart;
+            }
         }
     }
 
-    buildTracks(items, false, project, sequence, rate, resources);
-    buildTracks(items, true, project, sequence, rate, resources);
+    buildTracks(items, transitions, false, project, sequence, rate, resources);
+    buildTracks(items, transitions, true, project, sequence, rate, resources);
 
     std::vector<model::Marker> built;
     for (const MarkerItem& item : markers) {

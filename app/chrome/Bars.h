@@ -68,6 +68,10 @@ struct Bars {
     /// The timeline pane's own strip: the tools, snapping and zoom.
     QLabel* timelineLabel{nullptr};
     QPushButton* snapButton{nullptr};
+    /// Either side of the add-marker button; disabled when there is no marker
+    /// that way from the playhead.
+    QPushButton* previousMarkerButton{nullptr};
+    QPushButton* nextMarkerButton{nullptr};
     QSlider* zoomSlider{nullptr};
     /// How tall the rows are drawn, all of them together.
     QSlider* rowHeightSlider{nullptr};
@@ -86,6 +90,10 @@ struct Bars {
     QWidget* audioSide{nullptr};
     QWidget* nodesBox{nullptr};
     QWidget* timelinePane{nullptr};
+    /// The timeline's tool row, built by `buildTimelinePane` but left for the
+    /// caller to seat: it lives in the timeline dock's header, not above the
+    /// tracks, so the two are one bar rather than two.
+    QWidget* timelineTools{nullptr};
 };
 
 /// What the bars say, gathered from where each fact lives.
@@ -141,6 +149,10 @@ struct Status {
     bool rendering{false};
 
     QString platformLabel;
+
+    /// A passing note -- a still written -- shown in the middle of the status
+    /// line in place of what normally sits there, until the window clears it.
+    QString notice;
 
     /// Set once a device has been asked for and refused. The clock is the audio
     /// device (ADR-006), so without one the playhead does not move -- which is

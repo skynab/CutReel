@@ -89,6 +89,12 @@ constexpr int kPillGap = 5;
 /// What a badge is shadowed with when it sits over a picture.
 const QColor kBadgeShadow{0, 0, 0, 170};
 
+/// How far a fine-adjustment drag (Ctrl or Shift held) moves for each pixel
+/// the pointer actually travels. A quarter speed is enough to land on a
+/// single frame at a zoom level where a pixel is normally several of them,
+/// without the drag feeling like it has stopped responding.
+constexpr double kFineDragFactor = 0.25;
+
 /// How close to a row's bottom edge counts as grabbing it.
 constexpr int kResizeGrabPixels = 4;
 /// The range a track height may be dragged to. The floor is what the three
@@ -1325,6 +1331,7 @@ void TimelineWidget::paintClips(QPainter& painter, const ui::TimelineLayout::Row
 
         if (row.kind == model::TrackKind::Audio) {
             paintWaveform(painter, *clip, body, paint.strip);
+            paintGainLine(painter, *clip, row, body);
         }
 
         // Linked to something: said on the clip, because the consequence --
@@ -1390,7 +1397,7 @@ void TimelineWidget::paintClips(QPainter& painter, const ui::TimelineLayout::Row
     }
 }
 
-void TimelineWidget::dragKeyframeTo(int x) {
+void TimelineWidget::dragKeyframeTo(double x) {
     const model::Sequence* seq = sequence();
     if (seq == nullptr || project_ == nullptr || commands_ == nullptr ||
         !keyframeDrag_.clip.isValid()) {
@@ -1425,6 +1432,38 @@ void TimelineWidget::dragKeyframeTo(int x) {
     // The drag now follows the keyframe to its new time, or the next move would
     // look for it where it no longer is.
     keyframeDrag_.time = target;
+    emit edited();
+    update();
+}
+
+void TimelineWidget::updateGainPoint(int y) {
+    if (project_ == nullptr || commands_ == nullptr || !gainDrag_.clip.isValid()) {
+        return;
+    }
+    model::Sequence* seq = project_->findSequence(sequenceId_);
+    if (seq == nullptr) {
+        return;
+    }
+    const model::Track* track = seq->findTrack(gainDrag_.track);
+    const model::Clip* clip = track != nullptr ? track->find(gainDrag_.clip) : nullptr;
+    const auto row = rowFor(gainDrag_.track);
+    if (clip == nullptr || !row) {
+        return;
+    }
+    const double gainDb = layout_.gainDbForY(y, row->top, row->height);
+
+    const edit::EditTarget target{sequenceId_, gainDrag_.track};
+    // A clip that was not already animated gets its plain gain changed
+    // instead of a curve started: nudging the overall level of a clip should
+    // not, on its own, turn it into a keyframed one.
+    auto built = gainDrag_.animated
+                     ? edit::makeSetKeyframe(*project_, target, gainDrag_.clip,
+                                             model::Param::GainDb, gainDrag_.time, gainDb)
+                     : edit::makeSetClipAudio(*project_, target, gainDrag_.clip, gainDb, clip->pan);
+    if (!built) {
+        return;
+    }
+    commands_->execute(*project_, std::move(*built));
     emit edited();
     update();
 }
@@ -1541,6 +1580,62 @@ void TimelineWidget::paintWaveform(QPainter& painter, const model::Clip& clip, c
         painter.drawLine(QPointF(x, midY - static_cast<double>(maximum) * halfHeight),
                          QPointF(x, midY - static_cast<double>(minimum) * halfHeight));
     }
+}
+
+void TimelineWidget::paintGainLine(QPainter& painter, const model::Clip& clip,
+                                   const ui::TimelineLayout::Row& row, const QRectF& body) {
+    const model::Sequence* seq = sequence();
+    if (seq == nullptr) {
+        return;
+    }
+
+    QColor line = theme::text();
+    line.setAlpha(190);
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setPen(QPen(line, 1.3));
+
+    // One vertex per pixel, the same walk `paintWaveform` makes across the
+    // clip -- so the line is drawn at exactly the resolution the pointer is
+    // hit-tested at, and a keyframe's shape between two points is not
+    // guessed at any coarser than the eye can already tell it apart.
+    QPainterPath path;
+    bool started = false;
+    const auto from = static_cast<int>(std::floor(body.left()));
+    const auto to = static_cast<int>(std::ceil(body.right()));
+    for (int x = from; x <= to; ++x) {
+        const time::RationalTime timelineTime = layout_.timeForX(x, seq->frameRate());
+        if (!clip.timelineRange.contains(timelineTime)) {
+            continue;
+        }
+        const double y = layout_.yForGainDb(clip.gainDbAt(timelineTime), row.top, row.height);
+        if (!started) {
+            path.moveTo(x, y);
+            started = true;
+        } else {
+            path.lineTo(x, y);
+        }
+    }
+    if (started) {
+        painter.drawPath(path);
+    }
+
+    // A dot at every instant this is actually keyed, so the line reads as
+    // something with points on it rather than a fixed level nobody set.
+    if (const model::Curve* curve = clip.animation.find(model::Param::GainDb); curve != nullptr) {
+        painter.setBrush(line);
+        for (const model::Keyframe& key : curve->keyframes()) {
+            const time::RationalTime timelineTime = clip.timelineTimeOf(key.time);
+            if (!clip.timelineRange.contains(timelineTime)) {
+                continue;
+            }
+            const double x = layout_.xForTime(timelineTime);
+            const double y = layout_.yForGainDb(key.value, row.top, row.height);
+            painter.drawEllipse(QPointF(x, y), 3.0, 3.0);
+        }
+        painter.setBrush(Qt::NoBrush);
+    }
+    painter.restore();
 }
 
 bool TimelineWidget::paintFilmstrip(QPainter& painter, const model::Clip& clip,
@@ -1977,6 +2072,37 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
         }
     }
 
+    // The gain line next, and tested for the same reason a keyframe diamond
+    // is: it is drawn across an audio clip's own body, so testing the clip
+    // first would start a move every time and the line could never be
+    // grabbed.
+    if (tool_ == Tool::Select) {
+        if (const auto gain = layout_.hitTestGainPoint(*seq, x, y)) {
+            if (gain->existing && event->modifiers().testFlag(Qt::AltModifier)) {
+                if (commands_ != nullptr) {
+                    auto built =
+                        edit::makeRemoveKeyframe(*project_, {sequenceId_, gain->track}, gain->clip,
+                                                 model::Param::GainDb, gain->time);
+                    if (built) {
+                        commands_->execute(*project_, std::move(*built));
+                        commands_->breakMerge();
+                        emit edited();
+                    }
+                }
+                update();
+                return;
+            }
+            const model::Track* track = seq->findTrack(gain->track);
+            const model::Clip* clip = track != nullptr ? track->find(gain->clip) : nullptr;
+            const bool animated =
+                clip != nullptr && clip->animation.find(model::Param::GainDb) != nullptr;
+            gainDrag_ = GainDrag{gain->track, gain->clip, gain->time, animated};
+            drag_ = Drag::GainPoint;
+            update();
+            return;
+        }
+    }
+
     // Transition edges next, and for the same reason keyframes come first: a
     // dissolve is drawn across the cut between two clips, so its edges sit on
     // top of clip bodies. Testing clips first would start a trim or a move
@@ -2159,7 +2285,7 @@ std::optional<TimelineWidget::TransitionRef> TimelineWidget::transitionBodyAt(in
     return std::nullopt;
 }
 
-void TimelineWidget::updateTransitionDrag(int x) {
+void TimelineWidget::updateTransitionDrag(double x) {
     model::Sequence* seq = project_->findSequence(sequenceId_);
     if (seq == nullptr || commands_ == nullptr || !transitionDrag_.transition.isValid()) {
         return;
@@ -2200,7 +2326,7 @@ void TimelineWidget::updateTransitionDrag(int x) {
     update();
 }
 
-void TimelineWidget::updateTrim(int x) {
+void TimelineWidget::updateTrim(double x) {
     model::Sequence* seq = project_->findSequence(sequenceId_);
     if (seq == nullptr || !selected_.isValid() || commands_ == nullptr) {
         return;
@@ -2540,9 +2666,55 @@ void TimelineWidget::mouseDoubleClickEvent(QMouseEvent* event) {
     QWidget::mouseDoubleClickEvent(event);
 }
 
+bool TimelineWidget::isFineAdjustable(Drag kind) noexcept {
+    switch (kind) {
+        case Drag::MoveClip:
+        case Drag::TrimIn:
+        case Drag::TrimOut:
+        case Drag::Slip:
+        case Drag::TransitionStart:
+        case Drag::TransitionEnd:
+        case Drag::Keyframe:
+            return true;
+        case Drag::None:
+        case Drag::Scrub:
+        case Drag::TrackHeight:
+        case Drag::Band:
+        case Drag::MaybeBand:
+        case Drag::Pan:
+        case Drag::GainPoint:
+            return false;
+    }
+    return false;
+}
+
 void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
     const int x = static_cast<int>(event->position().x());
     const int y = static_cast<int>(event->position().y());
+
+    // Ctrl or Shift, held while a clip is being moved, trimmed, slipped, a
+    // transition edge dragged or a keyframe dragged, slows the gesture down
+    // for a frame you cannot otherwise land on once a timeline pixel is
+    // several of them wide. `fineX_` is where the scaled motion has actually
+    // accumulated to, separate from the raw pointer, so releasing the
+    // modifier mid-drag does not snap the clip back to the cursor -- only
+    // further motion is affected. A drag that is not one of these tracks the
+    // pointer 1:1, as it always has.
+    double fineX = x;
+    if (isFineAdjustable(drag_)) {
+        if (fineDragKind_ != drag_) {
+            fineDragKind_ = drag_;
+            fineX_ = x;
+            fineLastRawX_ = x;
+        }
+        const bool fine = event->modifiers().testFlag(Qt::ControlModifier) ||
+                          event->modifiers().testFlag(Qt::ShiftModifier);
+        fineX_ += (x - fineLastRawX_) * (fine ? kFineDragFactor : 1.0);
+        fineLastRawX_ = x;
+        fineX = fineX_;
+    } else {
+        fineDragKind_ = Drag::None;
+    }
 
     if (drag_ == Drag::None) {
         updateHeaderHover(x, y);
@@ -2560,7 +2732,11 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
         return;
     }
     if (drag_ == Drag::Keyframe) {
-        dragKeyframeTo(x);
+        dragKeyframeTo(fineX);
+        return;
+    }
+    if (drag_ == Drag::GainPoint) {
+        updateGainPoint(y);
         return;
     }
     if (drag_ == Drag::MaybeBand) {
@@ -2582,19 +2758,19 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
         return;
     }
     if (drag_ == Drag::MoveClip) {
-        updateDrag(x, y);
+        updateDrag(fineX, y);
         return;
     }
     if (drag_ == Drag::TrimIn || drag_ == Drag::TrimOut) {
-        updateTrim(x);
+        updateTrim(fineX);
         return;
     }
     if (drag_ == Drag::TransitionStart || drag_ == Drag::TransitionEnd) {
-        updateTransitionDrag(x);
+        updateTransitionDrag(fineX);
         return;
     }
     if (drag_ == Drag::Slip) {
-        updateSlip(x);
+        updateSlip(fineX);
         return;
     }
     if (drag_ == Drag::Pan) {
@@ -2620,7 +2796,7 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
     }
 }
 
-void TimelineWidget::updateDrag(int x, int y) {
+void TimelineWidget::updateDrag(double x, int y) {
     model::Sequence* seq = project_->findSequence(sequenceId_);
     if (seq == nullptr || !selected_.isValid() || commands_ == nullptr) {
         return;
@@ -2870,6 +3046,11 @@ void TimelineWidget::finishDrag() {
     }
     resizeTrack_ = model::TrackId{};
     drag_ = Drag::None;
+    // So the next drag is detected as a fresh one even when it turns out to be
+    // the same kind as this one -- two trims in a row are both `TrimOut`, and
+    // without this the second would pick up the first one's leftover fine-
+    // adjustment accumulator instead of starting from wherever it is pressed.
+    fineDragKind_ = Drag::None;
     rippleTrim_ = false;
     if (duplicating_) {
         duplicating_ = false;
@@ -3145,7 +3326,7 @@ void TimelineWidget::updateBladeHover(int x, int y) {
     update();
 }
 
-void TimelineWidget::updateSlip(int x) {
+void TimelineWidget::updateSlip(double x) {
     model::Sequence* seq = project_ != nullptr ? project_->findSequence(sequenceId_) : nullptr;
     if (seq == nullptr || !selected_.isValid() || commands_ == nullptr) {
         return;
