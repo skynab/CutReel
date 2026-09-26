@@ -1194,10 +1194,14 @@ private:
     /// and whether the content already draws its own header (see
     /// `chrome::buildDockHeader`). Closeable unless `closable` is false.
     QDockWidget* makeDock(const char* objectName, const QString& title, QWidget* content,
-                          bool showLabel, bool closable = true);
+                          bool closable = true);
     /// Rebuild the shipped default arrangement of the nine docks above, for a
     /// first run and for "reset-panels".
     void applyDefaultDockLayout();
+    /// Hide the per-dock header on any dock sharing a tab strip with another
+    /// shown one -- the strip is that group's header -- and show it again on
+    /// a dock alone in its group, or floating.
+    void syncDockHeaders();
 
     /// The chrome. None of it owns anything: every one of these is a child of
     /// the window, and Qt deletes them with it.

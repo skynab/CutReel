@@ -35,6 +35,8 @@
 #include <QRegularExpression>
 #include <QSlider>
 #include <QStackedWidget>
+#include <QTabWidget>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <cstdint>
 #include <map>
@@ -281,12 +283,21 @@ void PreviewWindow::createPanels() {
 }
 
 QDockWidget* PreviewWindow::makeDock(const char* objectName, const QString& title, QWidget* content,
-                                     bool showLabel, bool closable) {
+                                     bool closable) {
     auto* dock = new QDockWidget(title, this);
     // saveState()/restoreState() key a dock by this name, not by pointer or
     // position -- an unnamed dock is one they silently fail to restore.
     dock->setObjectName(QString::fromUtf8(objectName));
-    dock->setWidget(content);
+    // Wrapped rather than set directly: Qt draws no border on a docked
+    // QDockWidget, so the card's lower outline and rounded corners belong to
+    // this frame (see #dock-body in Theme.cpp).
+    auto* body = new QFrame(dock);
+    body->setObjectName("dock-body");
+    auto* bodyLayout = new QVBoxLayout(body);
+    bodyLayout->setContentsMargins(1, 0, 1, 1);
+    bodyLayout->setSpacing(0);
+    bodyLayout->addWidget(content);
+    dock->setWidget(body);
     QDockWidget::DockWidgetFeatures features =
         QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable;
     if (closable) {
@@ -297,7 +308,7 @@ QDockWidget* PreviewWindow::makeDock(const char* objectName, const QString& titl
     if (closable) {
         onClose = [dock] { dock->close(); };
     }
-    dock->setTitleBarWidget(chrome::buildDockHeader(dock, title, showLabel, onClose));
+    dock->setTitleBarWidget(chrome::buildDockHeader(dock, title, onClose));
     return dock;
 }
 
@@ -337,7 +348,7 @@ void PreviewWindow::buildViewerLayout() {
     programLayout->addWidget(mixer_, 1);
     programLayout->addWidget(clipStrip_);
     programLayout->addWidget(buildTransportBar());
-    dockProgram_ = makeDock("dock-program", tr("Program"), programColumn, /*showLabel=*/true);
+    dockProgram_ = makeDock("dock-program", tr("Program"), programColumn);
 
     auto* leftColumn = new QWidget(this);
     leftColumn->setObjectName("audio-side");
@@ -350,7 +361,7 @@ void PreviewWindow::buildViewerLayout() {
     leftLayout->addWidget(stems_);
     leftLayout->addStretch(1);
     bars_.audioSide = leftColumn;
-    dockAudioSide_ = makeDock("dock-audio-side", tr("Levels"), bars_.audioSide, /*showLabel=*/true);
+    dockAudioSide_ = makeDock("dock-audio-side", tr("Levels"), bars_.audioSide);
 
     // The grading palette is the Color room's left column: the wheels, the
     // bars and the ramps, stacked. It used to run along the bottom, which is
@@ -365,12 +376,10 @@ void PreviewWindow::buildViewerLayout() {
     palette_->addPage(tr("Gallery"), app::icons::Glyph::Camera, gallery_->stillsPage());
     palette_->addPage(tr("LUTs"), app::icons::Glyph::FolderOpen, gallery_->lutsPage());
     gallery_->hide();
-    dockPalette_ = makeDock("dock-palette", tr("Color"), palette_, /*showLabel=*/true);
+    dockPalette_ = makeDock("dock-palette", tr("Color"), palette_);
 
-    // The media pane. No label on its header -- the bin already draws its own
-    // tab strip and search field, and a second name above that would be a
-    // second header for one panel.
-    dockBin_ = makeDock("dock-bin", tr("Project Bin"), bin_, /*showLabel=*/false);
+    // The media pane.
+    dockBin_ = makeDock("dock-bin", tr("Project Bin"), bin_);
 
     // Scopes: read while grading, beside the picture rather than off in the
     // parameter column, which is where the design used to put them, fixed at
@@ -381,7 +390,7 @@ void PreviewWindow::buildViewerLayout() {
     // vectorscope or a waveform read at a sliver of its old width is an
     // instrument nobody can actually read.
     scopes_->setMinimumWidth(280);
-    dockScopes_ = makeDock("dock-scopes", tr("Scopes"), scopes_, /*showLabel=*/false);
+    dockScopes_ = makeDock("dock-scopes", tr("Scopes"), scopes_);
 
     // The grade chain sits over the parameters it navigates. The two used to
     // share one fixed column with no drag handle between them on purpose --
@@ -461,14 +470,11 @@ void PreviewWindow::buildViewerLayout() {
             &PreviewWindow::applyInputLut);
     connect(colorManagement_, &app::ColorManagement::deliveryChosen, this,
             [this](const model::Sequence::Output& wanted) { setDelivery(wanted); });
-    dockGradeChain_ = makeDock("dock-grade-chain", tr("Grade Chain"), bars_.nodesBox,
-                               /*showLabel=*/true);
+    dockGradeChain_ = makeDock("dock-grade-chain", tr("Grade Chain"), bars_.nodesBox);
 
-    // No label -- the parameter panel's own sticky header already carries
-    // the clip's name and its own Inspector/Audio/Info/Transition tabs.
-    dockEffects_ = makeDock("dock-effects", tr("Effect Controls"), effects_, /*showLabel=*/false);
+    dockEffects_ = makeDock("dock-effects", tr("Effect Controls"), effects_);
 
-    dockChannel_ = makeDock("dock-channel", tr("Channel Strip"), channel_, /*showLabel=*/true);
+    dockChannel_ = makeDock("dock-channel", tr("Channel Strip"), channel_);
 
     // Floors, so no panel can be squeezed to a sliver by its neighbours. A
     // scope four pixels tall or a mixer with no meter is worse than one
@@ -648,15 +654,61 @@ void PreviewWindow::buildWindowLayout() {
     // to span the full window width under everything, and should still.
     dockHost_->setCorner(Qt::BottomLeftCorner, Qt::BottomDockWidgetArea);
     dockHost_->setCorner(Qt::BottomRightCorner, Qt::BottomDockWidgetArea);
+    // The panels are cards floating on a darker well, six pixels apart, as
+    // the docking mockup draws them -- the well shows through the gutters
+    // (see #dock-host and QMainWindow::separator in Theme.cpp).
+    dockHost_->setObjectName("dock-host");
+    // A tabbed group's strip belongs above its panel, as the mockup's group
+    // headers are; Qt's default puts it underneath.
+    dockHost_->setTabPosition(Qt::AllDockWidgetAreas, QTabWidget::North);
+    dockHost_->setContentsMargins(6, 6, 6, 6);
+    // The dock a keyboard focus sits inside is the "focused" one: its header
+    // underline and card border pick up the accent, as in the mockup.
+    connect(qApp, &QApplication::focusChanged, dockHost_, [this](QWidget*, QWidget* now) {
+        QDockWidget* focused = nullptr;
+        for (QWidget* w = now; w != nullptr && focused == nullptr; w = w->parentWidget()) {
+            focused = qobject_cast<QDockWidget*>(w);
+        }
+        if (focused == nullptr) {
+            return;
+        }
+        for (QDockWidget* dock : allDocks()) {
+            const bool on = dock == focused;
+            if (dock->property("focused").toBool() == on) {
+                continue;
+            }
+            dock->setProperty("focused", on);
+            // Only the header's own widgets and the card itself: the panel
+            // inside has nothing keyed to this property, and re-polishing a
+            // whole inspector on every click would be pure cost.
+            QList<QWidget*> restyle{dock, dock->widget()};
+            if (QWidget* header = dock->titleBarWidget()) {
+                restyle << header << header->findChildren<QWidget*>();
+            }
+            for (QWidget* w : restyle) {
+                w->style()->unpolish(w);
+                w->style()->polish(w);
+            }
+        }
+    });
 
     bars_.timelinePane = buildTimelinePane();
     // Movable and floatable like every other panel, but not closeable: no
     // workspace has ever let the timeline be taken down, and giving it a
     // close button would be a new way to lose it with no obvious way back.
-    dockTimeline_ = makeDock("dock-timeline", tr("Timeline"), bars_.timelinePane,
-                             /*showLabel=*/false, /*closable=*/false);
+    dockTimeline_ =
+        makeDock("dock-timeline", tr("Timeline"), bars_.timelinePane, /*closable=*/false);
 
     applyDefaultDockLayout();
+    // Whenever a dock moves, joins or leaves a tab group, or is shown or hidden.
+    // Deferred a turn: Qt has not finished rearranging when these fire.
+    const auto resync = [this] { QTimer::singleShot(0, this, [this] { syncDockHeaders(); }); };
+    for (QDockWidget* dock : allDocks()) {
+        connect(dock, &QDockWidget::dockLocationChanged, this, resync);
+        connect(dock, &QDockWidget::topLevelChanged, this, resync);
+        connect(dock, &QDockWidget::visibilityChanged, this, resync);
+    }
+    connect(dockHost_, &QMainWindow::tabifiedDockWidgetActivated, this, resync);
 
     // Deliver is not a rearrangement of the edit panels, it is a different
     // screen: presets, settings and a render queue, with no timeline. So it
@@ -678,6 +730,29 @@ void PreviewWindow::buildWindowLayout() {
     layout->addWidget(buildStatusBar());
 
     buildDockMenuActions();
+}
+
+void PreviewWindow::syncDockHeaders() {
+    for (QDockWidget* dock : allDocks()) {
+        QWidget* header = dock->titleBarWidget();
+        if (header == nullptr) {
+            continue;
+        }
+        // "Checked" rather than visible: the tabs behind the current one are
+        // hidden by Qt but still logically shown, while a dock a workspace
+        // has put away is unchecked.
+        bool sharesStrip = false;
+        for (QDockWidget* other : dockHost_->tabifiedDockWidgets(dock)) {
+            sharesStrip = sharesStrip || other->toggleViewAction()->isChecked();
+        }
+        const bool show = dock->isFloating() || !sharesStrip;
+        header->setVisible(show);
+        // Hidden is not enough: the dock still reserves the header's
+        // sizeHint for its title area, leaving a blank band under the tab
+        // strip (see DockHeader in Widgets.cpp).
+        header->setProperty("collapsed", !show);
+        header->updateGeometry();
+    }
 }
 
 void PreviewWindow::applyDefaultDockLayout() {
@@ -3119,6 +3194,7 @@ void PreviewWindow::setWorkspace(const QString& name) {
             dockHost_->restoreState(state, kDockStateVersion);
         }
     }
+    QTimer::singleShot(0, this, [this] { syncDockHeaders(); });
     updateChrome();
 }
 

@@ -370,12 +370,14 @@ QSplitter::handle:horizontal { width: 1px; }
 QSplitter::handle:vertical { height: 1px; }
 QSplitter::handle:hover { background: %ACCENT%; }
 
-/* The dock host's own separators, between docked panels. A different
-   selector from QSplitter::handle above even though it is the same hairline
-   look -- QMainWindow draws its internal splits through this one, not
-   through QSplitter. */
-QMainWindow::separator { background: %DIVIDER%; width: 1px; height: 1px; }
-QMainWindow::separator:hover { background: %ACCENT%; }
+/* The dock host: panels are cards floating on a darker well, six pixels
+   apart, as the docking mockup draws them. The gutters are the host's own
+   separators -- a different selector from QSplitter::handle above, since
+   QMainWindow draws its internal splits through this one -- left clear so
+   the well shows, and washed with the accent while hovered or dragged. */
+#dock-host { background: %WELL%; }
+QMainWindow::separator { background: transparent; width: 6px; height: 6px; }
+QMainWindow::separator:hover { background: %ACCENTWASH%; }
 
 QProgressBar {
     border: 1px solid %DIVIDER%; border-radius: 5px; background: %BG%;
@@ -408,22 +410,40 @@ QMessageBox QLabel { color: %TEXT%; }
    already has whatever chrome it needs, so this only has to say what the
    panel is (when it says anything at all -- see chrome::buildDockHeader)
    and give a place to grab it by. */
-#dock-header { background: %BG%; border-bottom: 1px solid %DIVIDER%; }
-#dock-header-label { color: %MUTED%; font-size: 11px; }
-#dock-header-close { border: none; border-radius: 3px; }
+/* A dock's card: Qt draws no border on a docked QDockWidget, so the outline
+   is the header's (top half) and the body wrapper's (bottom half) --
+   hairline, rounded, and picking up the accent while the dock holds the
+   keyboard focus (PreviewWindow sets the "focused" property). */
+#dock-header {
+    background: %BG%; border: 1px solid %DIVIDER%;
+    border-top-left-radius: 6px; border-top-right-radius: 6px;
+}
+#dock-body {
+    border: 1px solid %DIVIDER%; border-top: none;
+    border-bottom-left-radius: 6px; border-bottom-right-radius: 6px;
+}
+QDockWidget[focused="true"] #dock-header { background: %SURFACE%; border-color: %ACCENT600%; }
+QDockWidget[focused="true"] #dock-body { border-color: %ACCENT600%; }
+/* The header is the mockup's tab strip: the panel's name as one tab,
+   underlined in the accent while focused and in neutral otherwise. */
+#dock-header-tab {
+    color: %MUTED%; font-size: 11.5px; padding: 0 10px;
+    border-bottom: 2px solid %NEUTRAL600%;
+}
+QDockWidget[focused="true"] #dock-header-tab { color: %TEXT%; border-bottom-color: %ACCENT%; }
+#dock-header-close { border: none; border-radius: 4px; }
 #dock-header-close:hover { background: %HOVER%; }
-/* Tabifying two or more docks together is the one place in this window Qt
-   draws its own tab bar rather than one built from the pill-tab buttons
-   everywhere else (the bin's Media/Effects/Titles/Audio row, the
-   inspector's Inspector/Audio/Info/Transition row) -- QDockWidget has no
-   equivalent of #dock-header for a shared tab strip. Styled to match those
-   rather than left at the platform's native tab chrome, which is the one
-   place a docked panel would otherwise look like it belonged to a
-   different application. */
-QTabBar { background: %BG%; border-bottom: 1px solid %DIVIDER%; }
+/* Tabifying docks together is the one place Qt draws its own tab bar
+   instead of #dock-header. Styled as the same strip: 30px tall, tabs
+   underlined when selected. */
+QTabBar {
+    background: %BG%; border: 1px solid %DIVIDER%;
+    border-top-left-radius: 6px; border-top-right-radius: 6px;
+}
 QTabBar::tab {
-    background: transparent; color: %MUTED%; border: none; border-radius: 5px;
-    margin: 3px 2px; padding: 3px 10px; font-size: 11px;
+    background: transparent; color: %MUTED%; border: none;
+    border-bottom: 2px solid transparent; margin: 0; padding: 0 10px;
+    font-size: 11.5px; min-height: 28px;
     /* Once a stylesheet touches QTabBar at all, Qt stops sizing tabs from
        the native style's own text-width calculation and falls back to a
        much smaller default -- measured directly, "Grade Chain" and even
@@ -433,7 +453,9 @@ QTabBar::tab {
     min-width: 88px;
 }
 QTabBar::tab:hover { background: %BINHOVER%; color: %TEXT%; }
-QTabBar::tab:selected { background: %ACCENTWASH%; color: %ACCENT300%; }
+QTabBar::tab:selected { color: %TEXT%; border-bottom-color: %ACCENT%; }
+/* The preview drawn while a dock is dragged over a place it can land. */
+QRubberBand { background: %ACCENTWASH%; border: 1px solid %ACCENT%; border-radius: 6px; }
 #chrome-statusbar QLabel, #chrome-toolbar QLabel[muted="true"],
 #chrome-timeline-bar QLabel[muted="true"], #chrome-viewer-bar QLabel[muted="true"] {
     color: %MUTED%; font-size: 11px;

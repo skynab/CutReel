@@ -61,6 +61,30 @@ private:
     std::function<void()> sync_;
 };
 
+constexpr int kDockHeaderHeight = 30;
+
+/// A dock header that can report no height at all. `QDockWidget` sizes its
+/// title area from the title bar widget's `sizeHint()` whether or not the
+/// widget is shown, so hiding a header alone leaves a blank band where it
+/// was; a header in the "collapsed" state answers zero instead.
+class DockHeader : public QWidget {
+public:
+    using QWidget::QWidget;
+
+    [[nodiscard]] QSize sizeHint() const override { return collapsedSize(QWidget::sizeHint()); }
+    [[nodiscard]] QSize minimumSizeHint() const override {
+        return collapsedSize(QWidget::minimumSizeHint());
+    }
+
+private:
+    [[nodiscard]] QSize collapsedSize(QSize size) const {
+        if (property("collapsed").toBool()) {
+            size.setHeight(0);
+        }
+        return size;
+    }
+};
+
 /// Relays a title bar widget's mouse events to the dock widget it belongs to.
 ///
 /// `QDockWidget` implements dragging, floating and the redock preview
@@ -176,30 +200,27 @@ QLabel* mutedLabel(QWidget* parent, const QString& text) {
     return label;
 }
 
-QWidget* buildDockHeader(QWidget* parent, const QString& title, bool showLabel,
+QWidget* buildDockHeader(QWidget* parent, const QString& title,
                          const std::function<void()>& onClose) {
-    auto* header = new QWidget(parent);
+    auto* header = new DockHeader(parent);
     header->setObjectName("dock-header");
-    // One height for every dock, named or not: Qt's own drag-initiation
-    // hit-testing needs more room than an eight-pixel hairline gives it to
-    // work with -- measured directly, a grip that thin never starts a drag
-    // at all, which defeats the entire point of giving a dock a header.
-    header->setFixedHeight(22);
+    // Well over the ~20px below which Qt's drag-initiation hit-testing never
+    // starts a drag at all -- an eight-pixel hairline was measured doing
+    // exactly that.
+    header->setFixedHeight(kDockHeaderHeight);
     auto* row = new QHBoxLayout(header);
-    row->setContentsMargins(8, 0, 4, 0);
-    if (showLabel) {
-        auto* label = new QLabel(title, header);
-        label->setObjectName("dock-header-label");
-        // Transparent to the mouse: a label is not a control, and letting it
-        // eat the press is how a header with a name would stop being
-        // draggable by its name -- only by the blank space beside it, which
-        // is not where anybody reaches first.
-        label->setAttribute(Qt::WA_TransparentForMouseEvents);
-        row->addWidget(label);
-    }
-    // No name here otherwise: the panel underneath already says what it is
-    // (its own tab strip or sticky header), and a second title would just
-    // repeat it.
+    row->setContentsMargins(2, 0, 4, 0);
+    row->setSpacing(0);
+    auto* tab = new QLabel(title, header);
+    tab->setObjectName("dock-header-tab");
+    // Transparent to the mouse: a label is not a control, and letting it eat
+    // the press is how a header with a name would stop being draggable by
+    // its name -- only by the blank space beside it, which is not where
+    // anybody reaches first.
+    tab->setAttribute(Qt::WA_TransparentForMouseEvents);
+    // Full height, so the tab's own bottom border is the header's underline.
+    tab->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
+    row->addWidget(tab);
     row->addStretch(1);
     if (onClose) {
         auto* close = new QPushButton(header);
