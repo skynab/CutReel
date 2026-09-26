@@ -2682,6 +2682,7 @@ bool TimelineWidget::isFineAdjustable(Drag kind) noexcept {
         case Drag::Band:
         case Drag::MaybeBand:
         case Drag::Pan:
+        case Drag::GainPoint:
             return false;
     }
     return false;
