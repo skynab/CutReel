@@ -812,7 +812,10 @@ public:
     /// four things people do with an editor, and each of them wants a different
     /// half of the window: the panels a colourist needs are dead weight while
     /// somebody is assembling, and the reverse.
-    void setWorkspace(const QString& name);
+    ///
+    /// `restoreLayout` false goes there without restoring the arrangement it
+    /// was last left in, for a caller that is about to replace it anyway.
+    void setWorkspace(const QString& name, bool restoreLayout = true);
 
     /// What the workspace tabs and File > Layout do: go to the workspace and
     /// put its panes back in the default arrangement, wherever a drag had

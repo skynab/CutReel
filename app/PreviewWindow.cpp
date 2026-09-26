@@ -34,6 +34,7 @@
 #include <QPointer>
 #include <QProgressDialog>
 #include <QRegularExpression>
+#include <QSet>
 #include <QSlider>
 #include <QStackedWidget>
 #include <QTabBar>
@@ -452,7 +453,7 @@ void PreviewWindow::buildViewerLayout() {
     programLayout->addWidget(mixer_, 1);
     programLayout->addWidget(clipStrip_);
     programLayout->addWidget(buildTransportBar());
-    dockProgram_ = makeDock("dock-program", tr("Program"), programColumn, true,
+    dockProgram_ = makeDock("dock-program", tr("Preview"), programColumn, true,
                             chrome::liftFirstRow(programColumn));
 
     auto* leftColumn = new QWidget(this);
@@ -485,7 +486,7 @@ void PreviewWindow::buildViewerLayout() {
         makeDock("dock-palette", tr("Color"), palette_, true, chrome::liftFirstRow(palette_));
 
     // The media pane.
-    dockBin_ = makeDock("dock-bin", tr("Project Bin"), bin_, true, chrome::liftFirstRow(bin_));
+    dockBin_ = makeDock("dock-bin", tr("Project"), bin_, true, chrome::liftFirstRow(bin_));
 
     // Scopes: read while grading, beside the picture rather than off in the
     // parameter column, which is where the design used to put them, fixed at
@@ -580,8 +581,8 @@ void PreviewWindow::buildViewerLayout() {
     dockGradeChain_ = makeDock("dock-grade-chain", tr("Grade Chain"), bars_.nodesBox, true,
                                chrome::liftFirstRow(bars_.nodesBox));
 
-    dockEffects_ = makeDock("dock-effects", tr("Effect Controls"), effects_, true,
-                            chrome::liftFirstRow(effects_));
+    dockEffects_ =
+        makeDock("dock-effects", tr("Effects"), effects_, true, chrome::liftFirstRow(effects_));
 
     dockChannel_ = makeDock("dock-channel", tr("Channel Strip"), channel_, true,
                             chrome::liftFirstRow(channel_));
@@ -808,6 +809,10 @@ void PreviewWindow::buildWindowLayout() {
     // close button would be a new way to lose it with no obvious way back.
     dockTimeline_ = makeDock("dock-timeline", tr("Timeline"), bars_.timelinePane,
                              /*closable=*/false, bars_.timelineTools);
+    // Qt greys a dock's Panes-menu entry unless the dock is closable. The
+    // timeline gets no close button in its header (above), but the menu is
+    // how it is put away and brought back.
+    dockTimeline_->setFeatures(dockTimeline_->features() | QDockWidget::DockWidgetClosable);
 
     applyDefaultDockLayout();
     // Whenever a dock moves, joins or leaves a tab group, or is shown or hidden.
@@ -868,8 +873,8 @@ void PreviewWindow::syncDockHeaders() {
     // Qt makes a tab strip when a group forms and drops it when it dissolves,
     // so this is where a new one is found (see DockTabBarFilter).
     for (QTabBar* bar : dockHost_->findChildren<QTabBar*>(QString{}, Qt::FindDirectChildrenOnly)) {
-        // A long name ("Effect Controls") was cut to "Effect Cont..." with
-        // the whole strip empty beside it.
+        // Otherwise a long tab name is cut short ("Grade Ch...") with the
+        // strip empty beside it.
         bar->setElideMode(Qt::ElideNone);
         if (!bar->property("dockTabHook").toBool()) {
             bar->setProperty("dockTabHook", true);
@@ -934,8 +939,26 @@ void PreviewWindow::applyDefaultDockLayout() {
     // first, before rebuilding the arrangement below, is what makes this
     // call a real reset rather than one that works only when nothing has
     // been pulled out.
+    // Which were up going in: removing a dock from the layout hides it, and
+    // what the workspace has put away has to stay away while the arrangement
+    // is sized (below) -- shown for the sizing and hidden afterwards, a
+    // hidden group's minimum height still counted and grew the whole window
+    // past the screen, taking the timeline with it.
+    QSet<QDockWidget*> wasUp;
     for (QDockWidget* dock : allDocks()) {
+        if (!dock->isHidden()) {
+            wasUp.insert(dock);
+        }
         dock->setFloating(false);
+    }
+    // Then out of the layout altogether, so what is built below starts from
+    // an empty tree rather than being grafted onto whatever grouping the
+    // panes were dragged into -- the state the restoreState below, and one
+    // that crashed, would otherwise have to make sense of. They come back
+    // visible or not by the workspace's own rules (setWorkspace) and the
+    // show() below.
+    for (QDockWidget* dock : allDocks()) {
+        dockHost_->removeDockWidget(dock);
     }
     // A first-pass approximation of the old fixed arrangement -- audio side
     // | palette | bin, tabbed together since at most one of the three is
@@ -952,11 +975,16 @@ void PreviewWindow::applyDefaultDockLayout() {
     dockHost_->tabifyDockWidget(dockGradeChain_, dockScopes_);
     dockHost_->tabifyDockWidget(dockEffects_, dockChannel_);
     dockHost_->addDockWidget(Qt::BottomDockWidgetArea, dockTimeline_);
-    // No workspace puts the viewer away (Audio swaps its picture for the
-    // mixer inside the same dock), so nothing else would bring it back after
-    // it was closed -- and putting the panes back where they belong has to
-    // include the ones that were closed.
-    dockProgram_->show();
+    // Back up as they were, so `resizeDocks` -- which ignores a hidden dock,
+    // and left the timeline a sliver when they were all hidden -- sees the
+    // arrangement the workspace will show. The viewer is always up: no
+    // workspace puts it away (Audio swaps its picture for the mixer inside
+    // the same dock), so nothing else would bring a closed one back.
+    for (QDockWidget* dock : allDocks()) {
+        if (wasUp.contains(dock) || dock == dockProgram_) {
+            dock->show();
+        }
+    }
     // The ratios the deleted splitters' stretch factors used to hold: the
     // viewer three times as wide as either side column, and the panel row
     // three units tall against the timeline's two. `resizeDocks` wants every
@@ -3075,7 +3103,7 @@ void PreviewWindow::buildMenus() {
         this, actions_, kWorkspaces, bars_.workspaceActions,
         [this](const QString& name) { chooseLayout(name); },
         [this](QMenuBar* bar) {
-            windowMenu_ = bar->addMenu("Window");
+            windowMenu_ = bar->addMenu("Panes");
             QMenu* help = bar->addMenu("Help");
             menuItem(help, "hotkeys");
             menuItem(help, "about");
@@ -3086,12 +3114,9 @@ void PreviewWindow::buildDockMenuActions() {
     // toggleViewAction() is a checkable QAction a QDockWidget already keeps
     // in sync with its own shown/hidden/floating state -- no manual
     // aboutToShow resync needed, unlike panelAction below. The timeline is
-    // deliberately absent: it has no close button (see makeDock), so there
-    // is nothing here to give it a way back from.
+    // here too: it has no close button (see makeDock), but the menu is its
+    // way to be put away and to come back.
     for (QDockWidget* dock : allDocks()) {
-        if (dock == dockTimeline_) {
-            continue;
-        }
         windowMenu_->addAction(dock->toggleViewAction());
     }
     // Not a dock: the mixer is a plain sub-widget of dockProgram_'s content,
@@ -3284,7 +3309,12 @@ void PreviewWindow::syncGradeTarget() {
 }
 
 void PreviewWindow::chooseLayout(const QString& name) {
-    setWorkspace(name);
+    // Not restoring the saved arrangement first: it is about to be replaced,
+    // and restoring one saved under a different grouping of the panes onto
+    // whatever is docked now crashed inside QMainWindow::restoreState
+    // (access violation in Qt6Widgets, minidump: restoreState called from
+    // here) after panes had been docked together.
+    setWorkspace(name, /*restoreLayout=*/false);
     // Deliver is a page of its own with no panes to arrange.
     if (name == "Deliver") {
         return;
@@ -3298,7 +3328,7 @@ void PreviewWindow::chooseLayout(const QString& name) {
     settings.setValue(layoutKey(workspace_), dockHost_->saveState(kDockStateVersion));
 }
 
-void PreviewWindow::setWorkspace(const QString& name) {
+void PreviewWindow::setWorkspace(const QString& name, bool restoreLayout) {
     if (!kWorkspaces.contains(name)) {
         return;
     }
@@ -3379,7 +3409,7 @@ void PreviewWindow::setWorkspace(const QString& name) {
          entry != bars_.workspaceActions.constEnd(); ++entry) {
         entry.value()->setChecked(entry.key() == name);
     }
-    if (switchingWorkspace) {
+    if (switchingWorkspace && restoreLayout) {
         QSettings settings = makeSettings();
         if (const auto state = settings.value(layoutKey(name)).toByteArray(); !state.isEmpty()) {
             dockHost_->restoreState(state, kDockStateVersion);
