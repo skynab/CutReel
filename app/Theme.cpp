@@ -493,6 +493,9 @@ QRubberBand { background: %ACCENTWASH%; border: 1px solid %ACCENT%; border-radiu
 #chrome-format:hover { background: %HOVER%; color: %TEXT%; }
 #chrome-format:disabled { color: %MUTED%; background: transparent; border-color: transparent; }
 #chrome-format::drop-down { border: none; width: 14px; }
+/* FormatCombo paints its own "⌄" (see chrome/Widgets.cpp); the global caret
+   image above would be a second one beside it. */
+#chrome-format::down-arrow { image: none; width: 0; height: 0; margin: 0; }
 #chrome-brand { font-weight: 600; padding: 0 6px; }
 #viewer-well { background: %WELL%; }
 #deliver-side { background: %SURFACE%; }

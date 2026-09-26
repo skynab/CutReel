@@ -656,9 +656,11 @@ QWidget* buildViewerBar(QWidget* parent, Bars& bars, ActionRouter& router, const
 
     auto* segment = new QWidget(bar);
     segment->setObjectName("segment-group");
-    // Shorter than the header's inner height (28), so its outline sits clear of
-    // the header's own edges.
-    segment->setFixedHeight(24);
+    // Two shorter than the header's inner height (28), so its outline sits
+    // clear of the header's edges: the tabs are 22 (the least the button style
+    // allows) plus the 2px margin either side, which the layout does not
+    // shrink for the outline.
+    segment->setFixedHeight(26);
     auto* segmentRow = new QHBoxLayout(segment);
     segmentRow->setContentsMargins(2, 2, 2, 2);
     segmentRow->setSpacing(2);
@@ -667,7 +669,7 @@ QWidget* buildViewerBar(QWidget* parent, Bars& bars, ActionRouter& router, const
     // The dot is what says "toggle" rather than "tab": two tabs in a group mean
     // one of them is on, and these two are independent.
     for (QPushButton* tab : {bars.sourceTab, bars.programTab}) {
-        tab->setFixedHeight(20);
+        tab->setFixedHeight(22);
         tab->setIconSize(QSize(13, 13));
         segmentRow->addWidget(tab);
     }

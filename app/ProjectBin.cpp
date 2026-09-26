@@ -547,6 +547,8 @@ ProjectBin::ProjectBin(QWidget* parent) : QWidget{parent} {
         tab->setCheckable(true);
         tab->setChecked(index == 0);
         tab->setCursor(Qt::PointingHandCursor);
+        // No focus rectangle: a click on a tab left a dotted outline round it.
+        tab->setFocusPolicy(Qt::NoFocus);
         tabs->addButton(tab, index);
         tabRow->addWidget(tab);
     }
@@ -556,6 +558,7 @@ ProjectBin::ProjectBin(QWidget* parent) : QWidget{parent} {
     overflow->setObjectName("bin-tab");
     overflow->setIcon(icons::toolIcon(icons::Glyph::DotsThree, 14));
     overflow->setFixedSize(26, 24);
+    overflow->setFocusPolicy(Qt::NoFocus);
     overflow->setToolTip("What else this panel can do");
     tabRow->addWidget(overflow);
     connect(overflow, &QPushButton::clicked, this, [this] { overflowMenu(); });
