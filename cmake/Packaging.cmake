@@ -206,7 +206,7 @@ elseif(APPLE)
 
     # What Finder titles the mounted volume, and what the eject entry in the
     # sidebar is called. CPACK_PACKAGE_FILE_NAME is the default and it is the
-    # file name -- CutReel-0.7.1-Darwin-arm64 -- which is right for a download
+    # file name -- CutReel-0.7.2-Darwin-arm64 -- which is right for a download
     # and wrong for a window title.
     set(CPACK_DMG_VOLUME_NAME "CutReel ${PROJECT_VERSION}")
 
@@ -242,7 +242,7 @@ else()
 
     # --- The .deb --------------------------------------------------------------
     # Lowercase, because a Debian package name has to be. The rest of CPack's
-    # naming is left to the generator, which spells it cutreel_0.7.1_amd64.deb.
+    # naming is left to the generator, which spells it cutreel_0.7.2_amd64.deb.
     set(CPACK_DEBIAN_PACKAGE_NAME "cutreel")
     set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
     set(CPACK_DEBIAN_PACKAGE_SECTION "video")
