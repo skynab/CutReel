@@ -426,6 +426,12 @@ QDockWidget[focused="true"] #dock-header { background: %SURFACE%; border-color: 
 QDockWidget[focused="true"] #dock-body { border-color: %ACCENT600%; }
 /* The header is the mockup's tab strip: the panel's name as one tab,
    underlined in the accent while focused and in neutral otherwise. */
+/* A panel's own row, lifted into the header (see chrome::liftFirstRow), keeps
+   no bar chrome of its own -- the header is the bar. */
+#dock-header #bin-tabbar, #dock-header #inspector-tabbar, #dock-header #channel-header,
+#dock-header #chrome-viewer-bar {
+    background: transparent; border: none;
+}
 #dock-header-tab {
     color: %MUTED%; font-size: 11.5px; padding: 0 10px;
     border-bottom: 2px solid %NEUTRAL600%;

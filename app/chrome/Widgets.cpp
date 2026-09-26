@@ -73,7 +73,12 @@ public:
 
     [[nodiscard]] QSize sizeHint() const override { return collapsedSize(QWidget::sizeHint()); }
     [[nodiscard]] QSize minimumSizeHint() const override {
-        return collapsedSize(QWidget::minimumSizeHint());
+        // Width capped: a panel's own row lifted in here is wider than some
+        // docks are allowed to be (the effect controls have a maximum), and
+        // the header must clip rather than force the dock wider.
+        QSize size = collapsedSize(QWidget::minimumSizeHint());
+        size.setWidth(std::min(size.width(), 120));
+        return size;
     }
 
 private:
@@ -222,6 +227,7 @@ QWidget* buildDockHeader(QWidget* parent, const QString& title,
     tab->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
     row->addWidget(tab);
     if (tools != nullptr) {
+        header->setProperty("hasTools", true);
         tools->setParent(header);
         row->addWidget(tools, 1);
     } else {
@@ -245,6 +251,15 @@ QWidget* buildDockHeader(QWidget* parent, const QString& title,
         header->installEventFilter(new DockDragForwarder(dock, header));
     }
     return header;
+}
+
+QWidget* liftFirstRow(QWidget* panel) {
+    QLayout* layout = panel != nullptr ? panel->layout() : nullptr;
+    if (layout == nullptr || layout->count() == 0 || layout->itemAt(0)->widget() == nullptr) {
+        return nullptr;
+    }
+    std::unique_ptr<QLayoutItem> item{layout->takeAt(0)};
+    return item->widget();
 }
 
 void setElidedText(QLabel* label, const QString& text, Qt::TextElideMode mode) {

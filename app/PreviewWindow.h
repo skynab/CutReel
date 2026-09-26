@@ -814,6 +814,13 @@ public:
     /// somebody is assembling, and the reverse.
     void setWorkspace(const QString& name);
 
+    /// What the workspace tabs and File > Layout do: go to the workspace and
+    /// put its panes back in the default arrangement, wherever a drag had
+    /// left them -- picking the workspace already showing included, which is
+    /// how a scrambled one is put right. `setWorkspace` on its own only goes
+    /// there, restoring whatever arrangement it was last left in.
+    void chooseLayout(const QString& name);
+
 private:
     /// Everything in the chrome that describes state rather than causing it.
     /// Gather what the bars say, and hand it to the code that says it.

@@ -105,6 +105,12 @@ struct Hooks {
 QWidget* buildDockHeader(QWidget* parent, const QString& title,
                          const std::function<void()>& onClose = {}, QWidget* tools = nullptr);
 
+/// Detach the first row of a panel's own layout -- its tab strip or toolbar --
+/// and hand it back, for `buildDockHeader`'s `tools`. Null, and the panel
+/// untouched, when the first item is not a widget. Lifting the row means a
+/// panel's dock has one bar instead of a header with a second bar under it.
+QWidget* liftFirstRow(QWidget* panel);
+
 QWidget* buildTitleBar(QWidget* parent, Bars& bars);
 QWidget* buildStatusBar(QWidget* parent, Bars& bars);
 QWidget* buildToolPalette(QWidget* parent, Bars& bars,

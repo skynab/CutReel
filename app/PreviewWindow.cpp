@@ -412,7 +412,8 @@ void PreviewWindow::buildViewerLayout() {
     programLayout->addWidget(mixer_, 1);
     programLayout->addWidget(clipStrip_);
     programLayout->addWidget(buildTransportBar());
-    dockProgram_ = makeDock("dock-program", tr("Program"), programColumn);
+    dockProgram_ = makeDock("dock-program", tr("Program"), programColumn, true,
+                            chrome::liftFirstRow(programColumn));
 
     auto* leftColumn = new QWidget(this);
     leftColumn->setObjectName("audio-side");
@@ -440,10 +441,11 @@ void PreviewWindow::buildViewerLayout() {
     palette_->addPage(tr("Gallery"), app::icons::Glyph::Camera, gallery_->stillsPage());
     palette_->addPage(tr("LUTs"), app::icons::Glyph::FolderOpen, gallery_->lutsPage());
     gallery_->hide();
-    dockPalette_ = makeDock("dock-palette", tr("Color"), palette_);
+    dockPalette_ =
+        makeDock("dock-palette", tr("Color"), palette_, true, chrome::liftFirstRow(palette_));
 
     // The media pane.
-    dockBin_ = makeDock("dock-bin", tr("Project Bin"), bin_);
+    dockBin_ = makeDock("dock-bin", tr("Project Bin"), bin_, true, chrome::liftFirstRow(bin_));
 
     // Scopes: read while grading, beside the picture rather than off in the
     // parameter column, which is where the design used to put them, fixed at
@@ -454,7 +456,8 @@ void PreviewWindow::buildViewerLayout() {
     // vectorscope or a waveform read at a sliver of its old width is an
     // instrument nobody can actually read.
     scopes_->setMinimumWidth(280);
-    dockScopes_ = makeDock("dock-scopes", tr("Scopes"), scopes_);
+    dockScopes_ =
+        makeDock("dock-scopes", tr("Scopes"), scopes_, true, chrome::liftFirstRow(scopes_));
 
     // The grade chain sits over the parameters it navigates. The two used to
     // share one fixed column with no drag handle between them on purpose --
@@ -474,7 +477,7 @@ void PreviewWindow::buildViewerLayout() {
     // every control below this line is going to write to.
     auto* targetRow = new QWidget(bars_.nodesBox);
     auto* targetLayout = new QHBoxLayout(targetRow);
-    targetLayout->setContentsMargins(0, 0, 0, 6);
+    targetLayout->setContentsMargins(0, 0, 0, 0);
     targetLayout->setSpacing(6);
     auto* targetCaption = new QLabel(tr("Grading"), targetRow);
     targetCaption->setObjectName("section-label");
@@ -534,11 +537,14 @@ void PreviewWindow::buildViewerLayout() {
             &PreviewWindow::applyInputLut);
     connect(colorManagement_, &app::ColorManagement::deliveryChosen, this,
             [this](const model::Sequence::Output& wanted) { setDelivery(wanted); });
-    dockGradeChain_ = makeDock("dock-grade-chain", tr("Grade Chain"), bars_.nodesBox);
+    dockGradeChain_ = makeDock("dock-grade-chain", tr("Grade Chain"), bars_.nodesBox, true,
+                               chrome::liftFirstRow(bars_.nodesBox));
 
-    dockEffects_ = makeDock("dock-effects", tr("Effect Controls"), effects_);
+    dockEffects_ = makeDock("dock-effects", tr("Effect Controls"), effects_, true,
+                            chrome::liftFirstRow(effects_));
 
-    dockChannel_ = makeDock("dock-channel", tr("Channel Strip"), channel_);
+    dockChannel_ = makeDock("dock-channel", tr("Channel Strip"), channel_, true,
+                            chrome::liftFirstRow(channel_));
 
     // Floors, so no panel can be squeezed to a sliver by its neighbours. A
     // scope four pixels tall or a mixer with no meter is worse than one
@@ -833,8 +839,20 @@ void PreviewWindow::syncDockHeaders() {
         for (QDockWidget* other : dockHost_->tabifiedDockWidgets(dock)) {
             sharesStrip = sharesStrip || other->toggleViewAction()->isChecked();
         }
-        const bool show = dock->isFloating() || !sharesStrip;
+        // Three states. Alone (or floating) the header is whole. Sharing a
+        // tab strip, the strip already names the panel and closes it, so the
+        // name and close button go -- and a header with a panel's own row
+        // lifted into it (see chrome::liftFirstRow) keeps just that row,
+        // since the panel is unusable without it; one without folds away.
+        const bool whole = dock->isFloating() || !sharesStrip;
+        const bool keepRow = !whole && header->property("hasTools").toBool();
+        const bool show = whole || keepRow;
         header->setVisible(show);
+        for (const char* name : {"dock-header-tab", "dock-header-close"}) {
+            if (QWidget* part = header->findChild<QWidget*>(name)) {
+                part->setVisible(whole);
+            }
+        }
         // Hidden is not enough: the dock still reserves the header's
         // sizeHint for its title area, leaving a blank band under the tab
         // strip (see DockHeader in Widgets.cpp).
@@ -869,6 +887,11 @@ void PreviewWindow::applyDefaultDockLayout() {
     dockHost_->tabifyDockWidget(dockGradeChain_, dockScopes_);
     dockHost_->tabifyDockWidget(dockEffects_, dockChannel_);
     dockHost_->addDockWidget(Qt::BottomDockWidgetArea, dockTimeline_);
+    // No workspace puts the viewer away (Audio swaps its picture for the
+    // mixer inside the same dock), so nothing else would bring it back after
+    // it was closed -- and putting the panes back where they belong has to
+    // include the ones that were closed.
+    dockProgram_->show();
     // The ratios the deleted splitters' stretch factors used to hold: the
     // viewer three times as wide as either side column, and the panel row
     // three units tall against the timeline's two. `resizeDocks` wants every
@@ -2985,7 +3008,7 @@ void PreviewWindow::buildMenus() {
     // actions already bound, go in here.
     bars_.menuBar = chrome::buildMenuBar(
         this, actions_, kWorkspaces, bars_.workspaceActions,
-        [this](const QString& name) { setWorkspace(name); },
+        [this](const QString& name) { chooseLayout(name); },
         [this](QMenuBar* bar) {
             windowMenu_ = bar->addMenu("Window");
             QMenu* help = bar->addMenu("Help");
@@ -3017,7 +3040,7 @@ void PreviewWindow::buildDockMenuActions() {
 
 chrome::Hooks PreviewWindow::chromeHooks() {
     chrome::Hooks hooks;
-    hooks.chooseWorkspace = [this](const QString& name) { setWorkspace(name); };
+    hooks.chooseWorkspace = [this](const QString& name) { chooseLayout(name); };
     hooks.chooseTool = [this](app::TimelineWidget::Tool tool) { timeline_->setTool(tool); };
     hooks.showSource = [this](bool on) { setSourceShown(on); };
     hooks.showProgram = [this](bool on) { setProgramShown(on); };
@@ -3193,6 +3216,21 @@ void PreviewWindow::syncGradeTarget() {
                 .arg(QString::fromStdString(clip->name.empty() ? std::string{"Clip"} : clip->name));
     }
     chrome::setElidedText(gradeTargetLabel_, caption);
+}
+
+void PreviewWindow::chooseLayout(const QString& name) {
+    setWorkspace(name);
+    // Deliver is a page of its own with no panes to arrange.
+    if (name == "Deliver") {
+        return;
+    }
+    applyDefaultDockLayout();
+    // Again, as reset-panels does: rebuilding the arrangement can show docks
+    // this workspace keeps put away, and a same-name call re-applies which
+    // are up without restoring anything.
+    setWorkspace(name);
+    QSettings settings = makeSettings();
+    settings.setValue(layoutKey(workspace_), dockHost_->saveState(kDockStateVersion));
 }
 
 void PreviewWindow::setWorkspace(const QString& name) {
