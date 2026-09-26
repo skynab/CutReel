@@ -1209,6 +1209,9 @@ private:
     /// shown one -- the strip is that group's header -- and show it again on
     /// a dock alone in its group, or floating.
     void syncDockHeaders();
+    /// A tab has been pulled off its strip with the pointer still down: float
+    /// its dock and carry on dragging it by its header.
+    void dragOutDock(QDockWidget* dock);
 
     /// The chrome. None of it owns anything: every one of these is a child of
     /// the window, and Qt deletes them with it.

@@ -71,7 +71,16 @@ class DockHeader : public QWidget {
 public:
     using QWidget::QWidget;
 
-    [[nodiscard]] QSize sizeHint() const override { return collapsedSize(QWidget::sizeHint()); }
+    [[nodiscard]] QSize sizeHint() const override {
+        // Always the height it is drawn at, never what its contents ask for:
+        // the dock sizes its title area from this, and a lifted toolbar
+        // whose sliders want more than 30px made the timeline's area 36 --
+        // the header sat centred in it, three pixels below the dock's top,
+        // so the gap above the timeline was three wider than every other.
+        QSize size = QWidget::sizeHint();
+        size.setHeight(kDockHeaderHeight);
+        return collapsedSize(size);
+    }
     [[nodiscard]] QSize minimumSizeHint() const override {
         // Width capped: a panel's own row lifted in here is wider than some
         // docks are allowed to be (the effect controls have a maximum), and
@@ -251,6 +260,20 @@ QWidget* buildDockHeader(QWidget* parent, const QString& title,
         header->installEventFilter(new DockDragForwarder(dock, header));
     }
     return header;
+}
+
+void beginDockDrag(QDockWidget* dock, QPoint at) {
+    QWidget* header = dock != nullptr ? dock->titleBarWidget() : nullptr;
+    if (header == nullptr) {
+        return;
+    }
+    dock->move(QCursor::pos() - at - header->mapTo(dock, QPoint{0, 0}));
+    // Through the header rather than to the dock: DockDragForwarder, on the
+    // header, is what forwards the press and then holds the pointer, so the
+    // moves that follow keep reaching the dock.
+    QMouseEvent press(QEvent::MouseButtonPress, QPointF{at}, QPointF{header->mapToGlobal(at)},
+                      Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+    QCoreApplication::sendEvent(header, &press);
 }
 
 QWidget* liftFirstRow(QWidget* panel) {

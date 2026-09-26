@@ -1,6 +1,7 @@
 // Small widget factories, and the bars that are only widgets.
 #pragma once
 
+#include <QPoint>
 #include <QPushButton>
 #include <QString>
 #include <QStringList>
@@ -14,6 +15,7 @@
 #include "Bars.h"
 
 class QAbstractItemView;
+class QDockWidget;
 class QFrame;
 class QLabel;
 
@@ -104,6 +106,14 @@ struct Hooks {
 /// than a header with a toolbar under it.
 QWidget* buildDockHeader(QWidget* parent, const QString& title,
                          const std::function<void()>& onClose = {}, QWidget* tools = nullptr);
+
+/// Start dragging `dock` by its header, as if the pointer had just been
+/// pressed on it -- for a dock that has just been floated out from under a
+/// pointer that is already down (a tab pulled off a strip), so the drag
+/// carries on as an ordinary header drag and can be dropped back anywhere.
+/// `at` is where on the header the pointer is taken to be, and the dock is
+/// moved to put that point under the pointer.
+void beginDockDrag(QDockWidget* dock, QPoint at);
 
 /// Detach the first row of a panel's own layout -- its tab strip or toolbar --
 /// and hand it back, for `buildDockHeader`'s `tools`. Null, and the panel

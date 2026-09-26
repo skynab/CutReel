@@ -31,6 +31,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMimeData>
+#include <QPointer>
 #include <QProgressDialog>
 #include <QRegularExpression>
 #include <QSlider>
@@ -109,14 +110,49 @@ constexpr int kDockStateVersion = 1;
 /// double-click floats, the same gesture a header already answers to.
 class DockTabBarFilter : public QObject {
 public:
-    DockTabBarFilter(std::function<QDockWidget*(quintptr)> resolve, QObject* parent)
-        : QObject{parent}, resolve_{std::move(resolve)} {}
+    DockTabBarFilter(std::function<QDockWidget*(quintptr)> resolve,
+                     std::function<void(QDockWidget*)> dragOut, QObject* parent)
+        : QObject{parent}, resolve_{std::move(resolve)}, dragOut_{std::move(dragOut)} {}
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override {
         auto* bar = qobject_cast<QTabBar*>(watched);
         if (bar == nullptr) {
             return false;
+        }
+        if (synthesizing_) {
+            return false;
+        }
+        if (event->type() == QEvent::MouseButtonPress) {
+            auto* mouse = static_cast<QMouseEvent*>(event);
+            pressed_ = mouse->button() == Qt::LeftButton
+                           ? dockAt(bar, bar->tabAt(mouse->position().toPoint()))
+                           : nullptr;
+            pulledOff_ = false;
+        } else if (event->type() == QEvent::MouseMove && pressed_ != nullptr) {
+            // Pulled clear of the strip, up or down: Qt's own version of this
+            // never started (see the class comment), so this is it. A sideways
+            // drag stays with the tab bar, which reorders the tabs.
+            const QPoint pos = static_cast<QMouseEvent*>(event)->position().toPoint();
+            constexpr int kPast = 12;
+            if (!pulledOff_ && (pos.y() < -kPast || pos.y() > bar->height() + kPast)) {
+                pulledOff_ = true;
+                // The strip is mid-way through moving a tab; let it finish
+                // before it loses the tab, or it is left thinking a drag is on.
+                QMouseEvent release(QEvent::MouseButtonRelease, QPointF{pos},
+                                    QPointF{bar->mapToGlobal(pos)}, Qt::LeftButton, Qt::NoButton,
+                                    Qt::NoModifier);
+                synthesizing_ = true;
+                QCoreApplication::sendEvent(bar, &release);
+                synthesizing_ = false;
+                dragOut_(pressed_);
+            }
+            if (pulledOff_) {
+                return true;
+            }
+        } else if (event->type() == QEvent::MouseButtonRelease && pulledOff_) {
+            pulledOff_ = false;
+            return true;
         }
         if (event->type() == QEvent::MouseButtonDblClick) {
             auto* mouse = static_cast<QMouseEvent*>(event);
@@ -160,6 +196,10 @@ private:
     }
 
     std::function<QDockWidget*(quintptr)> resolve_;
+    std::function<void(QDockWidget*)> dragOut_;
+    QPointer<QDockWidget> pressed_;
+    bool pulledOff_{false};
+    bool synthesizing_{false};
 };
 
 }  // namespace
@@ -802,10 +842,35 @@ void PreviewWindow::buildWindowLayout() {
     buildDockMenuActions();
 }
 
+void PreviewWindow::dragOutDock(QDockWidget* dock) {
+    // Deferred a turn: floating takes the tab out of the strip whose event is
+    // still being handled.
+    QTimer::singleShot(0, dock, [dock] {
+        dock->setFloating(true);
+        // The full header, at once: syncDockHeaders waits for the button to
+        // come up, and the drag is carried by this header.
+        if (QWidget* header = dock->titleBarWidget()) {
+            header->setProperty("collapsed", false);
+            header->setVisible(true);
+            for (const char* name : {"dock-header-tab", "dock-header-close"}) {
+                if (QWidget* part = header->findChild<QWidget*>(name)) {
+                    part->setVisible(true);
+                }
+            }
+            header->updateGeometry();
+        }
+        // Once the floating window has been laid out and shown.
+        QTimer::singleShot(30, dock, [dock] { chrome::beginDockDrag(dock, QPoint{60, 15}); });
+    });
+}
+
 void PreviewWindow::syncDockHeaders() {
     // Qt makes a tab strip when a group forms and drops it when it dissolves,
     // so this is where a new one is found (see DockTabBarFilter).
     for (QTabBar* bar : dockHost_->findChildren<QTabBar*>(QString{}, Qt::FindDirectChildrenOnly)) {
+        // A long name ("Effect Controls") was cut to "Effect Cont..." with
+        // the whole strip empty beside it.
+        bar->setElideMode(Qt::ElideNone);
         if (!bar->property("dockTabHook").toBool()) {
             bar->setProperty("dockTabHook", true);
             bar->installEventFilter(new DockTabBarFilter(
@@ -817,7 +882,7 @@ void PreviewWindow::syncDockHeaders() {
                     }
                     return nullptr;
                 },
-                bar));
+                [this](QDockWidget* dock) { dragOutDock(dock); }, bar));
         }
     }
     // Never mid-drag: querying tab groups while Qt holds a gap item in place
