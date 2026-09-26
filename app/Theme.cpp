@@ -370,6 +370,15 @@ QSplitter::handle:horizontal { width: 1px; }
 QSplitter::handle:vertical { height: 1px; }
 QSplitter::handle:hover { background: %ACCENT%; }
 
+/* The dock host: panels are cards floating on a darker well, six pixels
+   apart, as the docking mockup draws them. The gutters are the host's own
+   separators -- a different selector from QSplitter::handle above, since
+   QMainWindow draws its internal splits through this one -- left clear so
+   the well shows, and washed with the accent while hovered or dragged. */
+#dock-host { background: %WELL%; }
+QMainWindow::separator { background: transparent; width: 6px; height: 6px; }
+QMainWindow::separator:hover { background: %ACCENTWASH%; }
+
 QProgressBar {
     border: 1px solid %DIVIDER%; border-radius: 5px; background: %BG%;
     max-height: 8px; text-align: center; color: transparent;
@@ -393,12 +402,72 @@ QMessageBox QLabel { color: %TEXT%; }
         R"(/* --- the window's own chrome ------------------------------------------- */
 
 #chrome-titlebar { background: %SURFACE%; border-bottom: 1px solid %DIVIDER%; }
-#chrome-toolbar, #chrome-timeline-bar, #chrome-viewer-bar {
+#chrome-toolbar, #chrome-viewer-bar {
     background: %BG%; border-bottom: 1px solid %DIVIDER%;
 }
 #chrome-statusbar { background: %BG%; border-top: 1px solid %DIVIDER%; }
+/* A dock's title bar. Plain and thin on purpose: the panel it belongs to
+   already has whatever chrome it needs, so this only has to say what the
+   panel is (when it says anything at all -- see chrome::buildDockHeader)
+   and give a place to grab it by. */
+/* A dock's card: Qt draws no border on a docked QDockWidget, so the outline
+   is the header's (top half) and the body wrapper's (bottom half) --
+   hairline, rounded, and the same grey for every card whether or not it
+   holds the keyboard focus (PreviewWindow sets the "focused" property, which
+   shows only in the header's fill and its tab's accent underline). */
+#dock-header {
+    background: %BG%; border: 1px solid %DIVIDER%;
+    border-top-left-radius: 6px; border-top-right-radius: 6px;
+}
+#dock-body {
+    border: 1px solid %DIVIDER%; border-top: none;
+    border-bottom-left-radius: 6px; border-bottom-right-radius: 6px;
+}
+QDockWidget[focused="true"] #dock-header { background: %SURFACE%; }
+/* The header is the mockup's tab strip: the panel's name as one tab,
+   underlined in the accent while focused and in neutral otherwise. */
+/* A panel's own row, lifted into the header (see chrome::liftFirstRow), keeps
+   no bar chrome of its own -- the header is the bar. */
+#dock-header #bin-tabbar, #dock-header #inspector-tabbar, #dock-header #channel-header,
+#dock-header #chrome-viewer-bar {
+    background: transparent; border: none;
+}
+#dock-header-tab {
+    color: %MUTED%; font-size: 11.5px; padding: 0 10px;
+    border-bottom: 2px solid %NEUTRAL600%;
+}
+QDockWidget[focused="true"] #dock-header-tab { color: %TEXT%; border-bottom-color: %ACCENT%; }
+/* The global QPushButton padding otherwise squeezes the 16px button's
+   content box; zeroed, then a little bottom padding lifts the glyph to the
+   tab label's centre line (the label's own underline makes that line sit
+   above the header's midpoint). */
+#dock-header-close { border: none; border-radius: 4px; padding: 0 0 5px 0; margin: 0; }
+#dock-header-close:hover { background: %HOVER%; }
+/* Tabifying docks together is the one place Qt draws its own tab bar
+   instead of #dock-header. Styled as the same strip: 30px tall, tabs
+   underlined when selected. */
+QTabBar {
+    background: %BG%; border: 1px solid %DIVIDER%;
+    border-top-left-radius: 6px; border-top-right-radius: 6px;
+}
+QTabBar::tab {
+    background: transparent; color: %MUTED%; border: none;
+    border-bottom: 2px solid transparent; margin: 0; padding: 0 10px;
+    font-size: 11.5px; min-height: 28px;
+    /* Once a stylesheet touches QTabBar at all, Qt stops sizing tabs from
+       the native style's own text-width calculation and falls back to a
+       much smaller default -- measured directly, "Grade Chain" and even
+       "Scopes" both came out elided to a few letters despite the dock
+       column around them being hundreds of pixels wide. An explicit
+       min-width is the standard way back to tabs sized for their label. */
+    min-width: 88px;
+}
+QTabBar::tab:hover { background: %BINHOVER%; color: %TEXT%; }
+QTabBar::tab:selected { color: %TEXT%; border-bottom-color: %ACCENT%; }
+/* The preview drawn while a dock is dragged over a place it can land. */
+QRubberBand { background: %ACCENTWASH%; border: 1px solid %ACCENT%; border-radius: 6px; }
 #chrome-statusbar QLabel, #chrome-toolbar QLabel[muted="true"],
-#chrome-timeline-bar QLabel[muted="true"], #chrome-viewer-bar QLabel[muted="true"] {
+#dock-header-tools QLabel[muted="true"], #chrome-viewer-bar QLabel[muted="true"] {
     color: %MUTED%; font-size: 11px;
 }
 /* A readout that can be pressed. It carries a border at rest rather than
@@ -424,6 +493,9 @@ QMessageBox QLabel { color: %TEXT%; }
 #chrome-format:hover { background: %HOVER%; color: %TEXT%; }
 #chrome-format:disabled { color: %MUTED%; background: transparent; border-color: transparent; }
 #chrome-format::drop-down { border: none; width: 14px; }
+/* FormatCombo paints its own "⌄" (see chrome/Widgets.cpp); the global caret
+   image above would be a second one beside it. */
+#chrome-format::down-arrow { image: none; width: 0; height: 0; margin: 0; }
 #chrome-brand { font-weight: 600; padding: 0 6px; }
 #viewer-well { background: %WELL%; }
 #deliver-side { background: %SURFACE%; }

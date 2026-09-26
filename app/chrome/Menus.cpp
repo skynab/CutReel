@@ -167,20 +167,23 @@ QMenuBar* buildMenuBar(QWidget* parent, ActionRouter& router, const QStringList&
     addItem(router, effects, "match-shot");
 
     QMenu* view = bar->addMenu("View");
-    QMenu* workspaceMenu = view->addMenu("Workspace");
-    for (const QString& name : workspaces) {
-        QAction* action = workspaceMenu->addAction(name);
-        action->setCheckable(true);
-        workspaceActions.insert(name, action);
-        QObject::connect(action, &QAction::triggered, bar,
-                         [chooseWorkspace, name] { chooseWorkspace(name); });
-    }
-    view->addSeparator();
     addItem(router, view, "zoom-in");
     addItem(router, view, "zoom-out");
     addItem(router, view, "zoom-fit");
     view->addSeparator();
     addItem(router, view, "safe-guides");
+
+    // The four arrangements of the panes, the same as the tabs along the top:
+    // choosing one puts its panes back in their default places. A menu of its
+    // own, beside Panes (added by the caller, just below).
+    QMenu* layoutMenu = bar->addMenu("Layout");
+    for (const QString& name : workspaces) {
+        QAction* action = layoutMenu->addAction(name);
+        action->setCheckable(true);
+        workspaceActions.insert(name, action);
+        QObject::connect(action, &QAction::triggered, bar,
+                         [chooseWorkspace, name] { chooseWorkspace(name); });
+    }
 
     addWindowMenus(bar);
     return bar;
