@@ -412,8 +412,9 @@ QMessageBox QLabel { color: %TEXT%; }
    and give a place to grab it by. */
 /* A dock's card: Qt draws no border on a docked QDockWidget, so the outline
    is the header's (top half) and the body wrapper's (bottom half) --
-   hairline, rounded, and picking up the accent while the dock holds the
-   keyboard focus (PreviewWindow sets the "focused" property). */
+   hairline, rounded, and the same grey for every card whether or not it
+   holds the keyboard focus (PreviewWindow sets the "focused" property, which
+   shows only in the header's fill and its tab's accent underline). */
 #dock-header {
     background: %BG%; border: 1px solid %DIVIDER%;
     border-top-left-radius: 6px; border-top-right-radius: 6px;
@@ -422,8 +423,7 @@ QMessageBox QLabel { color: %TEXT%; }
     border: 1px solid %DIVIDER%; border-top: none;
     border-bottom-left-radius: 6px; border-bottom-right-radius: 6px;
 }
-QDockWidget[focused="true"] #dock-header { background: %SURFACE%; border-color: %ACCENT600%; }
-QDockWidget[focused="true"] #dock-body { border-color: %ACCENT600%; }
+QDockWidget[focused="true"] #dock-header { background: %SURFACE%; }
 /* The header is the mockup's tab strip: the panel's name as one tab,
    underlined in the accent while focused and in neutral otherwise. */
 /* A panel's own row, lifted into the header (see chrome::liftFirstRow), keeps

@@ -238,6 +238,16 @@ QWidget* buildDockHeader(QWidget* parent, const QString& title,
     if (tools != nullptr) {
         header->setProperty("hasTools", true);
         tools->setParent(header);
+        // Inside the header's own 1px border, top and bottom: a lifted row
+        // built for a 34px bar of its own (the viewer's, the bin's) otherwise
+        // overflows the header and paints over its bottom edge.
+        tools->setFixedHeight(kDockHeaderHeight - 2);
+        // The rules that strip a lifted row's own bar chrome are keyed to the
+        // header as its ancestor, and a widget that was polished before it
+        // was reparented into it keeps its old look -- the viewer bar kept its
+        // bottom border, a second line above the header's own.
+        tools->style()->unpolish(tools);
+        tools->style()->polish(tools);
         row->addWidget(tools, 1);
     } else {
         row->addStretch(1);
@@ -646,7 +656,9 @@ QWidget* buildViewerBar(QWidget* parent, Bars& bars, ActionRouter& router, const
 
     auto* segment = new QWidget(bar);
     segment->setObjectName("segment-group");
-    segment->setFixedHeight(28);
+    // Shorter than the header's inner height (28), so its outline sits clear of
+    // the header's own edges.
+    segment->setFixedHeight(24);
     auto* segmentRow = new QHBoxLayout(segment);
     segmentRow->setContentsMargins(2, 2, 2, 2);
     segmentRow->setSpacing(2);
@@ -655,7 +667,7 @@ QWidget* buildViewerBar(QWidget* parent, Bars& bars, ActionRouter& router, const
     // The dot is what says "toggle" rather than "tab": two tabs in a group mean
     // one of them is on, and these two are independent.
     for (QPushButton* tab : {bars.sourceTab, bars.programTab}) {
-        tab->setFixedHeight(24);
+        tab->setFixedHeight(20);
         tab->setIconSize(QSize(13, 13));
         segmentRow->addWidget(tab);
     }
