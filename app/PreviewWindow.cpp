@@ -3958,6 +3958,9 @@ void PreviewWindow::refresh() {
         std::max<std::int64_t>(0, liveSequence()->duration().frames() - position_.frames()),
         liveSequence()->frameRate(), dropFrame);
     bars_.remaining->setText("-" + QString::fromStdString(left.toString()));
+    // Greyed out when there is nowhere to go, rather than pressed to no effect.
+    bars_.previousMarkerButton->setEnabled(liveSequence()->markerBefore(position_) != nullptr);
+    bars_.nextMarkerButton->setEnabled(liveSequence()->markerAfter(position_) != nullptr);
     const model::Track* track = liveSequence()->findTrack(selectedTrack_);
     const model::Clip* clip = track != nullptr ? track->find(selectedClip_) : nullptr;
     viewerOverlay_->setInfo(

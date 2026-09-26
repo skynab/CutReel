@@ -130,6 +130,33 @@ QPainterPath pathFor(Glyph glyph) {
             path.closeSubpath();
             return path;
 
+        case Glyph::MarkerBack:
+            // A narrow bookmark with a chevron pointing away from it: the
+            // marker you are about to land on, and which way it is.
+            path.moveTo(9.0, 3.0);
+            path.lineTo(13.5, 3.0);
+            path.lineTo(13.5, 12.0);
+            path.lineTo(11.25, 10.4);
+            path.lineTo(9.0, 12.0);
+            path.closeSubpath();
+            path.moveTo(6.5, 5.0);
+            path.lineTo(3.5, 7.5);
+            path.lineTo(6.5, 10.0);
+            return path;
+
+        case Glyph::MarkerAhead:
+            // The same glyph mirrored, so the pair reads as one control.
+            path.moveTo(2.5, 3.0);
+            path.lineTo(7.0, 3.0);
+            path.lineTo(7.0, 12.0);
+            path.lineTo(4.75, 10.4);
+            path.lineTo(2.5, 12.0);
+            path.closeSubpath();
+            path.moveTo(9.5, 5.0);
+            path.lineTo(12.5, 7.5);
+            path.lineTo(9.5, 10.0);
+            return path;
+
         case Glyph::Split:
             // Two pieces pulled apart, with the cut between them. Deliberately
             // not the scissors: the scissors is the blade *tool*, and two

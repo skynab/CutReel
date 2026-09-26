@@ -169,6 +169,62 @@ TEST_CASE("Deliver's Marker range skips a point marker rather than rendering one
                 summary.toUtf8().constData());
 }
 
+// The previous/next marker buttons either side of Add Marker on the timeline:
+// they move the playhead the way the menu items do, and grey out when there is
+// no marker in that direction.
+TEST_CASE("Stepping between markers from the timeline buttons", "[gui]") {
+    auto& window = zaro::app::testing::gui();
+    const zaro::app::testing::Rewind rewind;
+
+    auto* previous = window.findChild<QPushButton*>("timeline-previous-marker");
+    auto* next = window.findChild<QPushButton*>("timeline-next-marker");
+    if (previous == nullptr || next == nullptr) {
+        zaro::app::testing::failf("the timeline has no previous/next marker buttons\n");
+        return;
+    }
+
+    const auto sequenceId = window.project().activeSequence();
+    const auto rate = window.sequence()->frameRate();
+    REQUIRE(window.sequence()->duration().frames() > 20);
+    for (const std::int64_t frame : {5, 15}) {
+        auto added = zaro::edit::makeAddMarker(window.project(), sequenceId,
+                                               zaro::time::RationalTime{frame, rate},
+                                               zaro::time::RationalTime{0, rate}, "note");
+        REQUIRE(added);
+        window.commands().execute(window.project(), std::move(*added));
+    }
+
+    window.setPosition(zaro::time::RationalTime{0, rate});
+    QApplication::processEvents();
+    if (previous->isEnabled() || !next->isEnabled()) {
+        zaro::app::testing::failf("at the start, only Next should be enabled\n");
+        return;
+    }
+
+    next->click();
+    QApplication::processEvents();
+    if (window.position() != zaro::time::RationalTime{5, rate}) {
+        zaro::app::testing::failf("Next did not land on the first marker\n");
+        return;
+    }
+    next->click();
+    QApplication::processEvents();
+    if (window.position() != zaro::time::RationalTime{15, rate}) {
+        zaro::app::testing::failf("Next did not land on the second marker\n");
+        return;
+    }
+    if (!previous->isEnabled() || next->isEnabled()) {
+        zaro::app::testing::failf("on the last marker, only Previous should be enabled\n");
+        return;
+    }
+
+    previous->click();
+    QApplication::processEvents();
+    if (window.position() != zaro::time::RationalTime{5, rate}) {
+        zaro::app::testing::failf("Previous did not land back on the first marker\n");
+    }
+}
+
 // Delivery: the curve a sequence goes out through, and the highlight
 // rolloff that keeps the encoder from clipping.
 //

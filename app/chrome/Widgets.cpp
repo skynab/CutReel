@@ -452,13 +452,12 @@ void runs(QPushButton* button, ActionRouter& router, const char* actionId) {
                      [&router, id = std::string{actionId}] { router.trigger(id); });
 }
 
-/// The Add Title tooltip, with whatever key is actually bound to it.
+/// A tooltip, with whatever key is actually bound to the action it runs.
 ///
 /// Written from the keymap rather than spelled out, for two reasons: the
 /// shortcut is rebindable, and `Ctrl+Shift+T` is not what a Mac shows -- Qt
 /// renders the same binding as the platform writes it.
-QString titleTip(const std::string& shortcut) {
-    const QString base = QStringLiteral("Add a title at the playhead");
+QString keyedTip(const QString& base, const std::string& shortcut) {
     if (shortcut.empty()) {
         return base;
     }
@@ -799,7 +798,8 @@ QWidget* buildTimelinePane(QWidget* parent, Bars& bars, ActionRouter& router, co
     // there. It sits with the razor and the dissolve because all three do the
     // same kind of thing: put something down where the playhead is.
     QPushButton* titleButton = iconButton(bar, app::icons::Glyph::TextT,
-                                          titleTip(router.keymap().shortcutFor("add-title")));
+                                          keyedTip(QStringLiteral("Add a title at the playhead"),
+                                                   router.keymap().shortcutFor("add-title")));
     // Named, so the test that presses it can find it. The bin's own Add Title
     // button already answers to "add-title"; this one says where it is, or a
     // search from the window would turn up two buttons and pick either.
@@ -813,10 +813,27 @@ QWidget* buildTimelinePane(QWidget* parent, Bars& bars, ActionRouter& router, co
     QObject::connect(bars.snapButton, &QPushButton::clicked, bars.snapButton, hooks.setSnapEnabled);
     row->addWidget(bars.snapButton);
 
+    // Previous, add, next: the add button between the two that move between
+    // markers, so the three read as one group.
+    bars.previousMarkerButton =
+        iconButton(bar, app::icons::Glyph::MarkerBack,
+                   keyedTip(QStringLiteral("Go to the previous marker"),
+                            router.keymap().shortcutFor("previous-marker")));
+    bars.previousMarkerButton->setObjectName("timeline-previous-marker");
+    runs(bars.previousMarkerButton, router, "previous-marker");
+    row->addWidget(bars.previousMarkerButton);
+
     QPushButton* markerButton =
         iconButton(bar, app::icons::Glyph::Bookmark, "Add a marker at the playhead (M)");
     runs(markerButton, router, "add-marker");
     row->addWidget(markerButton);
+
+    bars.nextMarkerButton = iconButton(bar, app::icons::Glyph::MarkerAhead,
+                                       keyedTip(QStringLiteral("Go to the next marker"),
+                                                router.keymap().shortcutFor("next-marker")));
+    bars.nextMarkerButton->setObjectName("timeline-next-marker");
+    runs(bars.nextMarkerButton, router, "next-marker");
+    row->addWidget(bars.nextMarkerButton);
 
     row->addStretch(1);
 

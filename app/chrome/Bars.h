@@ -68,6 +68,10 @@ struct Bars {
     /// The timeline pane's own strip: the tools, snapping and zoom.
     QLabel* timelineLabel{nullptr};
     QPushButton* snapButton{nullptr};
+    /// Either side of the add-marker button; disabled when there is no marker
+    /// that way from the playhead.
+    QPushButton* previousMarkerButton{nullptr};
+    QPushButton* nextMarkerButton{nullptr};
     QSlider* zoomSlider{nullptr};
     /// How tall the rows are drawn, all of them together.
     QSlider* rowHeightSlider{nullptr};
