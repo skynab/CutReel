@@ -433,6 +433,9 @@ struct GpuCompositor::State {
     /// adopted this stays null and `rhi` points at someone else's.
     std::unique_ptr<QRhi> ownedRhi;
     QRhi* rhi{nullptr};
+    /// A cached frame expanded to float, for a device that cannot sample
+    /// RGBA16F. Kept so the fallback does not allocate a frame per frame.
+    render::RgbaImage expandedCache;
 
     // Presenting into an external target needs its own pipeline, because a
     // pipeline is tied to the render pass it was built for.
@@ -810,12 +813,39 @@ Status GpuCompositor::draw(const render::RgbaImage& source, const model::Transfo
                            float lutAmount, const model::Mask* mask,
                            const render::KeyerConstants* keyer, const model::Vignette* vignette,
                            const model::Mask* wipe, const render::ColorCurveTable* hue) {
+    if (!source.isValid()) {
+        return Error{ErrorCode::InvalidData, "cannot draw an invalid image"};
+    }
+    return drawPixels(Pixels{source.row(0), source.width(), source.height(), false}, transform,
+                      blend, grade, curves, secondary, lut, lutAmount, mask, keyer, vignette, wipe,
+                      hue);
+}
+
+Status GpuCompositor::drawCached(const render::HalfImage& frame) {
+    State& state = *state_;
+    if (!frame.isValid()) {
+        return Error{ErrorCode::InvalidData, "cannot draw an invalid image"};
+    }
+    if (!state.rhi->isTextureFormatSupported(QRhiTexture::RGBA16F)) {
+        frame.expandInto(state.expandedCache);
+        return draw(state.expandedCache, model::Transform{});
+    }
+    return drawPixels(Pixels{frame.data(), frame.width(), frame.height(), true}, model::Transform{},
+                      BlendMode::Normal, {}, nullptr, nullptr, nullptr, 1.0F, nullptr, nullptr,
+                      nullptr, nullptr, nullptr);
+}
+
+Status GpuCompositor::drawPixels(const Pixels& source, const model::Transform& transform,
+                                 BlendMode blend, const render::GradeConstants& grade,
+                                 const render::CurveTable* curves,
+                                 const render::SecondaryConstants* secondary,
+                                 const render::LutTable* lut, float lutAmount,
+                                 const model::Mask* mask, const render::KeyerConstants* keyer,
+                                 const model::Vignette* vignette, const model::Mask* wipe,
+                                 const render::ColorCurveTable* hue) {
     State& state = *state_;
     if (!state.inFrame) {
         return Error{ErrorCode::Internal, "draw outside a frame"};
-    }
-    if (!source.isValid()) {
-        return Error{ErrorCode::InvalidData, "cannot draw an invalid image"};
     }
     if (transform.opacity <= 0.0 || transform.scaleX == 0.0 || transform.scaleY == 0.0) {
         return {};
@@ -827,17 +857,20 @@ Status GpuCompositor::draw(const render::RgbaImage& source, const model::Transfo
     }
 
     // Upload the source. RGBA32F straight from the working space, so nothing is
-    // quantised on the way to the GPU.
-    auto texture = std::unique_ptr<QRhiTexture>(
-        state.rhi->newTexture(QRhiTexture::RGBA32F, QSize(source.width(), source.height()), 1,
-                              QRhiTexture::UsedAsTransferSource));
+    // quantised on the way to the GPU -- or RGBA16F for a cached frame, which
+    // was quantised once already when it was stored.
+    auto texture = std::unique_ptr<QRhiTexture>(state.rhi->newTexture(
+        source.half ? QRhiTexture::RGBA16F : QRhiTexture::RGBA32F,
+        QSize(source.width, source.height), 1, QRhiTexture::UsedAsTransferSource));
     if (!texture->create()) {
         return Error{ErrorCode::Internal, "cannot allocate a source texture"};
     }
 
-    QImage staging(reinterpret_cast<const uchar*>(source.row(0)), source.width(), source.height(),
-                   source.width() * static_cast<int>(sizeof(render::Rgba)),
-                   QImage::Format_RGBA32FPx4);
+    const int pixelBytes = source.half ? 4 * static_cast<int>(sizeof(std::uint16_t))
+                                       : static_cast<int>(sizeof(render::Rgba));
+    QImage staging(static_cast<const uchar*>(source.data), source.width, source.height,
+                   source.width * pixelBytes,
+                   source.half ? QImage::Format_RGBA16FPx4 : QImage::Format_RGBA32FPx4);
     QRhiTextureSubresourceUploadDescription upload(staging.copy());
     QRhiTextureUploadDescription description({0, 0, upload});
 
@@ -855,8 +888,7 @@ Status GpuCompositor::draw(const render::RgbaImage& source, const model::Transfo
     matrix.scale(static_cast<float>(transform.scaleX), static_cast<float>(transform.scaleY));
     matrix.translate(static_cast<float>(-transform.anchorX),
                      static_cast<float>(-transform.anchorY));
-    matrix.scale(0.5F * static_cast<float>(source.width()),
-                 0.5F * static_cast<float>(source.height()));
+    matrix.scale(0.5F * static_cast<float>(source.width), 0.5F * static_cast<float>(source.height));
 
     auto uniforms = std::unique_ptr<QRhiBuffer>(
         state.rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, kUniformBytes));

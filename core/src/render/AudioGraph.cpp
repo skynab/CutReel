@@ -277,8 +277,19 @@ Result<media::AudioBuffer> AudioGraph::mix(const model::Sequence& sequence,
             //
             // Once per sample, not once per sample per channel: the curve does
             // not know which speaker it is feeding.
-            const bool automated = clip.animation.find(model::Param::GainDb) != nullptr ||
-                                   clip.animation.find(model::Param::Pan) != nullptr;
+            //
+            // But not *evaluated* per sample. Reading a curve is a rational
+            // rescale, a bisection and a pow, and doing that 48,000 times a
+            // second cost most of real time for one automated clip -- the mix
+            // fell behind the device, and playback drifted slower and slower.
+            // The curves are read at control points a fixed stride apart and
+            // the gains interpolated between them, which is still a new value
+            // every sample. The points sit on multiples of the stride in
+            // absolute timeline samples, so where a block starts decides
+            // nothing and the result stays independent of the device.
+            const bool gainAutomated = clip.animation.find(model::Param::GainDb) != nullptr;
+            const bool panAutomated = clip.animation.find(model::Param::Pan) != nullptr;
+            const bool automated = gainAutomated || panAutomated;
             // A crossfade is a gain that moves too, so it takes the same
             // per-sample path rather than a second one of its own. Equal power
             // -- cos and sin of a quarter turn -- because two takes of the same
@@ -292,29 +303,53 @@ Result<media::AudioBuffer> AudioGraph::mix(const model::Sequence& sequence,
                 leftPan.resize(static_cast<std::size_t>(available));
                 rightPan.resize(static_cast<std::size_t>(available));
                 const double quarterTurn = std::acos(-1.0) * 0.5;
-                for (std::int64_t i = 0; i < available; ++i) {
-                    const time::RationalTime when{overlap->start().frames() + i, rate};
-                    float gain = automated ? gainFromDb(clip.gainDbAt(when)) : clipGain;
-                    float left = clipLeft;
-                    float right = clipRight;
-                    if (automated) {
+                struct ControlPoint {
+                    float gain;
+                    float left;
+                    float right;
+                };
+                const auto controlAt = [&](std::int64_t sample) {
+                    const time::RationalTime when{sample, rate};
+                    ControlPoint point{gainAutomated ? gainFromDb(clip.gainDbAt(when)) : clipGain,
+                                       clipLeft, clipRight};
+                    if (panAutomated) {
                         if (sourceChannels == 1) {
-                            panGains(clip.panAt(when), left, right);
+                            panGains(clip.panAt(when), point.left, point.right);
                         } else {
-                            balanceGains(clip.panAt(when), left, right);
+                            balanceGains(clip.panAt(when), point.left, point.right);
                         }
                     }
                     if (fadingOut != nullptr) {
-                        gain *=
+                        point.gain *=
                             static_cast<float>(std::cos(fadingOut->progressAt(when) * quarterTurn));
                     }
                     if (fadingIn != nullptr) {
-                        gain *=
+                        point.gain *=
                             static_cast<float>(std::sin(fadingIn->progressAt(when) * quarterTurn));
                     }
-                    clipGains[static_cast<std::size_t>(i)] = gain;
-                    leftPan[static_cast<std::size_t>(i)] = left;
-                    rightPan[static_cast<std::size_t>(i)] = right;
+                    return point;
+                };
+
+                // Two thirds of a millisecond at 48kHz: far too short to hear
+                // as steps, and a power of two so the fraction below is exact.
+                constexpr std::int64_t kStride = 32;
+                constexpr float kInverseStride = 1.0F / static_cast<float>(kStride);
+                const std::int64_t first = overlap->start().frames();
+                std::int64_t segment = first - (((first % kStride) + kStride) % kStride);
+                ControlPoint from = controlAt(segment);
+                ControlPoint to = controlAt(segment + kStride);
+                for (std::int64_t i = 0; i < available; ++i) {
+                    const std::int64_t sample = first + i;
+                    if (sample >= segment + kStride) {
+                        segment += kStride;
+                        from = to;
+                        to = controlAt(segment + kStride);
+                    }
+                    const float t = static_cast<float>(sample - segment) * kInverseStride;
+                    const auto at = static_cast<std::size_t>(i);
+                    clipGains[at] = from.gain + ((to.gain - from.gain) * t);
+                    leftPan[at] = from.left + ((to.left - from.left) * t);
+                    rightPan[at] = from.right + ((to.right - from.right) * t);
                 }
             }
 

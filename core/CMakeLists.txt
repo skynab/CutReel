@@ -82,6 +82,7 @@ add_library(zaro_core
     src/render/TransitionShape.cpp
     src/render/VideoWalk.cpp
     src/render/RgbaImage.cpp
+    src/render/HalfImage.cpp
     src/model/Animation.cpp
     src/model/Caption.cpp
     src/model/AudioRole.cpp

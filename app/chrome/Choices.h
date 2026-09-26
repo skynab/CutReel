@@ -34,10 +34,14 @@ enum class MulticamChoice { None, ByTimecode, ByAudio };
 /// and one that hides the thing somebody came for teaches nothing.
 MulticamChoice multicamMenu(bool isMulticam, bool hasMedia);
 
-enum class RenderChoice { None, RenderVisible, ClearCache };
+enum class RenderChoice { None, RenderVisible, RenderSequence, ClearCache };
 
-RenderChoice renderMenu(std::int64_t visibleFrames, std::size_t cachedFrames,
-                        std::size_t cachedBytes);
+/// `frameBytes` is what one cached frame costs, so the menu can say how much
+/// timeline the cache holds -- the figure that decides whether a render will
+/// still be there by the time the playhead reaches the end of it.
+RenderChoice renderMenu(std::int64_t visibleFrames, std::int64_t sequenceFrames,
+                        std::size_t cachedFrames, std::size_t cachedBytes, std::size_t budgetBytes,
+                        std::size_t frameBytes, double framesPerSecond);
 
 enum class CaptionChoice { None, Import, Export, ToggleBurnIn };
 

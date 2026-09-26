@@ -9,6 +9,7 @@
 #include "zaro/core/Error.h"
 #include "zaro/core/model/Project.h"
 #include "zaro/core/model/Sequence.h"
+#include "zaro/core/render/HalfImage.h"
 #include "zaro/core/render/RgbaImage.h"
 #include "zaro/core/time/TimeRange.h"
 
@@ -47,6 +48,9 @@ class RenderGraph;
 /// decode, this one saves the whole graph -- every grade, mask, transition and
 /// nested sequence above it. On a heavy stack the decode is the cheap part.
 ///
+/// Kept at half precision (see HalfImage), which doubles how much timeline fits
+/// in the same memory and is what the monitor uploads during playback.
+///
 /// In memory, not on disk. A disk cache buys survival across sessions and
 /// costs an encode, a codec choice, a directory to manage and a garbage
 /// collection policy; none of that is needed to make a graded stack play back,
@@ -64,7 +68,7 @@ public:
     /// What was rendered, and what it cost to render -- so a frame served from
     /// here reports the same diagnostics as one that was just composited.
     struct Entry {
-        const RgbaImage* image;
+        const HalfImage* image;
         std::int32_t clipCount;
         std::int32_t skippedText;
     };
@@ -81,8 +85,9 @@ public:
     [[nodiscard]] bool contains(model::SequenceId sequence, const time::RationalTime& at,
                                 std::uint64_t recipe) const;
 
+    /// Packed to half precision on the way in, so the caller keeps `frame`.
     void insert(model::SequenceId sequence, const time::RationalTime& at, std::uint64_t recipe,
-                RgbaImage frame, std::int32_t clipCount, std::int32_t skippedText);
+                const RgbaImage& frame, std::int32_t clipCount, std::int32_t skippedText);
 
     void clear();
     /// Drop everything belonging to one sequence, for when it is closed.
@@ -116,7 +121,7 @@ private:
     struct Record {
         Key key;
         std::uint64_t recipe;
-        RgbaImage image;
+        HalfImage image;
         std::int32_t clipCount;
         std::int32_t skippedText;
     };

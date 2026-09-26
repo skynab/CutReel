@@ -318,7 +318,7 @@ Status RenderGraph::compositeInto(const model::Sequence& sequence, const time::R
         recipe = frameRecipe(project_, sequence, at);
         if (const RenderCache::Entry hit = cache_->find(sequence.id(), at, recipe);
             hit.image != nullptr) {
-            out = hit.image->clone();
+            hit.image->expandInto(out);
             // The counters describe the frame, not the work: a cached frame
             // still had three clips on it, and a caller showing "3 layers"
             // must not have it flicker to zero when the cache answers.
@@ -350,7 +350,7 @@ Status RenderGraph::compositeInto(const model::Sequence& sequence, const time::R
     walkVideo(sequence, at, sink);
 
     if (cacheable) {
-        cache_->insert(sequence.id(), at, recipe, out.clone(), lastClipCount_, skippedText_);
+        cache_->insert(sequence.id(), at, recipe, out, lastClipCount_, skippedText_);
     }
     return {};
 }

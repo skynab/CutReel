@@ -43,11 +43,12 @@ public:
     /// How to draw text. Set by whoever owns a font engine.
     void setTextRasterizer(render::TextRasterizer* rasterizer) { text_ = rasterizer; }
 
-    /// Where the CPU fallback memoises its frames.
+    /// Where rendered-ahead frames are kept.
     ///
-    /// The GPU path never reads this, and does not need to: it is already fast.
-    /// What is slow is the whole-frame CPU composite an adjustment layer
-    /// forces, and that is what a cached frame replaces.
+    /// Read first on every frame: a current cached frame is drawn as it is,
+    /// which is what makes a pre-rendered range play smoothly. The CPU fallback
+    /// an adjustment layer forces also memoises into it, so a heavy stack is
+    /// slow once rather than every time.
     void setRenderCache(render::RenderCache* cache) {
         cache_ = cache;
         if (nested_ != nullptr) {

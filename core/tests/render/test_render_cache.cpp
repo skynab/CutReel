@@ -154,6 +154,20 @@ TEST_CASE("Turning proxies on invalidates every frame", "[render][cache]") {
     CHECK(f.recipe(10) != was);
 }
 
+TEST_CASE("The output curve is part of the recipe", "[render][cache]") {
+    // Grades, LUTs and curve tables are all built against it, and it lives on
+    // the sequence rather than on any clip -- so switching a delivery to PQ
+    // used to leave every cached frame looking current.
+    CacheFixture f;
+    REQUIRE(f.run(edit::makeOverwrite(f.project, f.on(f.v1), f.clip(0, 100))));
+    const std::uint64_t was = f.recipe(10);
+
+    model::Sequence::Output output = f.sequence().output();
+    output.transfer = media::TransferFunction::PQ;
+    f.sequence().setOutput(output);
+    CHECK(f.recipe(10) != was);
+}
+
 TEST_CASE("A nested sequence's contents are part of the outer recipe", "[render][cache]") {
     CacheFixture f;
     model::Sequence inner{f.project.ids().next<model::SequenceTag>(), "inner", time::rates::fps25};

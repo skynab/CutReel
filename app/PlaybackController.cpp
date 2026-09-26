@@ -194,8 +194,20 @@ void PlaybackController::pumpAudio() {
     // sound of it.
     bool deviceStarted = false;
     bool warnedUnreadable = false;
+    std::int64_t underrunSeen = sink_->underrunFrames();
 
     while (audioRunning_.load(std::memory_order_relaxed)) {
+        // Silence the device played because the ring ran dry is time that
+        // passed on the clock with nothing of ours in it. Everything written
+        // afterwards is heard that much later than it was mixed for, so unless
+        // the mix position skips the gap too, sound falls behind picture by
+        // every underrun there has been -- a mix that cannot quite keep up then
+        // sounds like playback slowing down. A skip is a click; drift is the
+        // whole rest of the run.
+        const std::int64_t underrun = sink_->underrunFrames();
+        audioWritten_ += underrun - underrunSeen;
+        underrunSeen = underrun;
+
         const std::int64_t lead =
             static_cast<std::int64_t>(sink_->deviceBufferFrames()) * kLeadBuffers;
         const std::int64_t target = sink_->clockFrames() + lead;

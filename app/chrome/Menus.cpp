@@ -137,6 +137,8 @@ QMenuBar* buildMenuBar(QWidget* parent, ActionRouter& router, const QStringList&
     addItem(router, sequence, "delivery");
     sequence->addSeparator();
     addItem(router, sequence, "render-range");
+    addItem(router, sequence, "render-visible");
+    addItem(router, sequence, "render-sequence");
     addItem(router, sequence, "loudness");
 
     QMenu* text = bar->addMenu("Text");

@@ -29,17 +29,30 @@ MulticamChoice multicamMenu(bool isMulticam, bool hasMedia) {
     return chosen == byAudio ? MulticamChoice::ByAudio : MulticamChoice::ByTimecode;
 }
 
-RenderChoice renderMenu(std::int64_t visibleFrames, std::size_t cachedFrames,
-                        std::size_t cachedBytes) {
+RenderChoice renderMenu(std::int64_t visibleFrames, std::int64_t sequenceFrames,
+                        std::size_t cachedFrames, std::size_t cachedBytes, std::size_t budgetBytes,
+                        std::size_t frameBytes, double framesPerSecond) {
     QMenu menu;
     QAction* render =
         menu.addAction(QString("Render the visible range (%1 frames)").arg(visibleFrames));
     render->setEnabled(visibleFrames > 0);
+    QAction* whole =
+        menu.addAction(QString("Render the whole sequence (%1 frames)").arg(sequenceFrames));
+    whole->setEnabled(sequenceFrames > 0);
     QAction* clear = menu.addAction("Clear the render cache");
     menu.addSeparator();
-    menu.addAction(
-            QString("%1 frames cached, %2 MB").arg(cachedFrames).arg(cachedBytes / (1024 * 1024)))
+    constexpr std::size_t kMiB = 1024U * 1024U;
+    menu.addAction(QString("%1 frames cached, %2 of %3 MB")
+                       .arg(cachedFrames)
+                       .arg(cachedBytes / kMiB)
+                       .arg(budgetBytes / kMiB))
         ->setEnabled(false);
+    if (frameBytes > 0 && framesPerSecond > 0.0) {
+        const double seconds = static_cast<double>(budgetBytes / frameBytes) / framesPerSecond;
+        menu.addAction(
+                QString("Room for about %1 seconds at this frame size").arg(seconds, 0, 'f', 0))
+            ->setEnabled(false);
+    }
 
     QAction* chosen = menu.exec(QCursor::pos());
     if (chosen == clear) {
@@ -47,6 +60,9 @@ RenderChoice renderMenu(std::int64_t visibleFrames, std::size_t cachedFrames,
     }
     if (chosen == render) {
         return RenderChoice::RenderVisible;
+    }
+    if (chosen == whole) {
+        return RenderChoice::RenderSequence;
     }
     return RenderChoice::None;
 }

@@ -86,6 +86,8 @@ void mixClip(std::uint64_t& hash, const model::Project* project, const model::Se
             return;
         }
         const time::RationalTime innerAt = clip.sourceTimeAt(at);
+        // A nest composites through its own output curve, not its parent's.
+        mix(hash, static_cast<std::uint64_t>(inner->output().transfer));
         for (const model::Track& track : inner->videoTracks()) {
             mixTrack(hash, project, *inner, track, innerAt, depth + 1);
         }
@@ -109,6 +111,10 @@ std::uint64_t frameRecipe(const model::Project* project, const model::Sequence& 
     // Not part of any clip: it decides which of two files every clip in the
     // project reads, and a frame rendered from proxies is not the frame.
     mix(hash, project != nullptr && project->usingProxies() ? 1ULL : 0ULL);
+    // The curve every grade, LUT and curve table is built against. It is not in
+    // any clip, and it went unnoticed only because every edit used to empty the
+    // cache wholesale.
+    mix(hash, static_cast<std::uint64_t>(sequence.output().transfer));
 
     for (const model::Track& track : sequence.videoTracks()) {
         mixTrack(hash, project, sequence, track, at, 0);
@@ -165,10 +171,11 @@ bool RenderCache::contains(model::SequenceId sequence, const time::RationalTime&
 }
 
 void RenderCache::insert(model::SequenceId sequence, const time::RationalTime& at,
-                         std::uint64_t recipe, RgbaImage frame, std::int32_t clipCount,
+                         std::uint64_t recipe, const RgbaImage& frame, std::int32_t clipCount,
                          std::int32_t skippedText) {
     const Key key{sequence.value(), at.frames(), at.rate().num(), at.rate().den()};
-    const std::size_t bytes = frame.byteSize();
+    HalfImage packed{frame};
+    const std::size_t bytes = packed.byteSize();
 
     if (const auto existing = index_.find(key); existing != index_.end()) {
         byteSize_ -= existing->second->image.byteSize();
@@ -179,7 +186,7 @@ void RenderCache::insert(model::SequenceId sequence, const time::RationalTime& a
         return;
     }
 
-    entries_.push_front(Record{key, recipe, std::move(frame), clipCount, skippedText});
+    entries_.push_front(Record{key, recipe, std::move(packed), clipCount, skippedText});
     index_[key] = entries_.begin();
     byteSize_ += bytes;
     evictUntilWithinBudget();
@@ -251,7 +258,7 @@ Result<PrerenderStats> prerender(RenderGraph& graph, RenderCache& cache,
             // playback rather than stopping it.
             continue;
         }
-        cache.insert(sequence.id(), at, recipe, frame.clone(), graph.lastClipCount(),
+        cache.insert(sequence.id(), at, recipe, frame, graph.lastClipCount(),
                      graph.lastSkippedTextCount());
         ++stats.rendered;
     }

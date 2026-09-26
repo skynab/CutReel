@@ -60,6 +60,7 @@ add_library(zaro_app_ui STATIC
     MixerPanel.cpp
     MixerPanel.h
     PlaybackController.cpp
+    SystemMemory.cpp
     PlaybackController.h
     PreviewWindow.cpp
     PreviewWindow.h

@@ -71,6 +71,7 @@
 #include "ProjectBin.h"
 #include "ScopesPanel.h"
 #include "StemsPanel.h"
+#include "SystemMemory.h"
 #include "ThumbnailCache.h"
 #include "TimelineWidget.h"
 #include "TitleOverlay.h"
@@ -79,6 +80,12 @@
 
 namespace zaro::app {
 namespace {
+
+/// What one frame of this sequence costs in the render cache.
+std::size_t cachedFrameBytes(const model::Sequence& sequence) {
+    return static_cast<std::size_t>(std::max(0, sequence.width())) *
+           static_cast<std::size_t>(std::max(0, sequence.height())) * 4 * sizeof(std::uint16_t);
+}
 
 QString appName() {
     return QString::fromUtf8(kAppName.data(), static_cast<qsizetype>(kAppName.size()));
@@ -210,6 +217,7 @@ PreviewWindow::PreviewWindow(model::Project project, io::LoadedProject loaded, s
     // marks it so.
     document_.adopt(std::move(project), std::move(loaded), std::move(path));
     sequenceId_ = document_.project().activeSequence();
+    renderCache_.setBudgetBytes(app::renderCacheBudgetBytes());
 
     createPanels();
 
@@ -1666,13 +1674,18 @@ void PreviewWindow::renderMenu() {
     }
     const time::TimeRange visible = timeline_->layout().visibleRange(sequence->frameRate());
     switch (chrome::renderMenu(visible.isEmpty() ? 0 : visible.duration().frames(),
-                               renderCache_.count(), renderCache_.byteSize())) {
+                               sequence->duration().frames(), renderCache_.count(),
+                               renderCache_.byteSize(), renderCache_.budgetBytes(),
+                               cachedFrameBytes(*sequence), sequence->frameRate().toDouble())) {
         case chrome::RenderChoice::ClearCache:
             renderCache_.clear();
             updateCacheBar();
             break;
         case chrome::RenderChoice::RenderVisible:
             renderVisibleRange();
+            break;
+        case chrome::RenderChoice::RenderSequence:
+            renderWholeSequence();
             break;
         case chrome::RenderChoice::None:
             break;
@@ -1872,7 +1885,12 @@ commands::Context PreviewWindow::editContext() {
 
 void PreviewWindow::afterEdit() {
     document_.commands().breakMerge();
-    renderCache_.clear();
+    // The cache is not emptied here. Every cached frame carries the recipe it
+    // was made from, so an edit makes stale exactly the frames it touches and
+    // no others -- which is what lets a render survive a trim at the other end
+    // of the timeline. Emptying it here threw every render away the moment
+    // anything at all was changed.
+    updateCacheBar();
     monitor_->update();
     timeline_->update();
     effects_->refresh();
@@ -2204,7 +2222,6 @@ void PreviewWindow::pasteAtPlayhead() {
     }
     document_.commands().execute(document_.project(), std::move(*built));
     document_.commands().breakMerge();
-    renderCache_.clear();
     afterEdit();
 }
 
@@ -2710,13 +2727,49 @@ void PreviewWindow::updateCacheBar() {
 
 void PreviewWindow::renderVisibleRange() {
     const model::Sequence* sequence = liveSequence();
-    if (sequence == nullptr || media_ == nullptr) {
+    if (sequence == nullptr) {
         return;
     }
-    const time::TimeRange visible = timeline_->layout().visibleRange(sequence->frameRate());
-    if (visible.isEmpty()) {
+    renderRange(timeline_->layout().visibleRange(sequence->frameRate()));
+}
+
+void PreviewWindow::renderWholeSequence() {
+    const model::Sequence* sequence = liveSequence();
+    if (sequence == nullptr) {
         return;
     }
+    renderRange(time::TimeRange{time::RationalTime{0, sequence->frameRate()},
+                                sequence->duration().rescaledTo(sequence->frameRate())});
+}
+
+void PreviewWindow::renderRange(const time::TimeRange& requested) {
+    const model::Sequence* sequence = liveSequence();
+    if (sequence == nullptr || media_ == nullptr || requested.isEmpty()) {
+        return;
+    }
+    // Clipped to the sequence: past the end is black, and caching black
+    // crowds out frames somebody is actually going to play.
+    const time::TimeRange whole{time::RationalTime{0, sequence->frameRate()},
+                                sequence->duration().rescaledTo(sequence->frameRate())};
+    const auto clipped = requested.rescaledTo(sequence->frameRate()).intersection(whole);
+    if (!clipped || clipped->isEmpty()) {
+        return;
+    }
+    // Never more than the cache holds. It is least recently used, so a render
+    // longer than the budget evicts its own beginning to make room for its end
+    // and then plays back choppy from the start -- all that time spent caching
+    // the half nobody reaches first.
+    const std::size_t frameBytes = cachedFrameBytes(*sequence);
+    const auto capacity =
+        static_cast<std::int64_t>(frameBytes > 0 ? renderCache_.budgetBytes() / frameBytes : 0);
+    if (capacity <= 0) {
+        return;
+    }
+    const bool truncated = clipped->duration().frames() > capacity;
+    const time::TimeRange visible =
+        truncated ? time::TimeRange{clipped->start(),
+                                    time::RationalTime{capacity, clipped->start().rate()}}
+                  : *clipped;
     QProgressDialog progress("Rendering…", "Cancel", 0,
                              static_cast<int>(visible.duration().frames()), this);
     progress.setWindowModality(Qt::WindowModal);
@@ -2740,6 +2793,13 @@ void PreviewWindow::renderVisibleRange() {
         return;
     }
     updateCacheBar();
+    if (truncated && !stats->cancelled) {
+        app::say(
+            this, "Render",
+            QString("The render cache holds about %1 seconds at this frame size, so only the "
+                    "first %1 seconds of the range were rendered.")
+                .arg(static_cast<double>(capacity) / sequence->frameRate().toDouble(), 0, 'f', 0));
+    }
 }
 
 Status PreviewWindow::openMedia() {
@@ -3003,6 +3063,8 @@ void PreviewWindow::bindCommands() {
     actions_.bind("razor", [this] { timeline_->razorAtPlayhead(); });
     actions_.bind("add-dissolve", [this] { timeline_->addDissolveAtPlayhead(); });
     actions_.bind("render-range", [this] { renderMenu(); });
+    actions_.bind("render-visible", [this] { renderVisibleRange(); });
+    actions_.bind("render-sequence", [this] { renderWholeSequence(); });
     // One binding per key, here, rather than a second copy in the timeline's
     // own key handler. Bound on the window so they work wherever the focus is:
     // Delete used to do nothing unless the timeline had been clicked first.

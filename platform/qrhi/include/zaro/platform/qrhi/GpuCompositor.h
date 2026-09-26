@@ -12,6 +12,7 @@
 #include "zaro/core/render/ColorCurveTable.h"
 #include "zaro/core/render/CurveTable.h"
 #include "zaro/core/render/Grade.h"
+#include "zaro/core/render/HalfImage.h"
 #include "zaro/core/render/Keyer.h"
 #include "zaro/core/render/RgbaImage.h"
 
@@ -74,6 +75,13 @@ public:
                               const model::Vignette* vignette = nullptr,
                               const model::Mask* wipe = nullptr,
                               const render::ColorCurveTable* hue = nullptr);
+
+    /// Draw a finished frame from the render cache, filling the target.
+    ///
+    /// Goes up at half precision, as it was stored: half the bandwidth of the
+    /// float path, and a cached frame plays back without being expanded first.
+    /// Devices that cannot sample RGBA16F get it expanded instead.
+    [[nodiscard]] Status drawCached(const render::HalfImage& frame);
 
     /// Composite a decoded frame directly, converting Y'CbCr to the working
     /// space in the same shader pass.
@@ -141,6 +149,24 @@ private:
 
     /// Replay the frame's recorded draws inside a single render pass.
     void submitPass();
+
+    /// Pixels in the working space, at either precision the upload takes.
+    struct Pixels {
+        const void* data;
+        std::int32_t width;
+        std::int32_t height;
+        bool half;
+    };
+
+    /// What `draw` and `drawCached` share: upload, then composite.
+    [[nodiscard]] Status drawPixels(const Pixels& source, const model::Transform& transform,
+                                    model::BlendMode blend, const render::GradeConstants& grade,
+                                    const render::CurveTable* curves,
+                                    const render::SecondaryConstants* secondary,
+                                    const render::LutTable* lut, float lutAmount,
+                                    const model::Mask* mask, const render::KeyerConstants* keyer,
+                                    const model::Vignette* vignette, const model::Mask* wipe,
+                                    const render::ColorCurveTable* hue);
 
     /// Build the compositing pipeline for a blend mode, once.
     [[nodiscard]] Status ensureCompositePipeline(std::size_t blendIndex);

@@ -17,6 +17,7 @@
 #include "zaro/core/model/Mask.h"
 #include "zaro/core/render/ColorPipeline.h"
 #include "zaro/core/render/Compositing.h"
+#include "zaro/core/render/RenderCache.h"
 #include "zaro/core/render/RenderGraph.h"
 #include "zaro/core/render/ToneMap.h"
 #include "zaro/core/render/TransitionShape.h"
@@ -966,6 +967,51 @@ TEST_CASE("The GPU and CPU render graphs agree across a dissolve", "[gpu][golden
         CHECK(difference.mean < 0.02F);
         CHECK(difference.worst < 0.05F);
     }
+}
+
+TEST_CASE("The GPU graph plays a pre-rendered frame instead of decoding", "[gpu][cache]") {
+    // The regression this guards: the render cache was filled by the Render
+    // menu and read only by the CPU fallback, so the monitor -- which is the
+    // GPU graph -- decoded and composited every frame live regardless, and a
+    // pre-render made no difference whatever to playback.
+    auto compositor = gpu();
+    if (!compositor) {
+        SKIP("no GPU backend on this machine");
+    }
+    INFO("backend: " << compositor->backendName());
+
+    zaro::testing::Fixture f;
+    f.sequence().setSize(16, 16);
+    REQUIRE(
+        f.run(zaro::edit::makeOverwrite(f.project, f.on(f.v1), f.clip(0, 50, 500, f.longMedia))));
+
+    SolidSourceProvider provider;
+    provider.define(f.longMedia, 60);
+    zaro::render::RenderCache cache;
+    zaro::platform::qrhi::GpuRenderGraph graph{*compositor, provider};
+    graph.setProject(&f.project);
+    graph.setRenderCache(&cache);
+
+    // A frame nothing on the timeline could have produced, so drawing it can
+    // only mean it came from the cache.
+    const auto at = f.at(10);
+    const Rgba marker{0.25F, 0.0F, 2.0F, 1.0F};
+    cache.insert(f.sequence().id(), at, zaro::render::frameRecipe(&f.project, f.sequence(), at),
+                 filled(16, 16, marker), 1, 0);
+
+    RgbaImage shown;
+    ZARO_REQUIRE_OK(graph.compositeInto(f.sequence(), at, shown));
+    CHECK(provider.requests.empty());
+    CHECK(shown.at(8, 8).r == Approx(marker.r).margin(1e-3));
+    CHECK(shown.at(8, 8).b == Approx(marker.b).margin(1e-3));
+    CHECK(graph.lastClipCount() == 1);
+
+    // After an edit that reaches this frame the render is stale, and the
+    // picture is composited live again rather than served out of date.
+    f.project.setUsingProxies(true);
+    ZARO_REQUIRE_OK(graph.compositeInto(f.sequence(), at, shown));
+    CHECK_FALSE(provider.requests.empty());
+    CHECK(shown.at(8, 8).b != Approx(marker.b).margin(1e-3));
 }
 
 TEST_CASE("The GPU grade agrees with the CPU reference", "[gpu][golden][grade]") {

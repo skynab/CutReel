@@ -646,9 +646,12 @@ public:
     /// hash the whole timeline on every repaint.
     void updateCacheBar();
 
-    /// The work behind the menu entry, separated from the menu so that it can
-    /// be driven without one.
+    /// The work behind the menu entries, separated from the menu so that they
+    /// can be driven without one.
     void renderVisibleRange();
+    void renderWholeSequence();
+    /// Render `range` into the cache -- as much of it as the cache can hold.
+    void renderRange(const time::TimeRange& range);
 
     Status openMedia();
 

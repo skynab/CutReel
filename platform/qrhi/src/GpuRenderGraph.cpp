@@ -242,6 +242,22 @@ private:
 Status GpuRenderGraph::drawClips(const model::Sequence& sequence, const time::RationalTime& at) {
     lastClipCount_ = 0;
 
+    // A frame somebody rendered ahead is the whole point of rendering ahead:
+    // served here it costs one upload, where compositing it live costs a decode
+    // per layer on the thread that is drawing the playhead. Checked against the
+    // recipe like every other cache hit, so an edit since the render is simply
+    // a miss and the frame is composited live as before. Not even asked while
+    // the cache is empty: the recipe hashes every clip on the frame, and that
+    // is a cost nobody who has not rendered anything should pay per frame.
+    if (cache_ != nullptr && cache_->count() > 0) {
+        const std::uint64_t recipe = render::frameRecipe(project_, sequence, at);
+        if (const render::RenderCache::Entry hit = cache_->find(sequence.id(), at, recipe);
+            hit.image != nullptr) {
+            lastClipCount_ = hit.clipCount;
+            return compositor_->drawCached(*hit.image);
+        }
+    }
+
     // Two things this compositor cannot do in its one queued pass: an
     // adjustment layer, which needs the accumulated frame read back and
     // corrected, and an effect, which needs to read a pixel's neighbours rather
